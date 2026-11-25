@@ -14,6 +14,11 @@ enum AppInfo {
     static let help = URL(string: "https://github.com/Fahed-Alhammadi/PDFoundry#readme")!
     static let feedback = URL(string: "https://github.com/Fahed-Alhammadi/PDFoundry/issues")!
     static let website = URL(string: "https://fahed-alhammadi.github.io/PDFoundry/")!
+    /// The website address as shown to the user: host and path, without the scheme or a trailing slash.
+    static var websiteDisplay: String {
+        let path = website.path().hasSuffix("/") ? String(website.path().dropLast()) : website.path()
+        return (website.host() ?? "") + path
+    }
     static let privacy = URL(string: "https://fahed-alhammadi.github.io/PDFoundry/privacy.html")!
     /// The App Store ID; the "Rate" row on About uses it.
     static let appStoreID: String? = "6839300028"

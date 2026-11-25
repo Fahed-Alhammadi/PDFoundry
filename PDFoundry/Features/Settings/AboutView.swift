@@ -18,7 +18,7 @@ struct AboutView: View {
             }
 
             Section {
-                LinkRow(title: "Website", symbol: "globe", detail: AppInfo.website.host(), url: AppInfo.website)
+                LinkRow(title: "Website", symbol: "globe", detail: AppInfo.websiteDisplay, url: AppInfo.website)
                 LinkRow(title: "Privacy Policy", symbol: "hand.raised", url: AppInfo.privacy)
             } footer: {
                 Text("Open source under the MIT License.")

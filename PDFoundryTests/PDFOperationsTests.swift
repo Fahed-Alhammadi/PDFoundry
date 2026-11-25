@@ -81,6 +81,10 @@ struct PDFOperationsTests {
         #expect(pixel.red > 200 && pixel.green < 80 && pixel.blue < 80, "The stamped image should be painted into the saved page")
     }
 
+    @Test func aboutShowsTheFullWebsiteAddress() {
+        #expect(AppInfo.websiteDisplay == "fahed-alhammadi.github.io/PDFoundry")
+    }
+
     @Test func libraryNamesNeverCollideOrEscapeTheFolder() async throws {
         let store = DocumentStore(directory: folder)
         let first = try makePDF(named: "Report", pages: 1)
