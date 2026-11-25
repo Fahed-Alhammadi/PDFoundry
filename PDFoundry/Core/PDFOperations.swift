@@ -1,0 +1,173 @@
+import PDFKit
+import UIKit
+
+enum PDFoundryError: LocalizedError {
+    case unreadable(String)
+    case locked(String)
+    case writeFailed
+    case nothingToSave
+
+    var errorDescription: String? {
+        switch self {
+        case .unreadable(let name): "“\(name)” could not be opened. The file may be damaged."
+        case .locked(let name): "“\(name)” is password protected. Open it and unlock it first."
+        case .writeFailed: "The PDF could not be saved. Check that the device has free storage."
+        case .nothingToSave: "There are no pages to save."
+        }
+    }
+}
+
+/// A stamp annotation that paints an image (a signature or a freehand drawing) onto a page.
+/// PDFKit bakes the drawing into the annotation's appearance stream when the document is written.
+nonisolated final class ImageStampAnnotation: PDFAnnotation {
+    private let cgImage: CGImage?
+
+    init(image: CGImage, bounds: CGRect) {
+        cgImage = image
+        super.init(bounds: bounds, forType: .stamp, withProperties: nil)
+    }
+
+    required init?(coder: NSCoder) {
+        cgImage = nil
+        super.init(coder: coder)
+    }
+
+    override func draw(with box: PDFDisplayBox, in context: CGContext) {
+        guard let cgImage else {
+            super.draw(with: box, in: context)
+            return
+        }
+        context.saveGState()
+        context.interpolationQuality = .high
+        context.draw(cgImage, in: bounds)
+        context.restoreGState()
+    }
+}
+
+enum PDFOperations {
+    /// Joins the given files, in order, into one new document.
+    static func merge(_ urls: [URL]) throws -> PDFDocument {
+        let merged = PDFDocument()
+        for url in urls {
+            let name = url.deletingPathExtension().lastPathComponent
+            guard let source = PDFDocument(url: url) else { throw PDFoundryError.unreadable(name) }
+            guard !source.isLocked else { throw PDFoundryError.locked(name) }
+            for index in 0..<source.pageCount {
+                guard let page = source.page(at: index)?.copy() as? PDFPage else { continue }
+                merged.insert(page, at: merged.pageCount)
+            }
+        }
+        guard merged.pageCount > 0 else { throw PDFoundryError.nothingToSave }
+        return merged
+    }
+
+    /// Copies the pages at `indexes` into a new document.
+    static func extract(_ indexes: [Int], from document: PDFDocument) throws -> PDFDocument {
+        let result = PDFDocument()
+        for index in indexes.sorted() where index >= 0 && index < document.pageCount {
+            guard let page = document.page(at: index)?.copy() as? PDFPage else { continue }
+            result.insert(page, at: result.pageCount)
+        }
+        guard result.pageCount > 0 else { throw PDFoundryError.nothingToSave }
+        return result
+    }
+
+    /// Builds a document with one page per image (scans or photos).
+    static func document(from images: [UIImage]) throws -> PDFDocument {
+        let result = PDFDocument()
+        for image in images {
+            guard let page = PDFPage(image: image) else { continue }
+            result.insert(page, at: result.pageCount)
+        }
+        guard result.pageCount > 0 else { throw PDFoundryError.nothingToSave }
+        return result
+    }
+
+    /// Stamps `image` onto `page`. `bounds` is in page space; the image is counter-rotated
+    /// so it appears upright on pages that carry a rotation.
+    @discardableResult
+    static func stamp(_ image: UIImage, on page: PDFPage, bounds: CGRect) -> PDFAnnotation? {
+        let upright = image.rotatedCounterClockwise(degrees: page.rotation)
+        guard let cgImage = upright.cgImage else { return nil }
+        let annotation = ImageStampAnnotation(image: cgImage, bounds: bounds)
+        page.addAnnotation(annotation)
+        return annotation
+    }
+
+    /// The short guide placed in the library on first launch.
+    static func welcomeGuide() -> Data {
+        let pageRect = CGRect(x: 0, y: 0, width: 612, height: 792)
+        let renderer = UIGraphicsPDFRenderer(bounds: pageRect)
+        let ink = UIColor(red: 0.07, green: 0.08, blue: 0.11, alpha: 1)
+        let ember = UIColor(red: 0.886, green: 0.318, blue: 0.106, alpha: 1)
+
+        func draw(_ text: String, font: UIFont, color: UIColor, in rect: CGRect, spacing: CGFloat = 4) {
+            let style = NSMutableParagraphStyle()
+            style.lineSpacing = spacing
+            NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: color, .paragraphStyle: style])
+                .draw(in: rect)
+        }
+
+        return renderer.pdfData { context in
+            // Page 1: what the app does.
+            context.beginPage()
+            ink.setFill()
+            UIRectFill(CGRect(x: 0, y: 0, width: 612, height: 210))
+            ember.setFill()
+            UIRectFill(CGRect(x: 0, y: 210, width: 612, height: 6))
+            draw("Welcome to PDFoundry", font: .systemFont(ofSize: 38, weight: .bold), color: .white,
+                 in: CGRect(x: 56, y: 84, width: 500, height: 50))
+            draw("Read, merge, edit and sign PDF documents.", font: .systemFont(ofSize: 17), color: UIColor(white: 1, alpha: 0.8),
+                 in: CGRect(x: 56, y: 140, width: 500, height: 30))
+
+            let sections: [(String, String)] = [
+                ("Read", "Open any PDF from Files, scan paper with the camera, or build a PDF from your photos. Search the text and jump between pages."),
+                ("Merge", "Tap Select in the library, choose two or more documents, then tap Merge. Drag the files into the order you want."),
+                ("Edit", "Select text to highlight, underline or strike it out. Add typed text, draw with your finger or Apple Pencil, and reorder, rotate, duplicate or delete pages."),
+                ("Sign", "Draw your signature once and reuse it. Drag it into place, resize it, and tap Place."),
+                ("Private", "Everything stays on this device. PDFoundry has no account, no ads and no tracking.")
+            ]
+            var y: CGFloat = 262
+            for (title, body) in sections {
+                draw(title, font: .systemFont(ofSize: 19, weight: .semibold), color: ember, in: CGRect(x: 56, y: y, width: 500, height: 26))
+                draw(body, font: .systemFont(ofSize: 14), color: ink, in: CGRect(x: 56, y: y + 28, width: 500, height: 60))
+                y += 98
+            }
+
+            // Page 2: a practice sheet.
+            context.beginPage()
+            draw("Try it on this page", font: .systemFont(ofSize: 30, weight: .bold), color: ink, in: CGRect(x: 56, y: 72, width: 500, height: 40))
+            draw("Press and hold this sentence to select it, then tap the highlighter in the toolbar.",
+                 font: .systemFont(ofSize: 16), color: ink, in: CGRect(x: 56, y: 140, width: 500, height: 50))
+            draw("Tap the pencil to draw anywhere on the page. Tap the text tool to type a note.",
+                 font: .systemFont(ofSize: 16), color: ink, in: CGRect(x: 56, y: 210, width: 500, height: 50))
+            draw("Tap the signature tool and place your signature on the line below.",
+                 font: .systemFont(ofSize: 16), color: ink, in: CGRect(x: 56, y: 280, width: 500, height: 50))
+
+            UIColor(white: 0.55, alpha: 1).setFill()
+            UIRectFill(CGRect(x: 56, y: 560, width: 300, height: 1))
+            draw("Signature", font: .systemFont(ofSize: 12), color: UIColor(white: 0.45, alpha: 1), in: CGRect(x: 56, y: 568, width: 300, height: 18))
+            UIRectFill(CGRect(x: 396, y: 560, width: 160, height: 1))
+            draw("Date", font: .systemFont(ofSize: 12), color: UIColor(white: 0.45, alpha: 1), in: CGRect(x: 396, y: 568, width: 160, height: 18))
+        }
+    }
+}
+
+extension UIImage {
+    /// Returns the image turned counter-clockwise by a multiple of 90 degrees.
+    func rotatedCounterClockwise(degrees: Int) -> UIImage {
+        let normalized = ((degrees % 360) + 360) % 360
+        guard normalized != 0 else { return self }
+        let swapsSides = normalized == 90 || normalized == 270
+        let newSize = swapsSides ? CGSize(width: size.height, height: size.width) : size
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = scale
+        format.opaque = false
+        return UIGraphicsImageRenderer(size: newSize, format: format).image { context in
+            let cg = context.cgContext
+            cg.translateBy(x: newSize.width / 2, y: newSize.height / 2)
+            cg.rotate(by: -CGFloat(normalized) * .pi / 180)
+            draw(in: CGRect(x: -size.width / 2, y: -size.height / 2, width: size.width, height: size.height))
+        }
+    }
+}

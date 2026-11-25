@@ -1,0 +1,75 @@
+name: PDFoundry
+options:
+  bundleIdPrefix: io.pdfoundry
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+    SWIFT_APPROACHABLE_CONCURRENCY: YES
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: JEXQBK3SQ5
+targets:
+  PDFoundry:
+    type: application
+    platform: iOS
+    sources:
+      - PDFoundry
+    info:
+      path: PDFoundry/Info.plist
+      properties:
+        CFBundleDisplayName: PDFoundry
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        ITSAppUsesNonExemptEncryption: false
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        NSCameraUsageDescription: PDFoundry uses the camera to scan paper documents into PDF files.
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: PDF Document
+            CFBundleTypeRole: Editor
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - com.adobe.pdf
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.pdfoundry.app
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: NO
+  PDFoundryTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - PDFoundryTests
+    dependencies:
+      - target: PDFoundry
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: io.pdfoundry.app.tests
+schemes:
+  PDFoundry:
+    build:
+      targets:
+        PDFoundry: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - PDFoundryTests

@@ -1,0 +1,170 @@
+:root {
+  --graphite: #12141c;
+  --steel: #2b3042;
+  --ember: #e2511b;
+  --ember-light: #ffc299;
+  --paper: #f6f4f1;
+  --ink: #16181f;
+  --muted: #5d6270;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+  color: var(--ink);
+  background: var(--paper);
+  line-height: 1.6;
+}
+
+a { color: var(--ember); }
+
+h1, h2, h3 {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, sans-serif;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  text-wrap: balance;
+}
+
+/* Hero: the furnace. Graphite with an ember glow rising from below. */
+.hero {
+  color: #fff;
+  background:
+    radial-gradient(ellipse 70% 60% at 50% 115%, rgba(226, 81, 27, 0.75), transparent 70%),
+    linear-gradient(135deg, var(--graphite), var(--steel));
+  padding: 0 24px;
+  overflow: hidden;
+}
+
+nav {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 22px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #fff;
+  font-weight: 700;
+  font-size: 1.15rem;
+  text-decoration: none;
+}
+
+.brand img { border-radius: 9px; }
+
+.links { display: flex; gap: 22px; flex-wrap: wrap; }
+.links a { color: rgba(255, 255, 255, 0.8); text-decoration: none; font-size: 0.95rem; }
+.links a:hover { color: #fff; }
+
+.hero-grid {
+  max-width: 1080px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: 1.05fr 1fr;
+  gap: 40px;
+  align-items: center;
+  padding-top: 48px;
+}
+
+.pitch h1 { font-size: clamp(2.4rem, 5.4vw, 4rem); margin: 0 0 18px; }
+.pitch p { font-size: 1.2rem; color: rgba(255, 255, 255, 0.82); max-width: 30em; margin: 0 0 28px; }
+
+.cta { display: flex; gap: 12px; flex-wrap: wrap; }
+
+.button {
+  display: inline-block;
+  padding: 13px 22px;
+  border-radius: 999px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.button.soon { background: #fff; color: var(--ink); }
+.button.ghost { color: #fff; border: 1px solid rgba(255, 255, 255, 0.4); }
+.button.ghost:hover { border-color: #fff; }
+
+.phones { position: relative; height: 560px; }
+
+.phone {
+  position: absolute;
+  width: 250px;
+  border-radius: 34px;
+  border: 7px solid #05060a;
+  box-shadow: 0 30px 60px rgba(0, 0, 0, 0.5);
+}
+
+.phone.back { left: 6%; top: 70px; transform: rotate(-6deg); }
+.phone.front { right: 6%; top: 30px; transform: rotate(4deg); }
+
+main section {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 80px 24px 0;
+}
+
+h2 { font-size: clamp(1.8rem, 3.4vw, 2.5rem); margin: 0 0 28px; }
+
+.features {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0;
+  border-top: 2px solid var(--ink);
+}
+
+.features article { padding: 22px 22px 0 0; }
+.features article + article { padding-left: 22px; border-left: 1px solid #d9d5cf; }
+.features h3 { color: var(--ember); font-size: 1.35rem; margin: 0 0 8px; }
+.features p { margin: 0; color: var(--muted); }
+
+.shots { display: grid; grid-template-columns: repeat(4, 1fr); gap: 22px; }
+.shots figure { margin: 0; }
+.shots img {
+  width: 100%;
+  border-radius: 26px;
+  border: 5px solid #05060a;
+  box-shadow: 0 14px 30px rgba(22, 24, 31, 0.18);
+  display: block;
+}
+.shots figcaption { text-align: center; margin-top: 12px; font-weight: 600; font-size: 0.95rem; }
+
+.private p, .contact p { max-width: 42em; font-size: 1.1rem; color: var(--muted); margin: 0 0 14px; }
+
+footer {
+  margin-top: 90px;
+  padding: 28px 24px;
+  background: var(--graphite);
+  color: rgba(255, 255, 255, 0.7);
+  text-align: center;
+  font-size: 0.92rem;
+}
+
+footer a { color: var(--ember-light); }
+
+/* Policy page */
+.policy { max-width: 720px; margin: 0 auto; padding: 56px 24px 0; }
+.policy h1 { font-size: 2.4rem; margin: 0 0 6px; }
+.policy h2 { font-size: 1.3rem; margin: 34px 0 8px; }
+.policy .updated { color: var(--muted); margin: 0 0 24px; }
+.plain-nav { background: var(--graphite); padding: 0 24px; }
+
+@media (max-width: 860px) {
+  .hero-grid { grid-template-columns: 1fr; }
+  .phones { height: 470px; }
+  .phone { width: 205px; }
+  .features, .shots { grid-template-columns: repeat(2, 1fr); }
+  .features article { padding: 22px 16px 0 0; }
+  .features article + article { padding-left: 0; border-left: 0; }
+  .features article:nth-child(even) { padding-left: 16px; border-left: 1px solid #d9d5cf; }
+  .links a:nth-child(-n+2) { display: none; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  html { scroll-behavior: smooth; }
+}
