@@ -15,7 +15,6 @@ Keys/
 *.keystore
 *.jks
 AuthKey_*
-ExportOptions.plist
 secrets.*
 credentials.*
 

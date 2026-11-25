@@ -15,8 +15,8 @@ enum AppInfo {
     static let feedback = URL(string: "https://github.com/Fahed-Alhammadi/PDFoundry/issues")!
     static let website = URL(string: "https://fahed-alhammadi.github.io/PDFoundry/")!
     static let privacy = URL(string: "https://fahed-alhammadi.github.io/PDFoundry/privacy.html")!
-    /// Set once the app has an App Store ID; the "Rate" row stays hidden until then.
-    static let appStoreID: String? = nil
+    /// The App Store ID; the "Rate" row on About uses it.
+    static let appStoreID: String? = "6839300028"
 
     static var reviewURL: URL? {
         appStoreID.flatMap { URL(string: "https://apps.apple.com/app/id\($0)?action=write-review") }
