@@ -10,6 +10,7 @@ struct PageOrganizerView: View {
 
     @Environment(\.dismiss) private var dismiss
     @Environment(DocumentStore.self) private var store
+    @Environment(\.horizontalSizeClass) private var sizeClass
     let model: ReaderModel
 
     @State private var pages: [PageItem] = []
@@ -19,7 +20,12 @@ struct PageOrganizerView: View {
     @State private var confirmDelete = false
     @State private var notice: String?
 
-    private let columns = [GridItem(.adaptive(minimum: 104, maximum: 160), spacing: 16)]
+    /// Larger thumbnails on iPad, where there is room for them.
+    private var isWide: Bool { sizeClass == .regular }
+    private var thumbnailHeight: CGFloat { isWide ? 250 : 150 }
+    private var columns: [GridItem] {
+        [GridItem(.adaptive(minimum: isWide ? 190 : 104, maximum: isWide ? 260 : 160), spacing: isWide ? 24 : 16)]
+    }
 
     var body: some View {
         NavigationStack {
@@ -84,7 +90,7 @@ struct PageOrganizerView: View {
                         }
                     }
                     .padding(.horizontal, 4)
-                    .frame(height: 150)
+                    .frame(height: thumbnailHeight)
                 Text("\(number)")
                     .font(.caption.weight(.medium).monospacedDigit())
                     .foregroundStyle(isSelected ? Color.accentColor : .secondary)
@@ -241,7 +247,7 @@ private struct PageThumbnail: View {
                 Color.white.aspectRatio(0.77, contentMode: .fit)
             }
         }        .onAppear {
-            if image == nil { image = page.thumbnail(of: CGSize(width: 300, height: 400), for: .cropBox) }
+            if image == nil { image = page.thumbnail(of: CGSize(width: 510, height: 680), for: .cropBox) }
         }
     }
 }

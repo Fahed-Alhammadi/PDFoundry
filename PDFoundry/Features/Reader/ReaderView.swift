@@ -26,6 +26,7 @@ struct ReaderView: View {
             .toolbar { toolbar }
             .sheet(isPresented: $showPages) {
                 PageOrganizerView(model: model)
+                    .presentationSizing(.page)
             }
             .sheet(isPresented: $showSignatures) {
                 SignatureSheet { image in

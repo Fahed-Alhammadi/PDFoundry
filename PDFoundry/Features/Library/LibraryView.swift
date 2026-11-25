@@ -5,6 +5,7 @@ import VisionKit
 
 struct LibraryView: View {
     @Environment(DocumentStore.self) private var store
+    @Environment(\.horizontalSizeClass) private var sizeClass
     @AppStorage(SettingsKey.librarySort) private var sort = LibrarySort.recent
 
     @State private var path: [URL] = []
@@ -22,7 +23,11 @@ struct LibraryView: View {
     @State private var deleteTargets: [PDFItem] = []
     @State private var errorMessage: String?
 
-    private let columns = [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 18)]
+    /// Larger cards on iPad, where there is room for them.
+    private var columns: [GridItem] {
+        let minimum: CGFloat = sizeClass == .regular ? 210 : 150
+        return [GridItem(.adaptive(minimum: minimum, maximum: minimum + 90), spacing: 18, alignment: .top)]
+    }
 
     private var visibleItems: [PDFItem] { store.sorted(sort, matching: searchText) }
     private var selectedItems: [PDFItem] { visibleItems.filter { selection.contains($0.url) } }
@@ -288,7 +293,7 @@ struct DocumentCell: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.name)
                     .font(.subheadline.weight(.semibold))
-                    .lineLimit(2)
+                    .lineLimit(2, reservesSpace: true)
                     .multilineTextAlignment(.leading)
                 Text(item.detail)
                     .font(.caption)
