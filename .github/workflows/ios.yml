@@ -2,6 +2,8 @@
 # - Push a tag ios-X.Y.Z (must match MARKETING_VERSION in project.yml): archives the signed app
 #   and uploads it to App Store Connect (TestFlight).
 # - "Run workflow" (manual): archives only; tick "upload" to also send it to TestFlight.
+# Every upload reaches the internal group automatically, and is then added to the external group
+# "Testing" and sent to Beta App Review with the notes in AppStore/whatsnew/en-US.txt.
 # Signing is automatic with the App Store Connect API key in
 # APP_STORE_CONNECT_API_KEY_ID / _ISSUER_ID / _KEY_P8. The archive is signed with the existing
 # Apple Development certificate from IOS_DEV_CERT_P12_BASE64 / IOS_DEV_CERT_PASSWORD, so runs do
@@ -125,6 +127,25 @@ jobs:
             -exportOptionsPlist ExportOptions.plist -exportPath "$RUNNER_TEMP/export" \
             -allowProvisioningUpdates -authenticationKeyPath "$ASC_KEY_PATH" \
             -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+
+      # TestFlight "What to Test" from AppStore/whatsnew/en-US.txt (waits for App Store Connect to
+      # list the build), then the external group "Testing" + Beta App Review. A failure here leaves
+      # the upload in place: finish the missing step in App Store Connect.
+      - name: Send to external testers
+        if: startsWith(github.ref, 'refs/tags/') || inputs.upload
+        continue-on-error: true
+        timeout-minutes: 75
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        run: |
+          info="$RUNNER_TEMP/PDFoundry.xcarchive/Info.plist"
+          version=$(/usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:CFBundleShortVersionString' "$info")
+          build=$(/usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:CFBundleVersion' "$info")
+          python3 -m venv "$RUNNER_TEMP/notes-venv"
+          "$RUNNER_TEMP/notes-venv/bin/pip" install --quiet "pyjwt[crypto]==2.10.1"
+          "$RUNNER_TEMP/notes-venv/bin/python" scripts/testflight-notes.py "$version" "$build" AppStore/whatsnew/en-US.txt \
+            || { echo "::warning::TestFlight notes or external testing not done; check the build in App Store Connect"; exit 1; }
 
       - name: Remove the API key and keychain
         if: always()
