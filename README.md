@@ -86,7 +86,7 @@ Select the **PDFoundry** scheme and run. To run on a device, set your own team u
 
 ```bash
 xcodebuild test -project PDFoundry.xcodeproj -scheme PDFoundry \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro'
+  -destination 'platform=iOS Simulator,name=iPhone 18 Pro'
 ```
 
 ## Configuration
