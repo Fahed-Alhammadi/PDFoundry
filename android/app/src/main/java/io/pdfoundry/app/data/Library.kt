@@ -37,6 +37,9 @@ data class PdfItem(val file: File, val pages: Int, val size: Long, val modified:
         }
 }
 
+/** Why a picked file was not opened. */
+enum class Skipped { NotPdf, Unreadable }
+
 enum class LibrarySort(val title: String) { Recent("Date modified"), Name("Name"), Size("Size") }
 
 fun formatSize(bytes: Long): String = when {
@@ -73,7 +76,10 @@ fun sameContents(a: File, b: File): Boolean {
 }
 
 /** A file opened where it lives: the link to it, and what it looked like when the working copy was made. */
-private class Link(val id: String, val uri: Uri, val name: String, val location: String, var stamp: Stamp)
+private class Link(val id: String, val uri: Uri, val name: String, val location: String, var stamp: Stamp) {
+    /** A save to the real file was started and has not been seen to finish: the real file may be incomplete. */
+    var pushing = false
+}
 
 /**
  * The document list: every PDF in the app's private `documents` folder, plus the files opened
@@ -152,7 +158,7 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
      * one-time hand-over, or one its app doesn't let others change) is copied into the library
      * instead, as [import] does. Returns where each one can be read.
      */
-    suspend fun open(uris: List<Uri>): List<File> {
+    suspend fun open(uris: List<Uri>, skipped: MutableList<Skipped>? = null): List<File> {
         val handovers = mutableListOf<Uri>()
         val opened = withContext(Dispatchers.IO) {
             gate.withLock {
@@ -170,11 +176,13 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
                     val link = Link(java.util.UUID.randomUUID().toString(), uri, name, outside.location(uri), outside.stamp(uri) ?: Stamp(0, -1))
                     val file = workingFile(link)
                     file.parentFile?.mkdirs()
-                    if (outside.read(uri, file) && isPdf(file)) {
+                    val arrived = outside.read(uri, file)
+                    if (arrived && isPdf(file)) {
                         links = links + link
                         saveLinks()
                         file
                     } else {
+                        skipped?.add(if (arrived) Skipped.NotPdf else Skipped.Unreadable)
                         file.parentFile?.deleteRecursively()
                         outside.release(uri)
                         null
@@ -182,7 +190,7 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
                 }
             }
         }
-        val copied = if (handovers.isEmpty()) emptyList() else import(handovers)
+        val copied = if (handovers.isEmpty()) emptyList() else import(handovers, skipped = skipped)
         refresh()
         return (opened + copied).distinct()
     }
@@ -199,7 +207,12 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
     suspend fun push(file: File) = withContext(Dispatchers.IO) {
         gate.withLock {
             val link = link(file) ?: return@withLock
+            // Noted first, so a save that is cut short (the app is closed, storage runs out) is finished
+            // later from the working copy instead of the half-written file being taken as the truth.
+            link.pushing = true
+            saveLinks()
             outside.write(file, link.uri)
+            link.pushing = false
             outside.stamp(link.uri)?.let { link.stamp = it }
             saveLinks()
         }
@@ -215,11 +228,35 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
     fun location(file: File): String? = items.firstOrNull { it.file == file }?.location
 
     private fun update(link: Link): Boolean {
-        val stamp = outside.stamp(link.uri) ?: return false
+        var stamp = outside.stamp(link.uri) ?: return false
         val file = workingFile(link)
+        var unchanged = stamp == link.stamp && stamp.modified != 0L
+        if (link.pushing && file.exists()) {
+            // An earlier save did not finish, so the real file may be incomplete: save the working copy again.
+            try {
+                outside.write(file, link.uri)
+                link.pushing = false
+                outside.stamp(link.uri)?.let { link.stamp = it }
+                saveLinks()
+                return true
+            } catch (e: Exception) {
+                // Still can't be saved. If the real file has changed it may be the half-written one: keep the
+                // working copy. If it is untouched, the save never reached it, and it is read again below.
+                if (!unchanged) return false
+                link.pushing = false
+                unchanged = false
+                stamp = outside.stamp(link.uri) ?: return false
+            }
+        }
         // A file whose app reports no date is copied again every time, to be safe.
-        if (stamp == link.stamp && stamp.modified != 0L && file.exists()) return true
-        if (!outside.read(link.uri, file)) return false
+        if (unchanged && file.exists()) return true
+        // The working copy is replaced only by a whole PDF.
+        val incoming = File(file.parentFile, file.name + ".incoming")
+        try {
+            if (!outside.read(link.uri, incoming) || !isPdf(incoming) || !incoming.renameTo(file)) return false
+        } finally {
+            incoming.delete()
+        }
         link.stamp = stamp
         saveLinks()
         return true
@@ -247,7 +284,7 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
             val saved = JSONArray(linksFile.readText())
             (0 until saved.length()).map { index ->
                 val entry = saved.getJSONObject(index)
-                Link(entry.getString("id"), Uri.parse(entry.getString("uri")), entry.getString("name"), entry.getString("location"), Stamp(entry.getLong("modified"), entry.getLong("size")))
+                Link(entry.getString("id"), Uri.parse(entry.getString("uri")), entry.getString("name"), entry.getString("location"), Stamp(entry.getLong("modified"), entry.getLong("size"))).apply { pushing = entry.optBoolean("pushing", false) }
             }
         }.getOrDefault(emptyList())
     }
@@ -255,7 +292,7 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
     private fun saveLinks() {
         val saved = JSONArray()
         links.forEach { link ->
-            saved.put(JSONObject().put("id", link.id).put("uri", link.uri.toString()).put("name", link.name).put("location", link.location).put("modified", link.stamp.modified).put("size", link.stamp.size))
+            saved.put(JSONObject().put("id", link.id).put("uri", link.uri.toString()).put("name", link.name).put("location", link.location).put("modified", link.stamp.modified).put("size", link.stamp.size).put("pushing", link.pushing))
         }
         val draft = File(linksFile.parentFile, linksFile.name + ".new")
         draft.writeText(saved.toString())
@@ -296,17 +333,21 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
      * A PDF whose contents are already in the library is not added again: its existing document is returned.
      * (Other apps hand files over as one-time links, so contents are the only thing to compare.)
      */
-    suspend fun import(uris: List<Uri>, nameOverride: String? = null): List<File> {
+    suspend fun import(uris: List<Uri>, nameOverride: String? = null, skipped: MutableList<Skipped>? = null): List<File> {
         val imported = withContext(Dispatchers.IO) {
             uris.mapNotNull { uri ->
                 val destination = uniqueFile(nameOverride ?: displayName(uri) ?: "Imported")
                 try {
                     context.contentResolver.openInputStream(uri)?.use { input ->
                         destination.outputStream().use { input.copyTo(it) }
-                    } ?: return@mapNotNull null
+                    } ?: run {
+                        skipped?.add(Skipped.Unreadable)
+                        return@mapNotNull null
+                    }
                     // Keep only real PDFs: the header must be present.
                     if (!isPdf(destination)) {
                         destination.delete()
+                        skipped?.add(Skipped.NotPdf)
                         null
                     } else {
                         val twin = directory.listFiles()?.firstOrNull { it != destination && it.extension.equals("pdf", ignoreCase = true) && sameContents(it, destination) }
@@ -319,6 +360,7 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
                     }
                 } catch (e: Exception) {
                     destination.delete()
+                    skipped?.add(Skipped.Unreadable)
                     null
                 }
             }

@@ -95,6 +95,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.pdfoundry.app.app
+import io.pdfoundry.app.data.DocumentStore
 import io.pdfoundry.app.data.InkStroke
 import io.pdfoundry.app.data.PdfEngine
 import io.pdfoundry.app.data.PdfSource
@@ -115,7 +116,7 @@ sealed interface EditMode {
 }
 
 /** State and editing actions for one open document. */
-class ReaderState(private val context: Context, val file: File, private val scope: CoroutineScope) {
+class ReaderState(private val context: Context, val file: File, private val scope: CoroutineScope, private val store: DocumentStore = context.app.store) {
     var source by mutableStateOf<PdfSource?>(null)
         private set
     /** Bumped after every change so pages re-render. */
@@ -141,7 +142,6 @@ class ReaderState(private val context: Context, val file: File, private val scop
     var canRevert by mutableStateOf(false)
         private set
 
-    private val store = context.app.store
     private var viewFile = file
     private val undoFolder = File(context.cacheDir, "undo/${file.path.hashCode()}").apply { deleteRecursively(); mkdirs() }
     private val undoStack = ArrayDeque<File>()
@@ -240,11 +240,22 @@ class ReaderState(private val context: Context, val file: File, private val scop
             busy = true
             try {
                 withContext(Dispatchers.IO) {
-                    snapshot.copyTo(file, overwrite = true)
+                    val current = File(undoFolder, "current")
+                    file.copyTo(current, overwrite = true)
+                    try {
+                        snapshot.copyTo(file, overwrite = true)
+                        store.push(file)
+                    } catch (e: Exception) {
+                        // Nothing was saved: the document stays as it was, and the step can be undone later.
+                        current.copyTo(file, overwrite = true)
+                        throw e
+                    } finally {
+                        current.delete()
+                    }
                     snapshot.delete()
-                    store.push(file)
                 }
             } catch (e: Exception) {
+                undoStack.addLast(snapshot)
                 message = e.message ?: "The change could not be saved."
             }
             canUndo = undoStack.isNotEmpty()

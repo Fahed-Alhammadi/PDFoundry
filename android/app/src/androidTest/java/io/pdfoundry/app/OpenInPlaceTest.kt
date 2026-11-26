@@ -10,6 +10,7 @@ import io.pdfoundry.app.data.DocumentStore
 import io.pdfoundry.app.data.OutsideFiles
 import io.pdfoundry.app.data.PdfEngine
 import io.pdfoundry.app.data.PdfSource
+import io.pdfoundry.app.data.Skipped
 import io.pdfoundry.app.data.Stamp
 import io.pdfoundry.app.ui.ReaderState
 import kotlinx.coroutines.CoroutineScope
@@ -38,6 +39,8 @@ private class FolderFiles(context: Context) : OutsideFiles(context) {
     val kept = mutableSetOf<Uri>()
     var handover = false
     var writable = true
+    /** The next save stops halfway, as when the app is closed or storage runs out while saving. */
+    var cutShort = false
 
     override fun keep(uri: Uri): Boolean = !handover && kept.add(uri)
     override fun release(uri: Uri) { kept.remove(uri) }
@@ -45,6 +48,10 @@ private class FolderFiles(context: Context) : OutsideFiles(context) {
     override fun stamp(uri: Uri): Stamp? = File(uri.path!!).takeIf { it.exists() }?.let { Stamp(it.lastModified(), it.length()) }
     override fun write(source: File, uri: Uri) {
         if (!writable) throw IOException("This file couldn't be saved where it is.")
+        if (cutShort) {
+            File(uri.path!!).writeBytes(source.readBytes().copyOf((source.length() / 2).toInt()))
+            throw IOException("This file couldn't be saved where it is.")
+        }
         super.write(source, uri)
     }
     override fun location(uri: Uri): String = "On this device › ${File(uri.path!!).parentFile!!.name}"
@@ -244,6 +251,51 @@ class OpenInPlaceTest {
     }
 
     @Test
+    fun onlyRealFailuresAreReportedAsSkipped() = runBlocking {
+        val lease = makePdf("Lease", 1)
+        val notes = File(outsideFolder, "Notes.pdf").apply { writeText("plain text, not a pdf") }
+        val missing = File(outsideFolder, "Missing.pdf")
+        val skipped = mutableListOf<Skipped>()
+
+        store.open(listOf(Uri.fromFile(lease), Uri.fromFile(lease)), skipped)
+        assertTrue("the same file picked twice is not a failure", skipped.isEmpty())
+
+        store.open(listOf(Uri.fromFile(notes), Uri.fromFile(missing)), skipped)
+        assertEquals(listOf(Skipped.NotPdf, Skipped.Unreadable), skipped)
+        assertEquals(1, store.items.size)
+    }
+
+    @Test
+    fun aSaveThatWasCutShortIsFinishedLaterAndNothingIsLost() {
+        runBlocking {
+            val lease = makePdf("Lease", 1)
+            val working = store.open(listOf(Uri.fromFile(lease))).single()
+
+            PdfEngine.addBlankPage(working, 0)
+            outside.cutShort = true
+            assertThrows(IOException::class.java) { runBlocking { store.push(working) } }
+            outside.cutShort = false
+
+            // After a restart the half-written real file must not replace the working copy.
+            val restarted = DocumentStore(context, outside, root)
+            restarted.start()
+            assertEquals(2, pageCount(working))
+            assertEquals(2, pageCount(lease))
+            assertArrayEquals(working.readBytes(), lease.readBytes())
+        }
+    }
+
+    @Test
+    fun aRealFileThatIsNoLongerAPdfDoesNotReplaceTheWorkingCopy() = runBlocking {
+        val lease = makePdf("Lease", 2)
+        val working = store.open(listOf(Uri.fromFile(lease))).single()
+
+        lease.writeText("not a pdf any more, and long enough to change the size")
+        assertFalse(store.sync(working))
+        assertEquals(2, pageCount(working))
+    }
+
+    @Test
     fun saveACopyPutsAnIndependentCopyInTheLibrary() = runBlocking {
         val lease = makePdf("Lease", 2)
         val working = store.open(listOf(Uri.fromFile(lease))).single()
@@ -264,6 +316,38 @@ class OpenInPlaceTest {
         val deadline = System.currentTimeMillis() + 15_000
         while ((version <= after || busy) && System.currentTimeMillis() < deadline) Thread.sleep(20)
         assertTrue("the reader did not finish", version > after && !busy)
+    }
+
+    @Test
+    fun anUndoThatCannotBeSavedChangesNothingAndCanBeTriedAgain() {
+        val lease = makePdf("Lease", 1)
+        val working = runBlocking { store.open(listOf(Uri.fromFile(lease))).single() }
+        val scope = CoroutineScope(Dispatchers.Default)
+        val state = ReaderState(context.applicationContext, working, scope, store)
+        try {
+            state.open()
+            state.settled(0)
+            var version = state.version
+            state.edit { PdfEngine.addBlankPage(it, 0) }
+            state.settled(version)
+            assertEquals(2, pageCount(lease))
+
+            outside.writable = false
+            version = state.version
+            state.undo()
+            state.settled(version)
+            assertEquals(2, pageCount(working))
+            assertTrue(state.canUndo)
+
+            outside.writable = true
+            version = state.version
+            state.undo()
+            state.settled(version)
+            assertEquals(1, pageCount(working))
+            assertEquals(1, pageCount(lease))
+        } finally {
+            scope.cancel()
+        }
     }
 
     @Test

@@ -94,6 +94,7 @@ import io.pdfoundry.app.app
 import io.pdfoundry.app.data.DocumentStore
 import io.pdfoundry.app.data.LibrarySort
 import io.pdfoundry.app.data.PdfItem
+import io.pdfoundry.app.data.Skipped
 import io.pdfoundry.app.data.Thumbnails
 import kotlinx.coroutines.launch
 import java.text.DateFormat
@@ -141,8 +142,16 @@ fun LibraryScreen(onOpen: (PdfItem) -> Unit) {
     // Picked files are opened where they live: nothing is copied, and changes go to the same file.
     val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) perform {
-            val added = store.open(uris)
-            if (added.size < uris.size) snackbar.showSnackbar("Some files weren't PDFs and were skipped.")
+            // A file already in the list, or picked twice, is not a skipped file: only real failures are reported.
+            val skipped = mutableListOf<Skipped>()
+            store.open(uris, skipped)
+            val one = uris.size == 1
+            when {
+                skipped.isEmpty() -> Unit
+                skipped.all { it == Skipped.NotPdf } -> snackbar.showSnackbar(if (one) "That file isn't a PDF." else "Some files weren't PDFs and were skipped.")
+                skipped.all { it == Skipped.Unreadable } -> snackbar.showSnackbar(if (one) "That file couldn't be read right now." else "Some files couldn't be read right now and were skipped.")
+                else -> snackbar.showSnackbar("Some files couldn't be opened and were skipped.")
+            }
         }
     }
     val photos = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(30)) { uris ->
