@@ -1,12 +1,12 @@
 // Development only (never reached in a packaged app): the self-test and the screenshots.
 //   PDFOUNDRY_SELFTEST=<result.json>  checks, in real pixels, that edits land where they were placed.
 //   PDFOUNDRY_SHOTS=<folder>          fills the library with sample documents and captures each screen.
-import { PDFDocument, StandardFonts, rgb } from '@cantoo/pdf-lib';
+import { PDFDocument, StandardFonts, degrees, rgb } from '@cantoo/pdf-lib';
 import { api } from './api.ts';
 import type { AppInfo } from './api.ts';
 import { placedFromPng, rasterize, textImage, toPng } from './images.ts';
 import type { Library } from './library.ts';
-import { openPdf, renderPage } from './pdfview.ts';
+import { openPdf, renderPage, search } from './pdfview.ts';
 import type { Reader } from './reader.ts';
 import type { SettingsView } from './settings.ts';
 import * as pdf from '../core/pdf.ts';
@@ -142,8 +142,16 @@ function pointer(el: Element, type: string, x: number, y: number): void {
   el.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, pointerId: 1, isPrimary: true }));
 }
 
+function findButton(scope: ParentNode, label: string): HTMLButtonElement | undefined {
+  return [...scope.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === label || b.getAttribute('aria-label') === label);
+}
+
+function hasButton(scope: ParentNode, label: string): boolean {
+  return !!findButton(scope, label);
+}
+
 function clickButton(scope: ParentNode, label: string): void {
-  const found = [...scope.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === label || b.getAttribute('aria-label') === label);
+  const found = findButton(scope, label);
   if (!found) throw new Error(`No "${label}" button`);
   if (found.disabled) throw new Error(`"${label}" is disabled`);
   found.click();
@@ -176,8 +184,11 @@ async function interfaceTest(checks: { name: string; pass: boolean; detail?: str
   const editedShown = () => !bar.querySelector('.edited')!.hasAttribute('hidden');
   const settled = () => until(() => !document.querySelector('.reader.busy') && !!document.querySelector('.dock .tool'), 'the change to be applied');
 
-  // Highlight: drag across the middle of page 1, then Done. The file must not change until Save.
-  clickButton(dock, 'Highlight');
+  // The freehand marker (Markup > Draw > Highlighter): drag across the middle of page 1, then Done. The file must not
+  // change until Save.
+  clickButton(dock, 'Markup');
+  clickButton(dock, 'Draw');
+  clickButton(dock, 'Highlighter');
   let box = page().getBoundingClientRect();
   pointer(page(), 'pointerdown', box.left + box.width * 0.2, box.top + box.height * 0.5);
   pointer(page(), 'pointermove', box.left + box.width * 0.5, box.top + box.height * 0.5);
@@ -185,6 +196,7 @@ async function interfaceTest(checks: { name: string; pass: boolean; detail?: str
   pointer(page(), 'pointerup', box.left + box.width * 0.8, box.top + box.height * 0.5);
   clickButton(dock, 'Done');
   await settled();
+  check('after drawing, the bar is back in Markup', hasButton(dock, 'Underline') && hasButton(dock, 'Close Markup') && !hasButton(dock, 'Fill & Sign'));
   check('an edit does not touch the file until Save', same(await onDisk(), original) && app.reader.dirty && !save.disabled && editedShown());
   let px = await pixels(app.reader.data, 0);
   const tint = px.at(0.5, 0.5);
@@ -221,8 +233,9 @@ async function interfaceTest(checks: { name: string; pass: boolean; detail?: str
   check('undo removes the last change only', isWhite(px.at(centre.x, centre.y)) && px.at(0.5, 0.5)[2] < 200);
   check('undoing back to the saved state clears the unsaved mark', !app.reader.dirty && same(await onDisk(), afterHighlight));
 
-  // Organize pages: rotate page 2, then delete page 1. Still nothing on disk until Save.
-  app.reader.organize();
+  // Organize pages (the reading bar's Pages button): rotate page 2, then delete page 1. Still nothing on disk until Save.
+  clickButton(dock, 'Close Markup');
+  clickButton(dock, 'Pages');
   await until(() => document.querySelectorAll('.organizer-page').length === 2, 'the organizer');
   const organizerEl = document.querySelector('.dialog.organizer')!;
   (document.querySelectorAll('.organizer-page')[1] as HTMLElement).click();
@@ -263,6 +276,8 @@ async function interfaceTest(checks: { name: string; pass: boolean; detail?: str
   app.reader.toggleFind(false);
   await app.reader.close();
 
+  await modesTest(check, app);
+
   // The window may touch only files the user opened, and cannot reach the network.
   let refused = false;
   await api.read(file.replace('Interface test.pdf', '../settings.json')).catch(() => (refused = true));
@@ -277,6 +292,185 @@ async function interfaceTest(checks: { name: string; pass: boolean; detail?: str
   await api.forget(file);
   await app.library.refresh();
   check('removing a file from the list leaves the file alone', !card() && same(await onDisk(), afterHighlight));
+}
+
+/** Three pages: words to mark up, the same on a page turned 90 degrees, and a scanned-looking page with no text. */
+async function markupSample(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const first = doc.addPage([612, 792]);
+  for (const [line, y] of [['Highlight Bravo here', 660], ['Underline Delta here', 560], ['Strike Echo here', 460]] as const) {
+    first.drawText(line, { x: 72, y, size: 36, font, color: rgb(0, 0, 0) });
+  }
+  const turned = doc.addPage([612, 792]);
+  turned.drawText('Turned Foxtrot page', { x: 72, y: 660, size: 36, font, color: rgb(0, 0, 0) });
+  turned.setRotation(degrees(90));
+  const scan = doc.addPage([612, 792]);
+  scan.drawRectangle({ x: 72, y: 500, width: 400, height: 40, color: rgb(0.2, 0.2, 0.2) }); // ink, but no text
+  return doc.save();
+}
+
+const sameBytes = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((v, i) => v === b[i]);
+
+type Px = Awaited<ReturnType<typeof pixels>>;
+type Box = { x: number; y: number; width: number; height: number };
+
+/** The share of points on a grid over part of `box` (fractions of its width and height) that pass `test`. */
+function share(px: Px, box: Box, from: [number, number], to: [number, number], test: (c: number[]) => boolean): number {
+  let hit = 0;
+  let all = 0;
+  for (let fx = from[0]; fx <= to[0]; fx += 0.05) {
+    for (let fy = from[1]; fy <= to[1]; fy += 0.05) {
+      all++;
+      if (test(px.at(box.x + fx * box.width, box.y + fy * box.height))) hit++;
+    }
+  }
+  return all ? hit / all : 0;
+}
+
+/** Reader modes (Markup, Fill & Sign), signing twice in a row, and text markup on selected words. */
+async function modesTest(check: (name: string, pass: boolean, detail?: string) => void, app: App): Promise<void> {
+  const readerData = () => app.reader.data;
+  const reader = (document.querySelector('.reader') as HTMLElement);
+  const dock = reader.querySelector('.dock')!;
+  const pageAt = (i: number) => reader.querySelectorAll<HTMLElement>('.page')[i];
+  const settled = () => until(() => !reader.classList.contains('busy') && !!dock.querySelector('.tool'), 'the change to be applied');
+  const isWhite = (c: number[]) => c[0] > 245 && c[1] > 245 && c[2] > 245;
+  const isTinted = (c: number[]) => c[0] > 200 && c[2] < 190; // yellow over paper
+  const isRed = (c: number[]) => c[0] > 180 && c[1] < 120 && c[2] < 120;
+
+  const sample = await markupSample();
+  const file = await api.devCreate('Markup test', sample);
+  await app.reader.open(file);
+  await until(() => reader.querySelectorAll('.page').length === 3, 'the markup sample');
+  check('the reader opens in the reading bar', ['Markup', 'Fill & Sign', 'Pages', 'Undo'].every((l) => hasButton(dock, l)) && !hasButton(dock, 'Highlight'),
+    dock.textContent ?? '');
+
+  // Fill & Sign: place a signature, and the bar is still Fill & Sign, so the second one is one click away.
+  await api.addSignature(await solid('#0000ff', 120, 40));
+  clickButton(dock, 'Fill & Sign');
+  const signAt = async (x: number, y: number): Promise<boolean> => {
+    clickButton(dock, 'Signature');
+    await until(() => !!document.querySelector('.signature-use'), 'the saved signatures');
+    (document.querySelector('.signature-use') as HTMLElement).click();
+    await until(() => !!document.querySelector('.placement'), 'the signature to place');
+    const placed = document.querySelector('.placement') as HTMLElement;
+    const box = pageAt(0).getBoundingClientRect();
+    const at = placed.getBoundingClientRect();
+    pointer(placed, 'pointerdown', at.left + at.width / 2, at.top + at.height / 2);
+    pointer(placed, 'pointermove', box.left + box.width * x, box.top + box.height * y);
+    pointer(placed, 'pointerup', box.left + box.width * x, box.top + box.height * y);
+    clickButton(dock, 'Place');
+    await settled();
+    return hasButton(dock, 'Signature') && hasButton(dock, 'Close Fill & Sign');
+  };
+  const first = await signAt(0.3, 0.9);
+  const second = await signAt(0.7, 0.9);
+  let px = await pixels(readerData(), 0);
+  const blue = (c: number[]) => c[2] > 200 && c[0] < 60;
+  check('signing twice in a row stays in Fill & Sign', first && second && blue(px.at(0.3, 0.9)) && blue(px.at(0.7, 0.9)),
+    JSON.stringify({ first, second, a: px.at(0.3, 0.9), b: px.at(0.7, 0.9) }));
+  clickButton(dock, 'Close Fill & Sign');
+
+  // Markup on selected text. Where the words are is worked out by pdf.js's search, not by the text layer that
+  // the selection uses, so the check does not share the code it checks.
+  const wordBox = async (word: string, index: number): Promise<Box> => {
+    const doc = await openPdf(readerData());
+    const found = (await search(doc, word)).find((m) => m.page === index)!;
+    void doc.loadingTask.destroy();
+    return found.rects[0];
+  };
+  const select = async (word: string, index: number) => {
+    window.getSelection()?.removeAllRanges();
+    pageAt(index).scrollIntoView();
+    await until(() => [...pageAt(index).querySelectorAll('.textLayer span')].some((s) => s.textContent?.includes(word)), `the text of page ${index + 1}`);
+    const span = [...pageAt(index).querySelectorAll('.textLayer span')].find((s) => s.textContent?.includes(word))!;
+    const text = span.firstChild!;
+    const range = document.createRange();
+    const start = text.textContent!.indexOf(word);
+    range.setStart(text, start);
+    range.setEnd(text, start + word.length);
+    window.getSelection()!.addRange(range);
+  };
+  const release = (index: number) => {
+    const box = pageAt(index).getBoundingClientRect();
+    pointer(pageAt(index), 'pointerup', box.left + box.width / 2, box.top + box.height / 2);
+  };
+  const changed = async (before: Uint8Array) => {
+    await until(() => readerData() !== before && !reader.classList.contains('busy'), 'the mark');
+    await wait(100);
+  };
+  clickButton(dock, 'Markup');
+
+  // Highlight: select first, then choose a colour.
+  let before = readerData();
+  await select('Bravo', 0);
+  clickButton(dock, 'Highlight');
+  await until(() => !!document.querySelector('.menu'), 'the highlight colours');
+  clickButton(document.querySelector('.menu')!, 'Yellow');
+  await changed(before);
+  let word = await wordBox('Bravo', 0);
+  px = await pixels(readerData(), 0);
+  const above = { ...word, y: word.y - word.height * 1.5 };
+  const neighbour = { ...word, x: word.x - word.width * 1.3 }; // inside "Highlight", the word before: not marked
+  const marked = { word: share(px, word, [0.1, 0.1], [0.9, 0.9], isTinted), above: share(px, above, [0, 0], [1, 1], isWhite), neighbour: share(px, neighbour, [0, 0], [1, 1], isTinted) };
+  check('highlight marks the selected text', marked.word > 0.3 && marked.above > 0.95 && marked.neighbour < 0.05 && !window.getSelection()?.toString(),
+    JSON.stringify({ box: word, ...marked, selection: window.getSelection()?.toString() }));
+
+  // Underline and strikethrough: choose the tool, then select (applied when the mouse button goes up).
+  clickButton(dock, 'Underline');
+  before = readerData();
+  await select('Delta', 0);
+  release(0);
+  await changed(before);
+  word = await wordBox('Delta', 0);
+  px = await pixels(readerData(), 0);
+  const lineAt = (from: number, to: number) => {
+    let best = 0;
+    for (let fy = from; fy <= to; fy += 0.02) best = Math.max(best, share(px, word, [0.2, fy], [0.8, fy], isRed));
+    return best;
+  };
+  check('underline draws a line under the selected text', lineAt(0.6, 1.15) > 0.8 && lineAt(-0.3, 0.3) === 0, JSON.stringify({ word, low: lineAt(0.6, 1.15), high: lineAt(-0.3, 0.3) }));
+  clickButton(dock, 'Strikethrough');
+  before = readerData();
+  await select('Echo', 0);
+  release(0);
+  await changed(before);
+  word = await wordBox('Echo', 0);
+  px = await pixels(readerData(), 0);
+  check('strikethrough draws a line through the selected text', lineAt(0.3, 0.7) > 0.8 && lineAt(1.1, 1.5) === 0 && lineAt(-0.5, -0.1) === 0,
+    JSON.stringify({ word, middle: lineAt(0.3, 0.7) }));
+
+  // On a page turned 90 degrees the words run down the screen; the highlight must still cover them.
+  clickButton(dock, 'Highlight');
+  await until(() => !!document.querySelector('.menu'), 'the highlight colours');
+  clickButton(document.querySelector('.menu')!, 'Yellow');
+  before = readerData();
+  await select('Foxtrot', 1);
+  release(1);
+  await changed(before);
+  word = await wordBox('Foxtrot', 1);
+  px = await pixels(readerData(), 1);
+  const beside = { ...word, x: word.x + word.width * 2 };
+  check('highlight lands on the selected words on a turned page', word.height > word.width && share(px, word, [0.1, 0.1], [0.9, 0.9], isTinted) > 0.3
+    && share(px, beside, [0, 0], [1, 1], isWhite) > 0.95, JSON.stringify({ word, tinted: share(px, word, [0.1, 0.1], [0.9, 0.9], isTinted) }));
+
+  // A page with no text (a scan): nothing is marked, and a hint points to Draw.
+  before = readerData();
+  window.getSelection()?.removeAllRanges();
+  pageAt(2).scrollIntoView();
+  await until(() => pageAt(2).dataset.text !== undefined, 'the scanned page');
+  const box = pageAt(2).getBoundingClientRect();
+  pointer(pageAt(2), 'pointerdown', box.left + box.width * 0.3, box.top + box.height * 0.35);
+  pointer(pageAt(2), 'pointerup', box.left + box.width * 0.7, box.top + box.height * 0.35);
+  await until(() => /no text to mark up/.test(document.querySelector('.toast')?.textContent ?? ''), 'the no-text hint');
+  check('a page with no text shows a hint and marks nothing', readerData() === before && /Use Draw/.test(document.querySelector('.toast')?.textContent ?? ''));
+
+  // Leave without saving: the sample file is left as it was.
+  const closing = app.reader.close();
+  await until(() => !!document.querySelector('.dialog'), 'the save question');
+  clickButton(document.querySelector('.dialog')!, 'Don’t Save');
+  check('leaving without saving keeps the file as it was', (await closing) === true && sameBytes(await api.devRead(file), sample) && !app.reader.file);
 }
 
 // Screenshots

@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { PDFArray, PDFDocument, decodePDFRawStream, degrees } from '@cantoo/pdf-lib';
 import type { PDFRawStream } from '@cantoo/pdf-lib';
 import * as pdf from '../src/core/pdf.ts';
+import { joinBoxes } from '../src/core/rects.ts';
 
 type Box = { x: number; y: number; width: number; height: number };
 
@@ -95,4 +96,19 @@ test('nothing selected, or a page that does not exist, is refused', async () => 
   await assert.rejects(pdf.markText(plain, 0, [], 'highlight', YELLOW), /Select some text/);
   await assert.rejects(pdf.markText(plain, 2, [{ x: 0, y: 0, width: 0.1, height: 0.1 }], 'highlight', YELLOW), /no page 3/);
   await assert.rejects(pdf.markText(plain, 0, [{ x: 0, y: 0, width: 0, height: 0.1 }], 'highlight', YELLOW), /Select some text/);
+});
+
+test('selection boxes on one line become one box, other lines stay apart', () => {
+  // A range reports a fully selected span twice (its element box and its text box) and a word split over two spans.
+  const line = { x: 0.1, y: 0.2, width: 0.3, height: 0.03 };
+  const joined = joinBoxes([line, { ...line }, { x: 0.405, y: 0.201, width: 0.1, height: 0.029 }, { x: 0.1, y: 0.3, width: 0.2, height: 0.03 }]);
+  assert.equal(joined.length, 2);
+  near(joined[0], { x: 0.1, y: 0.2, width: 0.405, height: 0.03 }, 'first line');
+  near(joined[1], { x: 0.1, y: 0.3, width: 0.2, height: 0.03 }, 'second line');
+  // Text that runs down the screen (a turned page) is joined along its column the same way.
+  assert.equal(joinBoxes([{ x: 0.5, y: 0.1, width: 0.04, height: 0.2 }, { x: 0.5, y: 0.305, width: 0.04, height: 0.1 }]).length, 1);
+  // Two lines set close together stay two lines.
+  assert.equal(joinBoxes([{ x: 0.1, y: 0.2, width: 0.5, height: 0.03 }, { x: 0.1, y: 0.24, width: 0.5, height: 0.03 }]).length, 2);
+  // Slivers (empty line ends) are dropped.
+  assert.equal(joinBoxes([{ x: 0.1, y: 0.1, width: 0, height: 0.03 }]).length, 0);
 });

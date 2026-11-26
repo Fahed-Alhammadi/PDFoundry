@@ -263,9 +263,9 @@ export async function welcomeGuide(): Promise<Uint8Array> {
   const lines: [string, string][] = [
     ['Read', 'Choose Open, or drop a PDF onto the window. It opens where it is: nothing is copied.'],
     ['Merge', 'Select two or more recent files, then choose Merge and say where to save the result.'],
-    ['Edit', 'Highlight, type text and draw on a page. Organize Pages reorders, rotates and deletes pages.'],
+    ['Edit', 'Markup highlights, underlines or strikes through text you select, adds text and draws. Pages reorders pages.'],
     ['Save', 'Your file changes only when you choose Save. Save As keeps the original and makes a new file.'],
-    ['Sign', 'Draw your signature once, then drag it onto the line and place it.'],
+    ['Sign', 'Choose Fill & Sign, draw your signature once, then drag it onto the line and place it.'],
     ['Private', 'Your documents stay on this computer. PDFoundry only goes online to check for its own updates.'],
   ];
   let y = 640;
