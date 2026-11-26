@@ -16,7 +16,7 @@ export type AppInfo = {
   selfTest: string | null;
   shots: string | null;
 };
-export type Imported = { added: string[]; errors: string[] };
+export type Imported = { added: string[]; existing: string[]; errors: string[] };
 export type PickedImage = { name: string; type: 'png' | 'jpeg'; bytes: Uint8Array };
 export type LinkName = 'website' | 'privacy' | 'help' | 'feedback' | 'releases' | 'license';
 

@@ -48,19 +48,22 @@ function applyAppearance(settings: Settings): void {
   nativeTheme.themeSource = settings.appearance;
 }
 
-/** Copies PDFs into the library and tells the window, which opens the last one. */
-function importPaths(paths: string[]): { added: string[]; errors: string[] } {
+/** Brings PDFs into the library. `added` are new documents; `existing` were already there and are not copied again. */
+function importPaths(paths: string[]): { added: string[]; existing: string[]; errors: string[] } {
   const added: string[] = [];
+  const existing: string[] = [];
   const errors: string[] = [];
   for (const source of paths) {
     try {
       if (typeof source !== 'string' || !path.isAbsolute(source)) throw new Error('That file could not be found.');
-      added.push(store.importFile(source));
+      const result = store.importFile(source);
+      const list = result.existing ? existing : added;
+      if (!added.includes(result.name) && !existing.includes(result.name)) list.push(result.name);
     } catch (e) {
       errors.push(e instanceof Error ? e.message : String(e));
     }
   }
-  return { added, errors };
+  return { added, existing, errors };
 }
 
 function openFromSystem(paths: string[]): void {
@@ -119,7 +122,7 @@ const handlers: Record<string, Handler> = {
       properties: ['openFile', 'multiSelections'],
       filters: [{ name: 'PDF documents', extensions: ['pdf'] }],
     });
-    return picked.canceled ? { added: [], errors: [] } : importPaths(picked.filePaths);
+    return picked.canceled ? { added: [], existing: [], errors: [] } : importPaths(picked.filePaths);
   },
   importPaths: (paths: string[]) => importPaths(Array.isArray(paths) ? paths : []),
   exportCopy: async (name: string) => {

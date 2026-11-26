@@ -199,11 +199,14 @@ export class Library {
     await this.run(async () => this.imported(await api.importDialog()));
   }
 
-  /** Reports what an import did, and opens the document when exactly one was added. */
+  /** Reports what an import did, and opens the document when it was a single one (new, or already here). */
   imported(result: Imported): void {
     for (const error of result.errors) toast(error, true);
-    if (result.added.length === 1) this.host.openDocument(result.added[0]);
-    else if (result.added.length) toast(`Added ${result.added.length} documents.`);
+    const all = [...result.added, ...result.existing];
+    if (all.length === 1) return this.host.openDocument(all[0]);
+    const already = result.existing.length;
+    if (result.added.length) toast(`Added ${result.added.length === 1 ? '1 document' : `${result.added.length} documents`}${already ? `; ${already} already in your library` : ''}.`);
+    else if (already) toast(already === 2 ? 'Both are already in your library.' : `All ${already} are already in your library.`);
   }
 
   async createFromImages(): Promise<void> {
