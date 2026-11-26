@@ -454,7 +454,7 @@ fun DocumentThumbnail(item: PdfItem, modifier: Modifier = Modifier) {
 }
 
 @Composable
-internal fun MergeDialog(items: List<PdfItem>, onDismiss: () -> Unit, onMerge: (List<PdfItem>, String, Boolean) -> Unit) {
+internal fun MergeDialog(items: List<PdfItem>, onDismiss: () -> Unit, canDeleteOriginals: Boolean = true, onMerge: (List<PdfItem>, String, Boolean) -> Unit) {
     val order = remember { mutableStateListOf<PdfItem>().apply { addAll(items) } }
     var name by remember { mutableStateOf("Merged Document") }
     var deleteOriginals by remember { mutableStateOf(false) }
@@ -480,7 +480,8 @@ internal fun MergeDialog(items: List<PdfItem>, onDismiss: () -> Unit, onMerge: (
                     }
                 }
                 Text("The merged document will have $totalPages pages.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
+                // Files picked from Files for this merge only have no originals here to delete.
+                if (canDeleteOriginals) Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
                     Text("Delete originals after merging", Modifier.weight(1f))
                     Switch(checked = deleteOriginals, onCheckedChange = { deleteOriginals = it })
                 }

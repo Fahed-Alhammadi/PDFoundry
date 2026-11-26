@@ -171,7 +171,7 @@ fun ToolsScreen(onOpen: (PdfItem) -> Unit) {
     }
 
     mergeTargets?.let { targets ->
-        MergeDialog(targets.map { it.item }, onDismiss = { store.release(targets); mergeTargets = null }) { ordered, name, deleteOriginals ->
+        MergeDialog(targets.map { it.item }, onDismiss = { store.release(targets); mergeTargets = null }, canDeleteOriginals = targets.none { it.temporary }) { ordered, name, deleteOriginals ->
             // The merge now owns the documents: it finishes, and cleans up, even if this screen goes.
             mergeTargets = null
             context.app.scope.launch {
