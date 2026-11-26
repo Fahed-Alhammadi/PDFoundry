@@ -1,1 +1,1 @@
-Opening a PDF that is already in your library now opens it, instead of adding a second copy.
+PDFs now open where they are: nothing is copied, and your changes are saved to the same file. Revert to original undoes everything since you opened it.

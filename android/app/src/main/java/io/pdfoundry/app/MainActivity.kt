@@ -91,6 +91,7 @@ private fun AppRoot(incoming: Uri?, onIncomingHandled: () -> Unit) {
     val store = context.app.store
     val scope = rememberCoroutineScope()
     var tab by rememberSaveable { mutableIntStateOf(0) }
+    /** The path of the document being read, if any. */
     var openDocument by rememberSaveable { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) { store.start() }
@@ -98,7 +99,7 @@ private fun AppRoot(incoming: Uri?, onIncomingHandled: () -> Unit) {
         if (incoming != null) {
             store.import(listOf(incoming)).firstOrNull()?.let {
                 tab = 0
-                openDocument = it.nameWithoutExtension
+                openDocument = it.path
             }
             onIncomingHandled()
         }
@@ -112,7 +113,7 @@ private fun AppRoot(incoming: Uri?, onIncomingHandled: () -> Unit) {
             Unit
         }
         BackHandler(onBack = close)
-        ReaderScreen(file = store.file(open), onBack = close)
+        ReaderScreen(file = java.io.File(open), onBack = close)
         return
     }
 
@@ -125,7 +126,7 @@ private fun AppRoot(incoming: Uri?, onIncomingHandled: () -> Unit) {
         }
     ) { padding ->
         Box(Modifier.padding(bottom = padding.calculateBottomPadding())) {
-            if (tab == 0) LibraryScreen(onOpen = { openDocument = it.name }) else SettingsScreen()
+            if (tab == 0) LibraryScreen(onOpen = { openDocument = it.file.path }) else SettingsScreen()
         }
     }
 }

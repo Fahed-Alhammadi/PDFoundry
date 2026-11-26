@@ -138,9 +138,10 @@ fun LibraryScreen(onOpen: (PdfItem) -> Unit) {
         }
     }
 
+    // Picked files are opened where they live: nothing is copied, and changes go to the same file.
     val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) perform {
-            val added = store.import(uris)
+            val added = store.open(uris)
             if (added.size < uris.size) snackbar.showSnackbar("Some files weren't PDFs and were skipped.")
         }
     }
@@ -204,7 +205,7 @@ fun LibraryScreen(onOpen: (PdfItem) -> Unit) {
             if (!selecting) Box {
                 FloatingActionButton(onClick = { addMenu = true }) { Icon(Icons.Filled.Add, "Add a document") }
                 DropdownMenu(expanded = addMenu, onDismissRequest = { addMenu = false }) {
-                    DropdownMenuItem(text = { Text("Import PDF") }, leadingIcon = { Icon(Icons.Filled.FolderOpen, null) }, onClick = { addMenu = false; importer.launch(arrayOf("application/pdf")) })
+                    DropdownMenuItem(text = { Text("Open PDF") }, leadingIcon = { Icon(Icons.Filled.FolderOpen, null) }, onClick = { addMenu = false; importer.launch(arrayOf("application/pdf")) })
                     DropdownMenuItem(text = { Text("Scan document") }, leadingIcon = { Icon(Icons.Filled.DocumentScanner, null) }, onClick = { addMenu = false; scan() })
                     DropdownMenuItem(text = { Text("Create from photos") }, leadingIcon = { Icon(Icons.Filled.PhotoLibrary, null) }, onClick = {
                         addMenu = false
@@ -229,8 +230,8 @@ fun LibraryScreen(onOpen: (PdfItem) -> Unit) {
                 !store.loaded -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
                 store.items.isEmpty() -> EmptyState(
                     title = "No documents",
-                    body = "Import a PDF, scan paper with the camera, or build one from your photos.",
-                    action = "Import PDF"
+                    body = "Open a PDF, scan paper with the camera, or build one from your photos.",
+                    action = "Open PDF"
                 ) { importer.launch(arrayOf("application/pdf")) }
                 visible.isEmpty() -> EmptyState("No results", "No document name contains “$query”.")
                 else -> LazyVerticalGrid(
@@ -257,6 +258,7 @@ fun LibraryScreen(onOpen: (PdfItem) -> Unit) {
                             ),
                             onRename = { renameTarget = item },
                             onDuplicate = { perform { store.duplicate(item) } },
+                            onSaveCopy = { perform { store.saveCopy(item.file) } },
                             onShare = { context.sharePdfs(listOf(item.file)) },
                             onDelete = { deleteTargets = listOf(item) }
                         )
@@ -286,14 +288,30 @@ fun LibraryScreen(onOpen: (PdfItem) -> Unit) {
         val targets = deleteTargets
         AlertDialog(
             onDismissRequest = { deleteTargets = emptyList() },
-            title = { Text(if (targets.size == 1) "Delete “${targets[0].name}”?" else "Delete ${targets.size} documents?") },
-            text = { Text("This can't be undone.") },
+            title = {
+                Text(
+                    when {
+                        targets.all { it.inPlace } -> if (targets.size == 1) "Remove “${targets[0].name}” from PDFoundry?" else "Remove ${targets.size} documents from PDFoundry?"
+                        targets.size == 1 -> "Delete “${targets[0].name}”?"
+                        else -> "Delete ${targets.size} documents?"
+                    }
+                )
+            },
+            text = {
+                Text(
+                    when {
+                        targets.all { it.inPlace } -> if (targets.size == 1) "The file stays where it is: ${targets[0].location}." else "The files stay where they are."
+                        targets.any { it.inPlace } -> "Files opened from other places stay where they are. The others are deleted, which can't be undone."
+                        else -> "This can't be undone."
+                    }
+                )
+            },
             confirmButton = {
                 TextButton(onClick = {
                     deleteTargets = emptyList()
                     perform { store.delete(targets) }
                     endSelection()
-                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+                }) { Text(if (targets.all { it.inPlace }) "Remove" else "Delete", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = { TextButton(onClick = { deleteTargets = emptyList() }) { Text("Cancel") } }
         )
@@ -334,11 +352,12 @@ private fun DocumentCard(
     modifier: Modifier,
     onRename: () -> Unit,
     onDuplicate: () -> Unit,
+    onSaveCopy: () -> Unit,
     onShare: () -> Unit,
     onDelete: () -> Unit
 ) {
     var menu by remember { mutableStateOf(false) }
-    Column(modifier.clip(RoundedCornerShape(12.dp)).semantics { contentDescription = "${item.name}, ${item.detail}" }) {
+    Column(modifier.clip(RoundedCornerShape(12.dp)).semantics { contentDescription = listOfNotNull(item.name, item.detail, item.location).joinToString(", ") }) {
         Box(
             Modifier.fillMaxWidth().aspectRatio(0.76f).clip(RoundedCornerShape(12.dp)).background(Color.White)
                 .border(if (selected) 3.dp else 1.dp, if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(12.dp))
@@ -356,14 +375,22 @@ private fun DocumentCard(
             Column(Modifier.weight(1f)) {
                 Text(item.name, style = MaterialTheme.typography.titleSmall, maxLines = 2, minLines = 2, overflow = TextOverflow.Ellipsis)
                 Text(item.detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                item.location?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis) }
             }
             if (!selecting) Box {
                 IconButton(onClick = { menu = true }, modifier = Modifier.size(36.dp)) { Icon(Icons.Filled.MoreVert, "More actions for ${item.name}") }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    DropdownMenuItem(text = { Text("Rename") }, onClick = { menu = false; onRename() })
-                    DropdownMenuItem(text = { Text("Duplicate") }, onClick = { menu = false; onDuplicate() })
-                    DropdownMenuItem(text = { Text("Share") }, onClick = { menu = false; onShare() })
-                    DropdownMenuItem(text = { Text("Delete", color = MaterialTheme.colorScheme.error) }, onClick = { menu = false; onDelete() })
+                    if (item.inPlace) {
+                        // The file belongs to another location: it is renamed and deleted there, not here.
+                        DropdownMenuItem(text = { Text("Save a copy in PDFoundry") }, onClick = { menu = false; onSaveCopy() })
+                        DropdownMenuItem(text = { Text("Share") }, onClick = { menu = false; onShare() })
+                        DropdownMenuItem(text = { Text("Remove from PDFoundry") }, onClick = { menu = false; onDelete() })
+                    } else {
+                        DropdownMenuItem(text = { Text("Rename") }, onClick = { menu = false; onRename() })
+                        DropdownMenuItem(text = { Text("Duplicate") }, onClick = { menu = false; onDuplicate() })
+                        DropdownMenuItem(text = { Text("Share") }, onClick = { menu = false; onShare() })
+                        DropdownMenuItem(text = { Text("Delete", color = MaterialTheme.colorScheme.error) }, onClick = { menu = false; onDelete() })
+                    }
                 }
             }
         }

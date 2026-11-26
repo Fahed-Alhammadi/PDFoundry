@@ -35,10 +35,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Draw
+import androidx.compose.material.icons.filled.FileCopy
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Print
+import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.TextFields
@@ -97,6 +99,7 @@ import io.pdfoundry.app.data.InkStroke
 import io.pdfoundry.app.data.PdfEngine
 import io.pdfoundry.app.data.PdfSource
 import io.pdfoundry.app.data.SearchHit
+import io.pdfoundry.app.data.sameContents
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -131,16 +134,33 @@ class ReaderState(private val context: Context, val file: File, private val scop
     /** Password-protected files are shown from an unlocked copy and stay read-only, so their protection is never removed. */
     var readOnly by mutableStateOf(false)
         private set
+    /** Why the document is read-only, in words. */
+    var notice by mutableStateOf("Password-protected documents are read-only.")
+        private set
+    /** True while the file differs from how it was when it was opened. */
+    var canRevert by mutableStateOf(false)
+        private set
 
+    private val store = context.app.store
     private var viewFile = file
-    private val undoFolder = File(context.cacheDir, "undo/${file.nameWithoutExtension.hashCode()}").apply { deleteRecursively(); mkdirs() }
+    private val undoFolder = File(context.cacheDir, "undo/${file.path.hashCode()}").apply { deleteRecursively(); mkdirs() }
     private val undoStack = ArrayDeque<File>()
+    /** The file exactly as it was when opened, kept until it is closed, for Revert to Original. */
+    private val original = File(undoFolder, "original")
 
     val pageCount: Int get() = source?.pageCount ?: 0
     val sizes: List<Size> get() = source?.sizes ?: emptyList()
 
     fun open() {
-        scope.launch { reopen() }
+        scope.launch {
+            // A file opened where it lives may have been changed by another app: show it as it is now.
+            if (!store.sync(file)) {
+                readOnly = true
+                notice = "This file can't be reached right now. It may have been moved or deleted. It is shown as last seen."
+            }
+            withContext(Dispatchers.IO) { runCatching { file.copyTo(original, overwrite = true) } }
+            reopen()
+        }
     }
 
     private suspend fun reopen() {
@@ -164,7 +184,7 @@ class ReaderState(private val context: Context, val file: File, private val scop
     fun unlock(password: String, onWrong: () -> Unit) {
         scope.launch {
             busy = true
-            val copy = File(context.cacheDir, "unlocked-${file.nameWithoutExtension.hashCode()}.pdf")
+            val copy = File(context.cacheDir, "unlocked-${file.path.hashCode()}.pdf")
             val ok = withContext(Dispatchers.IO) { runCatching { PdfEngine.unlock(file, password, copy) }.getOrDefault(false) }
             busy = false
             if (ok) {
@@ -178,7 +198,10 @@ class ReaderState(private val context: Context, val file: File, private val scop
         }
     }
 
-    /** Runs one change to the file. A copy is kept first so the change can be undone. */
+    /**
+     * Runs one change to the file and saves it at once; a file opened where it lives is written back
+     * there. A copy is kept first so the change can be undone.
+     */
     fun edit(change: (File) -> Unit) {
         if (readOnly || busy) return
         scope.launch {
@@ -189,7 +212,10 @@ class ReaderState(private val context: Context, val file: File, private val scop
                     file.copyTo(snapshot, overwrite = true)
                     try {
                         change(file)
+                        store.push(file)
                     } catch (e: Exception) {
+                        // Nothing was saved: go back to the file as it was.
+                        snapshot.copyTo(file, overwrite = true)
                         snapshot.delete()
                         throw e
                     }
@@ -197,9 +223,10 @@ class ReaderState(private val context: Context, val file: File, private val scop
                     while (undoStack.size > 10) undoStack.removeFirst().delete()
                 }
                 canUndo = true
-                reopen()
+                settle()
             } catch (e: Exception) {
                 message = e.message ?: "The change could not be saved."
+                reopen()
             } finally {
                 busy = false
             }
@@ -211,14 +238,27 @@ class ReaderState(private val context: Context, val file: File, private val scop
         val snapshot = undoStack.removeLastOrNull() ?: return
         scope.launch {
             busy = true
-            withContext(Dispatchers.IO) {
-                snapshot.copyTo(file, overwrite = true)
-                snapshot.delete()
+            try {
+                withContext(Dispatchers.IO) {
+                    snapshot.copyTo(file, overwrite = true)
+                    snapshot.delete()
+                    store.push(file)
+                }
+            } catch (e: Exception) {
+                message = e.message ?: "The change could not be saved."
             }
             canUndo = undoStack.isNotEmpty()
-            reopen()
+            settle()
             busy = false
         }
+    }
+
+    /** Puts the file back exactly as it was when it was opened. Undo brings the changes back. */
+    fun revertToOriginal() = edit { original.copyTo(it, overwrite = true) }
+
+    private suspend fun settle() {
+        canRevert = withContext(Dispatchers.IO) { original.exists() && !sameContents(file, original) }
+        reopen()
     }
 
     suspend fun search(query: String): List<SearchHit> = withContext(Dispatchers.IO) {
@@ -252,6 +292,9 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
     var showText by remember { mutableStateOf(false) }
     var showSearch by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
+    var confirmRevert by remember { mutableStateOf(false) }
+    val store = context.app.store
+    val location = store.location(file)
 
     DisposableEffect(state) {
         state.open()
@@ -307,7 +350,12 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
-                title = { Text(file.nameWithoutExtension, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                title = {
+                    Column {
+                        Text(file.nameWithoutExtension, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (location != null) Text(location, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
                 actions = {
                     if (state.source != null) {
@@ -320,6 +368,18 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
                                 }
                                 DropdownMenuItem(text = { Text("Share") }, leadingIcon = { Icon(Icons.Filled.Share, null) }, onClick = { menu = false; context.sharePdfs(listOf(file)) })
                                 DropdownMenuItem(text = { Text("Print") }, leadingIcon = { Icon(Icons.Filled.Print, null) }, onClick = { menu = false; context.printPdf(file) })
+                                if (location != null) {
+                                    DropdownMenuItem(text = { Text("Save a copy in PDFoundry") }, leadingIcon = { Icon(Icons.Filled.FileCopy, null) }, onClick = {
+                                        menu = false
+                                        scope.launch {
+                                            val saved = runCatching { store.saveCopy(file) }.isSuccess
+                                            snackbar.showSnackbar(if (saved) "A copy is now in your documents." else "The copy could not be saved.")
+                                        }
+                                    })
+                                }
+                                if (!state.readOnly) {
+                                    DropdownMenuItem(text = { Text("Revert to original") }, leadingIcon = { Icon(Icons.Filled.Restore, null) }, enabled = state.canRevert && !state.busy, onClick = { menu = false; confirmRevert = true })
+                                }
                             }
                         }
                     }
@@ -333,7 +393,7 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
                         Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
                             Icon(Icons.Filled.Lock, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                             Spacer(Modifier.width(8.dp))
-                            Text("Password-protected documents are read-only.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(state.notice, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                 } else {
@@ -370,6 +430,21 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
                 }
             }
         }
+    }
+
+    if (confirmRevert) {
+        AlertDialog(
+            onDismissRequest = { confirmRevert = false },
+            title = { Text("Revert to original?") },
+            text = { Text(if (location != null) "Every change made since you opened this document is removed, and the file in $location goes back to how it was." else "Every change made since you opened this document is removed.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmRevert = false
+                    state.revertToOriginal()
+                }) { Text("Revert", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { confirmRevert = false }) { Text("Cancel") } }
+        )
     }
 
     if (showText) {
