@@ -97,6 +97,7 @@ import io.pdfoundry.app.data.PdfItem
 import io.pdfoundry.app.data.Skipped
 import io.pdfoundry.app.data.Thumbnails
 import kotlinx.coroutines.launch
+import java.io.File
 import java.text.DateFormat
 import java.util.Date
 
@@ -121,7 +122,6 @@ fun LibraryScreen(onOpen: (PdfItem) -> Unit) {
 
     val visible = store.sorted(settings.sort, query)
     val selected = visible.filter { it.file.path in selection }
-    val stamp = { DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date()) }
 
     fun endSelection() {
         selecting = false
@@ -139,40 +139,7 @@ fun LibraryScreen(onOpen: (PdfItem) -> Unit) {
         }
     }
 
-    // Picked files are opened where they live: nothing is copied, and changes go to the same file.
-    val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        if (uris.isNotEmpty()) perform {
-            // A file already in the list, or picked twice, is not a skipped file: only real failures are reported.
-            val skipped = mutableListOf<Skipped>()
-            store.open(uris, skipped)
-            val one = uris.size == 1
-            when {
-                skipped.isEmpty() -> Unit
-                skipped.all { it == Skipped.NotPdf } -> snackbar.showSnackbar(if (one) "That file isn't a PDF." else "Some files weren't PDFs and were skipped.")
-                skipped.all { it == Skipped.Unreadable } -> snackbar.showSnackbar(if (one) "That file couldn't be read right now." else "Some files couldn't be read right now and were skipped.")
-                else -> snackbar.showSnackbar("Some files couldn't be opened and were skipped.")
-            }
-        }
-    }
-    val photos = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(30)) { uris ->
-        if (uris.isNotEmpty()) perform { store.createFromImages(uris, "Photos ${stamp()}") }
-    }
-    val scanner = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
-        val pdf: Uri? = GmsDocumentScanningResult.fromActivityResultIntent(result.data)?.pdf?.uri
-        if (result.resultCode == Activity.RESULT_OK && pdf != null) perform { store.import(listOf(pdf), "Scan ${stamp()}") }
-    }
-
-    fun scan() {
-        val activity = context as? Activity ?: return
-        val options = GmsDocumentScannerOptions.Builder()
-            .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
-            .setResultFormats(GmsDocumentScannerOptions.RESULT_FORMAT_PDF)
-            .setGalleryImportAllowed(true)
-            .build()
-        GmsDocumentScanning.getClient(options).getStartScanIntent(activity)
-            .addOnSuccessListener { scanner.launch(IntentSenderRequest.Builder(it).build()) }
-            .addOnFailureListener { perform { snackbar.showSnackbar("The scanner isn't available on this device. It needs Google Play services.") } }
-    }
+    val actions = rememberDocumentActions(snackbar)
 
     BackHandler(enabled = selecting) { endSelection() }
 
@@ -214,11 +181,11 @@ fun LibraryScreen(onOpen: (PdfItem) -> Unit) {
             if (!selecting) Box {
                 FloatingActionButton(onClick = { addMenu = true }) { Icon(Icons.Filled.Add, "Add a document") }
                 DropdownMenu(expanded = addMenu, onDismissRequest = { addMenu = false }) {
-                    DropdownMenuItem(text = { Text("Open PDF") }, leadingIcon = { Icon(Icons.Filled.FolderOpen, null) }, onClick = { addMenu = false; importer.launch(arrayOf("application/pdf")) })
-                    DropdownMenuItem(text = { Text("Scan document") }, leadingIcon = { Icon(Icons.Filled.DocumentScanner, null) }, onClick = { addMenu = false; scan() })
+                    DropdownMenuItem(text = { Text("Open PDF") }, leadingIcon = { Icon(Icons.Filled.FolderOpen, null) }, onClick = { addMenu = false; actions.openPdf() })
+                    DropdownMenuItem(text = { Text("Scan document") }, leadingIcon = { Icon(Icons.Filled.DocumentScanner, null) }, onClick = { addMenu = false; actions.scan() })
                     DropdownMenuItem(text = { Text("Create from photos") }, leadingIcon = { Icon(Icons.Filled.PhotoLibrary, null) }, onClick = {
                         addMenu = false
-                        photos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                        actions.createFromPhotos()
                     })
                 }
             }
@@ -241,7 +208,7 @@ fun LibraryScreen(onOpen: (PdfItem) -> Unit) {
                     title = "No documents",
                     body = "Open a PDF, scan paper with the camera, or build one from your photos.",
                     action = "Open PDF"
-                ) { importer.launch(arrayOf("application/pdf")) }
+                ) { actions.openPdf() }
                 visible.isEmpty() -> EmptyState("No results", "No document name contains “$query”.")
                 else -> LazyVerticalGrid(
                     columns = GridCells.Adaptive(150.dp),
@@ -338,6 +305,73 @@ fun LibraryScreen(onOpen: (PdfItem) -> Unit) {
     }
 }
 
+/** Open PDF, Scan document and Create from photos: used by the + menu and by the Tools tab. */
+class DocumentActions(val openPdf: () -> Unit, val scan: () -> Unit, val createFromPhotos: () -> Unit)
+
+/**
+ * The launchers behind [DocumentActions]. Failures are reported on [snackbar]; [onCreated] hears about
+ * a document made by Scan or Create from photos (the Tools tab offers to open it).
+ */
+@Composable
+fun rememberDocumentActions(snackbar: SnackbarHostState, onCreated: suspend (File) -> Unit = {}): DocumentActions {
+    val context = LocalContext.current
+    val store = context.app.store
+    val scope = rememberCoroutineScope()
+    val stamp = { DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date()) }
+
+    /** Runs an action and reports a failure in plain words. */
+    fun perform(work: suspend () -> Unit) {
+        scope.launch {
+            try {
+                work()
+            } catch (e: Exception) {
+                snackbar.showSnackbar(e.message ?: "Something went wrong.")
+            }
+        }
+    }
+
+    // Picked files are opened where they live: nothing is copied, and changes go to the same file.
+    val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) perform {
+            // A file already in the list, or picked twice, is not a skipped file: only real failures are reported.
+            val skipped = mutableListOf<Skipped>()
+            store.open(uris, skipped)
+            val one = uris.size == 1
+            when {
+                skipped.isEmpty() -> Unit
+                skipped.all { it == Skipped.NotPdf } -> snackbar.showSnackbar(if (one) "That file isn't a PDF." else "Some files weren't PDFs and were skipped.")
+                skipped.all { it == Skipped.Unreadable } -> snackbar.showSnackbar(if (one) "That file couldn't be read right now." else "Some files couldn't be read right now and were skipped.")
+                else -> snackbar.showSnackbar("Some files couldn't be opened and were skipped.")
+            }
+        }
+    }
+    val photos = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(30)) { uris ->
+        if (uris.isNotEmpty()) perform { store.createFromImages(uris, "Photos ${stamp()}")?.let { onCreated(it) } }
+    }
+    val scanner = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+        val pdf: Uri? = GmsDocumentScanningResult.fromActivityResultIntent(result.data)?.pdf?.uri
+        if (result.resultCode == Activity.RESULT_OK && pdf != null) perform { store.import(listOf(pdf), "Scan ${stamp()}").firstOrNull()?.let { onCreated(it) } }
+    }
+
+    fun scan() {
+        val activity = context as? Activity ?: return
+        val options = GmsDocumentScannerOptions.Builder()
+            .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
+            .setResultFormats(GmsDocumentScannerOptions.RESULT_FORMAT_PDF)
+            .setGalleryImportAllowed(true)
+            .build()
+        GmsDocumentScanning.getClient(options).getStartScanIntent(activity)
+            .addOnSuccessListener { scanner.launch(IntentSenderRequest.Builder(it).build()) }
+            .addOnFailureListener { perform { snackbar.showSnackbar("The scanner isn't available on this device. It needs Google Play services.") } }
+    }
+
+    return DocumentActions(
+        openPdf = { importer.launch(arrayOf("application/pdf")) },
+        scan = ::scan,
+        createFromPhotos = { photos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
+    )
+}
+
 @Composable
 private fun EmptyState(title: String, body: String, action: String? = null, onAction: () -> Unit = {}) {
     Column(Modifier.fillMaxSize().padding(40.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
@@ -420,7 +454,7 @@ fun DocumentThumbnail(item: PdfItem, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun MergeDialog(items: List<PdfItem>, onDismiss: () -> Unit, onMerge: (List<PdfItem>, String, Boolean) -> Unit) {
+internal fun MergeDialog(items: List<PdfItem>, onDismiss: () -> Unit, canDeleteOriginals: Boolean = true, onMerge: (List<PdfItem>, String, Boolean) -> Unit) {
     val order = remember { mutableStateListOf<PdfItem>().apply { addAll(items) } }
     var name by remember { mutableStateOf("Merged Document") }
     var deleteOriginals by remember { mutableStateOf(false) }
@@ -446,7 +480,8 @@ private fun MergeDialog(items: List<PdfItem>, onDismiss: () -> Unit, onMerge: (L
                     }
                 }
                 Text("The merged document will have $totalPages pages.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
+                // Files picked from Files for this merge only have no originals here to delete.
+                if (canDeleteOriginals) Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
                     Text("Delete originals after merging", Modifier.weight(1f))
                     Switch(checked = deleteOriginals, onCheckedChange = { deleteOriginals = it })
                 }

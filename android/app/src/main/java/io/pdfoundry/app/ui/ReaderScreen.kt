@@ -105,6 +105,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -113,7 +116,12 @@ sealed interface EditMode {
     data class Ink(val highlighter: Boolean) : EditMode
     /** An image (signature or typed text) being positioned before it is placed. */
     data class Place(val image: Bitmap, val label: String) : EditMode
+    /** Words are being selected for a highlight, underline or strikethrough. */
+    data class TextMark(val mark: io.pdfoundry.app.data.TextMark, val argb: Int) : EditMode
 }
+
+/** Which set of tools the reader's bottom bar shows. The reader always opens in [None], the reading bar. */
+enum class ToolMode { None, Markup, FillSign }
 
 /** State and editing actions for one open document. */
 class ReaderState(private val context: Context, val file: File, private val scope: CoroutineScope, private val store: DocumentStore = context.app.store) {
@@ -140,6 +148,14 @@ class ReaderState(private val context: Context, val file: File, private val scop
         private set
     /** True while the file differs from how it was when it was opened. */
     var canRevert by mutableStateOf(false)
+        private set
+
+    /** The bar's mode. Using a tool and finishing or cancelling it returns to this mode, not to reading. */
+    var toolMode by mutableStateOf(ToolMode.None)
+    /** The tool in use on [editPage], if any. */
+    var editMode by mutableStateOf<EditMode?>(null)
+        private set
+    var editPage by mutableIntStateOf(0)
         private set
 
     private var viewFile = file
@@ -203,9 +219,8 @@ class ReaderState(private val context: Context, val file: File, private val scop
      * there. A copy is kept first so the change can be undone.
      */
     fun edit(change: (File) -> Unit) {
-        if (readOnly || busy) return
-        scope.launch {
-            busy = true
+        if (readOnly) return
+        queue {
             try {
                 withContext(Dispatchers.IO) {
                     val snapshot = File(undoFolder, "${System.nanoTime()}.pdf")
@@ -227,41 +242,83 @@ class ReaderState(private val context: Context, val file: File, private val scop
             } catch (e: Exception) {
                 message = e.message ?: "The change could not be saved."
                 reopen()
-            } finally {
-                busy = false
             }
         }
     }
 
-    fun undo() {
-        if (busy) return
-        val snapshot = undoStack.removeLastOrNull() ?: return
+    // Changes are saved one after another, in the order they were asked for: one asked for while
+    // another is still saving (a slow cloud file) waits its turn instead of being dropped.
+    private val saving = Mutex()
+    private val queued = AtomicInteger(0)
+
+    private fun queue(work: suspend () -> Unit) {
+        queued.incrementAndGet()
+        busy = true
         scope.launch {
-            busy = true
             try {
-                withContext(Dispatchers.IO) {
-                    val current = File(undoFolder, "current")
-                    file.copyTo(current, overwrite = true)
-                    try {
-                        snapshot.copyTo(file, overwrite = true)
-                        store.push(file)
-                    } catch (e: Exception) {
-                        // Nothing was saved: the document stays as it was, and the step can be undone later.
-                        current.copyTo(file, overwrite = true)
-                        throw e
-                    } finally {
-                        current.delete()
-                    }
-                    snapshot.delete()
-                }
-            } catch (e: Exception) {
-                undoStack.addLast(snapshot)
-                message = e.message ?: "The change could not be saved."
+                saving.withLock { work() }
+            } finally {
+                if (queued.decrementAndGet() == 0) busy = false
             }
-            canUndo = undoStack.isNotEmpty()
-            settle()
-            busy = false
         }
+    }
+
+    fun undo() = queue {
+        val snapshot = undoStack.removeLastOrNull() ?: return@queue
+        try {
+            withContext(Dispatchers.IO) {
+                val current = File(undoFolder, "current")
+                file.copyTo(current, overwrite = true)
+                try {
+                    snapshot.copyTo(file, overwrite = true)
+                    store.push(file)
+                } catch (e: Exception) {
+                    // Nothing was saved: the document stays as it was, and the step can be undone later.
+                    current.copyTo(file, overwrite = true)
+                    throw e
+                } finally {
+                    current.delete()
+                }
+                snapshot.delete()
+            }
+        } catch (e: Exception) {
+            undoStack.addLast(snapshot)
+            message = e.message ?: "The change could not be saved."
+        }
+        canUndo = undoStack.isNotEmpty()
+        settle()
+    }
+
+    // Tools ---------------------------------------------------------------------------------
+
+    fun begin(mode: EditMode, page: Int) {
+        if (readOnly) return
+        editPage = page.coerceIn(0, (pageCount - 1).coerceAtLeast(0))
+        editMode = mode
+    }
+
+    /** Leaves the tool without changing anything; the bar stays in its mode. */
+    fun cancelEdit() {
+        editMode = null
+    }
+
+    fun finishInk(strokes: List<InkStroke>) {
+        val page = editPage
+        editMode = null
+        if (strokes.isNotEmpty()) edit { PdfEngine.ink(it, page, strokes) }
+    }
+
+    fun place(image: Bitmap, rect: RectF) {
+        val page = editPage
+        editMode = null
+        edit { PdfEngine.stamp(it, page, image, rect) }
+    }
+
+    /** `lower` is, per rect, the side below its text (see [io.pdfoundry.app.data.TextWord.lower]). */
+    fun markText(rects: List<RectF>, mark: io.pdfoundry.app.data.TextMark, argb: Int, lower: List<io.pdfoundry.app.data.Edge>? = null) {
+        val page = editPage
+        editMode = null
+        if (rects.isNotEmpty()) edit { PdfEngine.markText(it, page, rects, mark, argb, lower) }
     }
 
     /** Puts the file back exactly as it was when it was opened. Undo brings the changes back. */
@@ -270,6 +327,11 @@ class ReaderState(private val context: Context, val file: File, private val scop
     private suspend fun settle() {
         canRevert = withContext(Dispatchers.IO) { original.exists() && !sameContents(file, original) }
         reopen()
+    }
+
+    /** The words on a page, for selecting text to mark up. Empty for a page without text (a scan). */
+    suspend fun words(page: Int): List<io.pdfoundry.app.data.TextWord> = withContext(Dispatchers.IO) {
+        runCatching { PdfEngine.words(viewFile, page) }.getOrDefault(emptyList())
     }
 
     suspend fun search(query: String): List<SearchHit> = withContext(Dispatchers.IO) {
@@ -296,8 +358,6 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
     val snackbar = remember { SnackbarHostState() }
     val listState = rememberLazyListState()
 
-    var mode by remember { mutableStateOf<EditMode?>(null) }
-    var editPage by remember { mutableIntStateOf(0) }
     var showPages by remember { mutableStateOf(false) }
     var showSignatures by remember { mutableStateOf(false) }
     var showText by remember { mutableStateOf(false) }
@@ -327,27 +387,19 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
         }
     }
 
-    fun begin(newMode: EditMode) {
-        editPage = currentPage.coerceIn(0, (state.pageCount - 1).coerceAtLeast(0))
-        mode = newMode
-    }
+    fun begin(newMode: EditMode) = state.begin(newMode, currentPage)
 
-    val editing = mode
+    val editing = state.editMode
     if (editing != null && state.source != null) {
-        BackHandler { mode = null }
+        BackHandler { state.cancelEdit() }
         PageEditor(
             state = state,
-            pageIndex = editPage,
+            pageIndex = state.editPage,
             mode = editing,
-            onCancel = { mode = null },
-            onInk = { strokes: List<InkStroke> ->
-                mode = null
-                if (strokes.isNotEmpty()) state.edit { PdfEngine.ink(it, editPage, strokes) }
-            },
-            onPlace = { image: Bitmap, rect: RectF ->
-                mode = null
-                state.edit { PdfEngine.stamp(it, editPage, image, rect) }
-            }
+            onCancel = { state.cancelEdit() },
+            onInk = { strokes: List<InkStroke> -> state.finishInk(strokes) },
+            onPlace = { image: Bitmap, rect: RectF -> state.place(image, rect) },
+            onMarkText = { areas -> if (editing is EditMode.TextMark) state.markText(areas.map { it.rect }, editing.mark, editing.argb, areas.map { it.lower }) }
         )
         return
     }
@@ -356,6 +408,8 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
         PagesScreen(state = state, onDone = { showPages = false })
         return
     }
+    // Back closes a mode before it closes the document.
+    BackHandler(enabled = state.toolMode != ToolMode.None) { state.toolMode = ToolMode.None }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
@@ -374,9 +428,6 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
                         Box {
                             IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, "More") }
                             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                                if (!state.readOnly) {
-                                    DropdownMenuItem(text = { Text("Organize pages") }, leadingIcon = { Icon(Icons.Filled.GridView, null) }, onClick = { menu = false; showPages = true })
-                                }
                                 DropdownMenuItem(text = { Text("Share") }, leadingIcon = { Icon(Icons.Filled.Share, null) }, onClick = { menu = false; context.sharePdfs(listOf(file)) })
                                 DropdownMenuItem(text = { Text("Print") }, leadingIcon = { Icon(Icons.Filled.Print, null) }, onClick = { menu = false; context.printPdf(file) })
                                 if (location != null) {
@@ -408,15 +459,17 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
                         }
                     }
                 } else {
-                    BottomAppBar {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                            ToolButton(Icons.Outlined.BorderColor, "Highlight") { begin(EditMode.Ink(highlighter = true)) }
-                            ToolButton(Icons.Filled.TextFields, "Text") { showText = true }
-                            ToolButton(Icons.Filled.Draw, "Draw") { begin(EditMode.Ink(highlighter = false)) }
-                            ToolButton(SignatureIcon, "Sign") { showSignatures = true }
-                            ToolButton(Icons.AutoMirrored.Filled.Undo, "Undo", enabled = state.canUndo && !state.busy) { state.undo() }
-                        }
-                    }
+                    ModeBar(
+                        mode = state.toolMode,
+                        canUndo = state.canUndo && !state.busy,
+                        onMode = { state.toolMode = it },
+                        onPages = { showPages = true },
+                        onUndo = { state.undo() },
+                        onTextMark = { mark, argb -> begin(EditMode.TextMark(mark, argb)) },
+                        onText = { showText = true },
+                        onDraw = { begin(EditMode.Ink(highlighter = false)) },
+                        onSignature = { showSignatures = true }
+                    )
                 }
             }
         }
@@ -494,18 +547,6 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
             showSearch = false
             scope.launch { listState.scrollToItem(page) }
         }
-    }
-}
-
-@Composable
-private fun ToolButton(icon: ImageVector, label: String, enabled: Boolean = true, onClick: () -> Unit) {
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier.clip(RoundedCornerShape(12.dp)).clickable(enabled = enabled, onClickLabel = label, onClick = onClick).padding(horizontal = 10.dp, vertical = 6.dp)
-    ) {
-        val tint = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
-        Icon(icon, null, tint = tint)
-        Text(label, style = MaterialTheme.typography.labelSmall, color = tint)
     }
 }
 
