@@ -21,6 +21,7 @@ import com.tom_roush.pdfbox.pdmodel.graphics.image.JPEGFactory
 import com.tom_roush.pdfbox.pdmodel.graphics.image.LosslessFactory
 import com.tom_roush.pdfbox.pdmodel.graphics.state.PDExtendedGraphicsState
 import com.tom_roush.pdfbox.text.PDFTextStripper
+import com.tom_roush.pdfbox.text.TextPosition
 import com.tom_roush.pdfbox.util.Matrix
 import java.io.File
 import java.io.IOException
@@ -32,6 +33,12 @@ data class PagePoint(val x: Float, val y: Float)
 data class InkStroke(val points: List<PagePoint>, val argb: Int, val width: Float, val highlighter: Boolean)
 
 data class SearchHit(val page: Int, val snippet: String)
+
+/** One word on a page. `rect` is in fractions of the displayed page from the top-left (rotation and crop applied). */
+data class TextWord(val text: String, val rect: RectF)
+
+/** A mark drawn over selected text. */
+enum class TextMark { Highlight, Underline, Strikethrough }
 
 class PdfException(message: String) : IOException(message)
 
@@ -237,6 +244,129 @@ object PdfEngine {
                 stream.stroke()
                 stream.restoreGraphicsState()
             }
+        }
+    }
+
+    // endregion
+    // region Text markup
+
+    /**
+     * The words on a page, in reading order, with where each one is on the displayed page.
+     * A page without text (a scan) has none.
+     */
+    fun words(file: File, pageIndex: Int): List<TextWord> = PDDocument.load(file, memory()).use { document ->
+        if (pageIndex !in 0 until document.numberOfPages) return@use emptyList()
+        val page = document.getPage(pageIndex)
+        val box = page.cropBox
+        val rotation = ((page.rotation % 360) + 360) % 360
+        val found = mutableListOf<TextWord>()
+        val stripper = object : PDFTextStripper() {
+            // Called with a run of text (often a whole line); split into words at spaces and gaps.
+            override fun writeString(text: String, positions: MutableList<TextPosition>) {
+                var current = mutableListOf<TextPosition>()
+                fun flush() {
+                    if (current.isNotEmpty()) word(current)?.let { found += it }
+                    current = mutableListOf()
+                }
+                for (position in positions) {
+                    val glyph = position.unicode.orEmpty()
+                    if (glyph.isBlank()) {
+                        flush()
+                        continue
+                    }
+                    val previous = current.lastOrNull()
+                    if (previous != null) {
+                        val gap = position.xDirAdj - (previous.xDirAdj + previous.widthDirAdj)
+                        val size = previous.fontSizeInPt.takeIf { it > 0f } ?: previous.heightDir
+                        val newLine = kotlin.math.abs(position.yDirAdj - previous.yDirAdj) > size * 0.5f
+                        if (newLine || gap > size * 0.18f || gap < -size) flush()
+                    }
+                    current += position
+                }
+                flush()
+            }
+
+            private fun word(positions: List<TextPosition>): TextWord? {
+                var left = Float.MAX_VALUE
+                var right = -Float.MAX_VALUE
+                var top = Float.MAX_VALUE
+                var bottom = -Float.MAX_VALUE
+                for (position in positions) {
+                    // Direction-adjusted values are in the unrotated crop box, measured from its top-left.
+                    val size = position.fontSizeInPt.takeIf { it > 0f } ?: position.heightDir
+                    val baseline = position.yDirAdj
+                    left = minOf(left, position.xDirAdj)
+                    right = maxOf(right, position.xDirAdj + position.widthDirAdj)
+                    top = minOf(top, baseline - maxOf(position.heightDir, size * 0.78f))
+                    bottom = maxOf(bottom, baseline + size * 0.22f)
+                }
+                if (right <= left || bottom <= top) return null
+                return TextWord(positions.joinToString("") { it.unicode.orEmpty() }, displayed(RectF(left, top, right, bottom), box.width, box.height, rotation))
+            }
+        }
+        stripper.sortByPosition = true
+        stripper.startPage = pageIndex + 1
+        stripper.endPage = pageIndex + 1
+        stripper.getText(document)
+        found
+    }
+
+    /** A rect in the unrotated crop box (points from its top-left) as fractions of the page as displayed. */
+    private fun displayed(rect: RectF, width: Float, height: Float, rotation: Int): RectF {
+        fun point(u: Float, v: Float): Pair<Float, Float> = when (rotation) {
+            90 -> (height - v) / height to u / width
+            180 -> (width - u) / width to (height - v) / height
+            270 -> v / height to (width - u) / width
+            else -> u / width to v / height
+        }
+        val (x1, y1) = point(rect.left, rect.top)
+        val (x2, y2) = point(rect.right, rect.bottom)
+        return RectF(minOf(x1, x2), minOf(y1, y2), maxOf(x1, x2), maxOf(y1, y2))
+    }
+
+    /**
+     * Marks text on a page: a highlight fills each rect with a multiply blend (so the text stays
+     * readable); underline and strikethrough draw a line across it. `rects` are page fractions.
+     */
+    fun markText(file: File, pageIndex: Int, rects: List<RectF>, mark: TextMark, argb: Int) = edit(file) { document ->
+        if (rects.isEmpty()) return@edit
+        document.overlay(pageIndex) { stream, width, height ->
+            stream.saveGraphicsState()
+            val alpha = Color.alpha(argb) / 255f
+            stream.setGraphicsStateParameters(PDExtendedGraphicsState().apply {
+                if (mark == TextMark.Highlight) {
+                    nonStrokingAlphaConstant = alpha
+                    blendMode = BlendMode.MULTIPLY
+                } else {
+                    strokingAlphaConstant = alpha
+                }
+            })
+            val red = Color.red(argb) / 255f
+            val green = Color.green(argb) / 255f
+            val blue = Color.blue(argb) / 255f
+            for (rect in rects) {
+                val left = rect.left * width
+                val right = rect.right * width
+                val top = height - rect.top * height
+                val rectHeight = rect.height() * height
+                when (mark) {
+                    TextMark.Highlight -> {
+                        stream.setNonStrokingColor(red, green, blue)
+                        stream.addRect(left, top - rectHeight, right - left, rectHeight)
+                        stream.fill()
+                    }
+                    TextMark.Underline, TextMark.Strikethrough -> {
+                        val y = top - rectHeight * (if (mark == TextMark.Underline) 0.92f else 0.5f)
+                        stream.setStrokingColor(red, green, blue)
+                        stream.setLineWidth((rectHeight * 0.07f).coerceAtLeast(0.5f))
+                        stream.setLineCapStyle(0)
+                        stream.moveTo(left, y)
+                        stream.lineTo(right, y)
+                        stream.stroke()
+                    }
+                }
+            }
+            stream.restoreGraphicsState()
         }
     }
 
