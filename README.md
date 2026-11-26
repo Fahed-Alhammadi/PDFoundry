@@ -54,7 +54,7 @@ The phone apps are native: Swift and SwiftUI on iPhone and iPad, Kotlin and Jetp
 | Platform | Version | Status |
 |---|---|---|
 | iPhone and iPad | 1.0.0 | Submitted to the App Store, waiting for review. Available to testers on TestFlight |
-| Android | 1.0.1 | In closed testing on Google Play |
+| Android | 1.0.2 | In closed testing on Google Play |
 | macOS, Windows and Linux | 1.1.1 | Released. [Download](https://github.com/Fahed-Alhammadi/PDFoundry/releases/latest). The Mac app is signed and notarized |
 
 Store links for the phone apps will be added here and on the [website](https://fahed-alhammadi.github.io/PDFoundry/) when the apps are public.
@@ -166,7 +166,7 @@ npm start
 
 | To | iPhone and iPad | Android | macOS, Windows and Linux |
 |---|---|---|---|
-| Add a document | **+** in the library: Import from Files, Scan Document, or Create from Photos | **+** in the library: Import PDF, Scan document, or Create from photos | **Open**, or drop a PDF on the window. Create from images is in the **…** menu |
+| Add a document | **+** in the library: Import from Files, Scan Document, or Create from Photos | **+** in the library: Open PDF (opens the file where it is and saves changes back to it), Scan document, or Create from photos | **Open**, or drop a PDF on the window. Create from images is in the **…** menu |
 | Merge | **Select**, choose documents, tap the merge button | Press and hold to select, choose documents, tap the merge button | **Select**, choose files, **Merge**, then say where to save |
 | Highlight | Press and hold text to select it, then tap the highlighter | Tap **Highlight**, then drag over the page | Click **Highlight**, then drag over the page |
 | Add text | Tap **Aa**, type, drag the text into place, tap **Place** | Tap **Text**, type, drag the text into place, tap **Place** | Click **Text**, type, drag the text into place, **Place** |
