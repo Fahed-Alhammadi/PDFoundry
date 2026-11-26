@@ -25,9 +25,13 @@ async function start(): Promise<void> {
     },
     opened: () => show('documents'),
   });
-  const library = new Library({ openDocument: (file) => void reader.open(file) });
+  const library = new Library({
+    openDocument: (file) => void reader.open(file),
+    openFile: () => reader.file,
+    contents: async (file) => reader.unsaved(file) ?? (await api.read(file)),
+  });
   const settings = new SettingsView(info);
-  const tools = new ToolsView(library);
+  const tools = new ToolsView({ library, openFile: () => reader.file, unsaved: (file) => reader.unsaved(file) });
 
   const nav = (target: Route, symbol: string, label: string) =>
     h('button.nav', { type: 'button', dataset: { route: target }, onclick: () => (target === 'documents' && route === 'documents' && reader.file ? void reader.close() : show(target)) }, icon(symbol, 20), label);

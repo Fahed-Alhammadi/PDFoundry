@@ -3,22 +3,24 @@ import type { PageRect } from './pdf.ts';
 
 const overlap = (a0: number, a1: number, b0: number, b1: number) => Math.min(a1, b1) - Math.max(a0, b0);
 
+/** Which way the text runs on the screen: along the line ('across'), or down it on a page turned a quarter. */
+export type TextDirection = 'across' | 'down';
+
 /**
- * Joins the boxes of a text selection into one box per line (or per column, for text that runs down a turned page).
- * A selection reports a fully selected span twice and splits words across spans; marking those boxes one by one
- * would darken the overlaps twice. Two boxes are joined when they share most of their height (or width) and the
- * gap between them along the line is smaller than half the text's size. Empty slivers are dropped.
+ * Joins the boxes of a text selection into one box per line. A selection splits a line into several boxes (one per
+ * span, sometimes the same text twice). The direction comes from the page and span rotation, never from a box's
+ * shape: a single character or a list number is narrower than it is tall and must not be taken for a column.
+ * Two boxes are joined only when they lie on the same line (they share most of the taller one's height, or width
+ * for text running down) and the gap between them along the line is under one text height. Empty slivers are
+ * dropped. The engine fills all boxes as one shape, so boxes that stay overlapping do not darken twice.
  */
-export function joinBoxes(boxes: PageRect[]): PageRect[] {
+export function joinBoxes(boxes: PageRect[], direction: TextDirection): PageRect[] {
   const out = boxes.filter((b) => b.width > 1e-4 && b.height > 1e-4).map((b) => ({ ...b }));
   const joinable = (a: PageRect, b: PageRect) => {
-    const size = Math.min(a.width, a.height, b.width, b.height);
     const shareY = overlap(a.y, a.y + a.height, b.y, b.y + b.height); // negative = the gap between them
     const shareX = overlap(a.x, a.x + a.width, b.x, b.x + b.width);
-    const column = a.height > a.width && b.height > b.width; // text running down the screen
-    // Lines: most of the height shared, close along the line. Never joins two lines of ordinary text.
-    if (!column) return shareY > 0.5 * Math.min(a.height, b.height) && shareX > -0.5 * size;
-    return shareX > 0.5 * Math.min(a.width, b.width) && shareY > -0.5 * size;
+    if (direction === 'across') return shareY > 0.5 * Math.max(a.height, b.height) && shareX > -Math.min(a.height, b.height);
+    return shareX > 0.5 * Math.max(a.width, b.width) && shareY > -Math.min(a.width, b.width);
   };
   for (let joined = true; joined; ) {
     joined = false;

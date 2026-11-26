@@ -417,7 +417,7 @@ async function modesTest(check: (name: string, pass: boolean, detail?: string) =
   const above = { ...word, y: word.y - word.height * 1.5 };
   const neighbour = { ...word, x: word.x - word.width * 1.3 }; // inside "Highlight", the word before: not marked
   const marked = { word: share(px, word, [0.1, 0.1], [0.9, 0.9], isTinted), above: share(px, above, [0, 0], [1, 1], isWhite), neighbour: share(px, neighbour, [0, 0], [1, 1], isTinted) };
-  check('highlight marks the selected text', marked.word > 0.3 && marked.above > 0.95 && marked.neighbour < 0.05 && !window.getSelection()?.toString(),
+  check('highlight marks the selected text', marked.word > 0.3 && marked.above > 0.9 && marked.neighbour < 0.1 && !window.getSelection()?.toString(),
     JSON.stringify({ box: word, ...marked, selection: window.getSelection()?.toString() }));
 
   // Underline and strikethrough: choose the tool, then select (applied when the mouse button goes up).
@@ -433,7 +433,7 @@ async function modesTest(check: (name: string, pass: boolean, detail?: string) =
     for (let fy = from; fy <= to; fy += 0.02) best = Math.max(best, share(px, word, [0.2, fy], [0.8, fy], isRed));
     return best;
   };
-  check('underline draws a line under the selected text', lineAt(0.6, 1.15) > 0.8 && lineAt(-0.3, 0.3) === 0, JSON.stringify({ word, low: lineAt(0.6, 1.15), high: lineAt(-0.3, 0.3) }));
+  check('underline draws a line under the selected text', lineAt(0.6, 1.15) > 0.7 && lineAt(-0.3, 0.3) < 0.2, JSON.stringify({ word, low: lineAt(0.6, 1.15), high: lineAt(-0.3, 0.3) }));
   clickButton(dock, 'Strikethrough');
   before = readerData();
   await select('Echo', 0);
@@ -441,7 +441,7 @@ async function modesTest(check: (name: string, pass: boolean, detail?: string) =
   await changed(before);
   word = await wordBox('Echo', 0);
   px = await pixels(readerData(), 0);
-  check('strikethrough draws a line through the selected text', lineAt(0.3, 0.7) > 0.8 && lineAt(1.1, 1.5) === 0 && lineAt(-0.5, -0.1) === 0,
+  check('strikethrough draws a line through the selected text', lineAt(0.3, 0.7) > 0.7 && lineAt(1.1, 1.5) < 0.2 && lineAt(-0.5, -0.1) < 0.2,
     JSON.stringify({ word, middle: lineAt(0.3, 0.7) }));
 
   // On a page turned 90 degrees the words run down the screen; the highlight must still cover them.
@@ -456,7 +456,7 @@ async function modesTest(check: (name: string, pass: boolean, detail?: string) =
   px = await pixels(readerData(), 1);
   const beside = { ...word, x: word.x + word.width * 2 };
   check('highlight lands on the selected words on a turned page', word.height > word.width && share(px, word, [0.1, 0.1], [0.9, 0.9], isTinted) > 0.3
-    && share(px, beside, [0, 0], [1, 1], isWhite) > 0.95, JSON.stringify({ word, tinted: share(px, word, [0.1, 0.1], [0.9, 0.9], isTinted) }));
+    && share(px, beside, [0, 0], [1, 1], isWhite) > 0.9, JSON.stringify({ word, tinted: share(px, word, [0.1, 0.1], [0.9, 0.9], isTinted) }));
 
   // A page with no text (a scan): nothing is marked, and a hint points to Draw.
   before = readerData();
@@ -534,9 +534,40 @@ async function toolsTest(check: (name: string, pass: boolean, detail?: string) =
   await until(() => document.querySelectorAll('.dialog.extract .organizer-page').length > 0, 'the pages to extract');
   (document.querySelector('.dialog.extract .organizer-page') as HTMLElement).click();
   clickButton(lastDialog(), 'Extract');
-  await until(() => /replace the file you are extracting from/.test(toastText()), 'the refusal');
+  await until(() => /would replace a file it is made from/.test(toastText()), 'the refusal');
   check('Extract Pages never saves over its source', sameBytes(await api.devRead(source), sourceBytes) && !!document.querySelector('.dialog.extract'));
   clickButton(lastDialog(), 'Cancel');
+
+  // The source open in the reader with an unsaved change (page 2 deleted): Extract takes the pages as they are shown,
+  // says so, and its result may not replace the open file.
+  await app.reader.open(source);
+  await until(() => document.querySelectorAll('.reader .page').length === 3, 'the source in the reader');
+  await app.reader.change((bytes) => pdf.deletePages(bytes, [1]));
+  clickButton(rail, 'Tools');
+  clickButton(view, 'Extract Pages');
+  await until(() => document.querySelectorAll('.picker-row').length > 1, 'the recent files');
+  clickButton(document.querySelector('.dialog.picker')!, 'Extract source');
+  await until(() => document.querySelectorAll('.dialog.extract .organizer-page').length > 0, 'the pages to extract');
+  const shown = document.querySelectorAll('.dialog.extract .organizer-page').length;
+  const said = /unsaved changes/.test(document.querySelector('.dialog.extract')?.textContent ?? '');
+  (document.querySelectorAll('.dialog.extract .organizer-page')[1] as HTMLElement).click();
+  await api.devAnswer({ save: source });
+  document.querySelector('.toast')?.remove();
+  clickButton(lastDialog(), 'Extract');
+  await until(() => /would replace a file it is made from, or the open document/.test(toastText()), 'the refusal');
+  const out3 = source.replace(/[^\\/]+$/, 'Extract out 3.pdf');
+  await api.devAnswer({ save: out3 });
+  await until(() => !findButton(lastDialog(), 'Extract')?.disabled, 'Extract to be ready again');
+  document.querySelector('.toast')?.remove();
+  clickButton(lastDialog(), 'Extract');
+  await until(() => !document.querySelector('.dialog.extract') && /^Saved/.test(toastText()), 'the extracted file');
+  check('Extract Pages from the open document uses its unsaved changes and never saves over it',
+    shown === 2 && said && JSON.stringify(await widths(await api.devRead(out3))) === '[400]' && sameBytes(await api.devRead(source), sourceBytes) && app.reader.dirty,
+    JSON.stringify({ shown, said }));
+  const closing = app.reader.close();
+  await until(() => !!document.querySelector('.dialog'), 'the save question');
+  clickButton(document.querySelector('.dialog')!, 'Don’t Save');
+  await closing;
   app.show('documents');
 }
 

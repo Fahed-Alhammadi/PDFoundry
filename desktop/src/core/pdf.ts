@@ -5,8 +5,9 @@
 // the page as it is displayed (after its rotation), measured from the top-left corner: the same convention as the
 // Android app's PdfEngine.
 import {
-  BlendMode, PDFDocument, PDFPage, degrees, fill, popGraphicsState, pushGraphicsState, rectangle, setFillingRgbColor, setGraphicsState,
+  BlendMode, PDFArray, PDFDocument, PDFPage, decodePDFRawStream, degrees, fill, popGraphicsState, pushGraphicsState, rectangle, setFillingRgbColor, setGraphicsState,
 } from '@cantoo/pdf-lib';
+import type { PDFRawStream } from '@cantoo/pdf-lib';
 
 export class PdfError extends Error {}
 
@@ -159,12 +160,59 @@ export function placement(page: PDFPage, rect: PageRect): { x: number; y: number
   return { x: box.x + x, y: box.y + y, width: rect.width * shown.width, height: rect.height * shown.height, angle: turns * 90 };
 }
 
+/**
+ * Does the page's own drawing leave something behind that would move or clip what is drawn after it? A `cm`,
+ * clip (`W`) or `gs` outside any q…Q, or more `q` than `Q`. Returns how many `Q` are missing, or -1 when nothing
+ * is left behind. Strings, hex strings, comments and inline images are skipped so their bytes are not read as
+ * operators; content that cannot be decoded is treated as unsafe.
+ */
+export function leftoverState(content: string): number {
+  const cleaned = content
+    .replace(/\bBI\b[\s\S]*?\bEI\b/g, ' ')
+    .replace(/\((?:\\[\s\S]|[^\\()]|\((?:\\[\s\S]|[^\\()])*\))*\)/g, ' ')
+    .replace(/<[0-9A-Fa-f\s]*>/g, ' ')
+    .replace(/%[^\r\n]*/g, ' ');
+  let depth = 0;
+  let dirty = false;
+  for (const token of cleaned.split(/[\s[\]<>{}/]+/)) {
+    if (token === 'q') depth++;
+    else if (token === 'Q') depth = Math.max(0, depth - 1);
+    else if (depth === 0 && (token === 'cm' || token === 'W' || token === 'W*' || token === 'gs')) dirty = true;
+  }
+  return dirty || depth > 0 ? depth : -1;
+}
+
+/**
+ * Makes sure what PDFoundry draws on a page is drawn in the page's own coordinates: when the page's drawing leaves
+ * a transformation, clip or graphics state behind, it is wrapped in q…Q, once (pdf-lib would wrap it again on every
+ * edit, nesting deeper each time). Must be called before anything else touches the page.
+ */
+function isolate(doc: PDFDocument, page: PDFPage): void {
+  const node = page.node;
+  (node as unknown as { autoNormalizeCTM: boolean }).autoNormalizeCTM = false;
+  const contents = node.Contents();
+  if (!contents) return;
+  const streams = contents instanceof PDFArray ? contents.asArray().map((r) => doc.context.lookup(r)) : [contents];
+  let missing: number;
+  try {
+    missing = leftoverState(streams.map((s) => new TextDecoder('latin1').decode(decodePDFRawStream(s as PDFRawStream).decode())).join('\n'));
+  } catch {
+    missing = 0; // unreadable: wrap it to be safe
+  }
+  node.normalize();
+  if (missing < 0) return;
+  const start = doc.context.register(doc.context.contentStream([pushGraphicsState()]));
+  const end = doc.context.register(doc.context.contentStream(Array.from({ length: missing + 1 }, () => popGraphicsState())));
+  node.wrapContentStreams(start, end);
+}
+
 /** Draws a PNG onto a page: a signature, typed text, a drawing or a highlight. */
 export async function stamp(bytes: Uint8Array, pageIndex: number, png: Uint8Array, rect: PageRect, options: StampOptions = {}): Promise<Uint8Array> {
   const doc = await open(bytes);
   check(doc, [pageIndex]);
   if (!(rect.width > 0 && rect.height > 0)) throw new PdfError('There is nothing to place.');
   const page = doc.getPage(pageIndex);
+  isolate(doc, page);
   const image = await doc.embedPng(png);
   const at = placement(page, rect);
   page.drawImage(image, {
@@ -210,6 +258,7 @@ export async function markText(bytes: Uint8Array, pageIndex: number, rects: Page
   const chosen = rects.filter((r) => r.width > 0 && r.height > 0);
   if (!chosen.length) throw new PdfError('Select some text first.');
   const page = doc.getPage(pageIndex);
+  isolate(doc, page);
   const [r, g, b, alpha] = rgba;
   const state = page.node.newExtGState('Mark', doc.context.obj({
     Type: 'ExtGState',

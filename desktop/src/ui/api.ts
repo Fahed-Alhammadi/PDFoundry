@@ -40,7 +40,8 @@ export const api = {
   read: async (file: string): Promise<Uint8Array> => new Uint8Array(await bridge.call('read', file)),
   save: (file: string, bytes: Uint8Array): Promise<void> => bridge.call('save', file, bytes),
   /** Asks where to save, writes the file and returns its path; null when the user cancels. */
-  saveAs: (suggested: string, bytes: Uint8Array, beside?: string, keep?: string): Promise<string | null> => bridge.call('saveAs', suggested, bytes, beside, keep),
+  /** `keep`: files the new one must not replace (its sources, the open document). */
+  saveAs: (suggested: string, bytes: Uint8Array, beside?: string, keep: string[] = []): Promise<string | null> => bridge.call('saveAs', suggested, bytes, beside, keep),
   /** Extract Pages: asks for one PDF and reads it once, without listing it as recent. Null when cancelled. */
   pickPdf: async (): Promise<PickedPdf | null> => {
     const picked = await bridge.call('pickPdf');

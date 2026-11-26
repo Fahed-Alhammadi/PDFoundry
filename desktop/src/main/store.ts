@@ -155,12 +155,18 @@ export class Store {
   }
 
   /**
-   * Writes a new file at a place the user just chose in a save dialog, and lists it as recent. `keep` is a file that
-   * must not be replaced (the one pages are being extracted from).
+   * Writes a new file at a place the user just chose in a save dialog, and lists it as recent.
+   * `keep`: files that must not be replaced: the ones the new file is made from (extract, merge) and the document
+   * open in the reader. When ".pdf" had to be added to the name, the system dialog never asked about replacing a
+   * file of that name (the Linux dialog does not add it), so an existing file is refused rather than overwritten.
    */
-  saveNew(file: string, bytes: Uint8Array, keep?: string): string {
-    const target = /\.pdf$/i.test(file) ? path.resolve(file) : `${path.resolve(file)}.pdf`;
-    if (typeof keep === 'string' && sameFile(target, keep)) throw new Error('Choose another name: this would replace the file you are extracting from.');
+  saveNew(file: string, bytes: Uint8Array, keep: string[] = []): string {
+    const typed = /\.pdf$/i.test(file);
+    const target = typed ? path.resolve(file) : `${path.resolve(file)}.pdf`;
+    if (keep.some((k) => typeof k === 'string' && k !== '' && sameFile(target, k))) {
+      throw new Error('Choose another name: that would replace a file it is made from, or the open document.');
+    }
+    if (!typed && existsSync(target)) throw new Error(`“${path.basename(target)}” already exists. Choose another name.`);
     this.writeFile(target, bytes);
     return this.remember(target);
   }

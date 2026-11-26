@@ -38,13 +38,52 @@ test('extractLeavesTheSourceUnchanged', async () => {
 
     // The new file: pages 1 and 3. Saving it over the source is refused; anywhere else is fine.
     const out = await pdf.extract(bytes, [0, 2]);
-    assert.throws(() => store.saveNew(source, out, source), /replace the file you are extracting from/);
-    assert.throws(() => store.saveNew(join(desk, 'Report'), out, source), /replace the file/); // ".pdf" is added
-    const target = store.saveNew(join(desk, 'Report pages.pdf'), out, source);
+    assert.throws(() => store.saveNew(source, out, [source]), /would replace a file it is made from/);
+    assert.throws(() => store.saveNew(join(desk, "Report"), out, [source]), /would replace a file it is made from/); // ".pdf" is added
+    const target = store.saveNew(join(desk, "Report pages.pdf"), out, [source]);
 
     assert.equal(md5(readFileSync(source)), before, 'the source is byte for byte the same');
     assert.deepEqual((await PDFDocument.load(readFileSync(target))).getPages().map((p) => p.getWidth()), [100, 300]);
     assert.deepEqual(store.recent().map((f) => f.path), [target], 'only the new file is listed');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a merged file is never saved over one of the files it is made from', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pdfoundry-merge-'));
+  try {
+    const store = new Store(join(root, 'data'));
+    const [a, b] = [join(root, 'A.pdf'), join(root, 'B.pdf')];
+    writeFileSync(a, await sample(1));
+    writeFileSync(b, await sample(2));
+    const [ha, hb] = [md5(readFileSync(a)), md5(readFileSync(b))];
+    const merged = await pdf.merge([readFileSync(a), readFileSync(b)]);
+    assert.throws(() => store.saveNew(b, merged, [a, b]), /would replace a file it is made from/);
+    assert.throws(() => store.saveNew(join(root, 'a.pdf'), merged, [a, b]), process.platform === 'linux' ? /already exists/ : /would replace/);
+    assert.deepEqual([md5(readFileSync(a)), md5(readFileSync(b))], [ha, hb]);
+    store.saveNew(join(root, 'Merged.pdf'), merged, [a, b]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a name typed without ".pdf" never silently replaces an existing file', async () => {
+  // The Linux save dialog does not add the extension, so it never asked about replacing "Report.pdf".
+  const root = mkdtempSync(join(tmpdir(), 'pdfoundry-name-'));
+  try {
+    const store = new Store(join(root, 'data'));
+    const existing = join(root, 'Report.pdf');
+    writeFileSync(existing, await sample(3));
+    const before = md5(readFileSync(existing));
+    const one = await sample(1);
+    assert.throws(() => store.saveNew(join(root, 'Report'), one), /“Report.pdf” already exists/);
+    assert.equal(md5(readFileSync(existing)), before);
+    // With the extension typed, the system dialog has already asked, so the file is replaced as the user chose.
+    store.saveNew(existing, await sample(1));
+    assert.notEqual(md5(readFileSync(existing)), before);
+    // A new name without ".pdf" is fine.
+    assert.match(store.saveNew(join(root, 'Fresh'), await sample(1)), /Fresh\.pdf$/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

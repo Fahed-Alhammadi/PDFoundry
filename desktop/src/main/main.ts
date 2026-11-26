@@ -146,13 +146,13 @@ const handlers: Record<string, Handler> = {
   read: (file: string) => store.read(file),
   save: (file: string, bytes: Uint8Array) => store.save(file, bytes),
   /**
-   * Save As: asks where, writes the file there and returns its path (null when cancelled). `keep` is a file the new
-   * one must not replace (the source of Extract Pages).
+   * Save As: asks where, writes the file there and returns its path (null when cancelled). `keep` lists files the new
+   * one must not replace (its sources, the document open in the reader).
    */
-  saveAs: async (suggested: string, bytes: Uint8Array, beside?: string, keep?: string) => {
+  saveAs: async (suggested: string, bytes: Uint8Array, beside?: string, keep?: string[]) => {
     const target = await chooseSavePath('Save As', suggested, typeof beside === 'string' ? path.dirname(beside) : undefined);
     if (!target) return null;
-    const saved = store.saveNew(target, bytes, typeof keep === 'string' ? keep : undefined);
+    const saved = store.saveNew(target, bytes, Array.isArray(keep) ? keep.filter((k) => typeof k === 'string') : []);
     app.addRecentDocument(saved);
     return saved;
   },

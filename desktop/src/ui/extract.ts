@@ -82,7 +82,7 @@ export function pickDocuments<T extends 'one' | 'several'>(options: {
  * Extract Pages: page thumbnails to tick and one Extract button. Saves the chosen pages as a new file (asking where)
  * and resolves its path, or null when cancelled. The source is only read.
  */
-export async function extractPages(source: { name: string; path: string; bytes: Uint8Array }): Promise<string | null> {
+export async function extractPages(source: { name: string; path: string; bytes: Uint8Array; unsaved?: boolean }, keep: string[] = []): Promise<string | null> {
   if (!(await pdf.isEditable(source.bytes))) {
     toast('This PDF is protected, so its pages cannot be extracted.', true);
     return null;
@@ -103,7 +103,7 @@ export async function extractPages(source: { name: string; path: string; bytes: 
       try {
         const picked = [...chosen].sort((a, b) => a - b);
         const bytes = await pdf.extract(source.bytes, picked);
-        saved = await api.saveAs(`${title(source.name)} pages`, bytes, source.path, source.path);
+        saved = await api.saveAs(`${title(source.name)} pages`, bytes, source.path, [source.path, ...keep]);
         if (saved) {
           toast(`Saved ${pages(picked.length)} as “${title(saved)}”.`);
           d.close();
@@ -139,7 +139,9 @@ export async function extractPages(source: { name: string; path: string; bytes: 
       extract.disabled = !chosen.size;
     };
     const d = dialog('Extract Pages', [
-      h('p.hint', `From “${title(source.name)}”. That file is not changed.`),
+      h('p.hint', source.unsaved
+        ? `From “${title(source.name)}” as it is open now, with your unsaved changes. That file is not changed.`
+        : `From “${title(source.name)}”. That file is not changed.`),
       h('div.extract-tools', status, h('span.spacer'), all),
       grid,
     ], [button('Cancel', () => d.close()), extract], {

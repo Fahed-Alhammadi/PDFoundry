@@ -16,6 +16,7 @@ import { signatureDialog } from './sign.ts';
 import * as pdf from '../core/pdf.ts';
 import type { PageRect, TextMark } from '../core/pdf.ts';
 import { joinBoxes } from '../core/rects.ts';
+import type { TextDirection } from '../core/rects.ts';
 
 const UNDO_STEPS = 10;
 const PENS = [
@@ -285,13 +286,14 @@ export class Reader {
       const index = Number(page.dataset.index);
       const fresh = h('canvas.sheet');
       await (await renderPage(doc, index, fresh, page.clientWidth)).promise;
-      if (doc !== this.doc) return;
+      if (doc !== this.doc || page.dataset.painted !== key) return; // outdated: a newer paint is under way
       page.querySelector('canvas.sheet')?.replaceWith(fresh); // swapped in when ready, so a redraw never flashes blank
       // The selectable text over the picture, sized by the page box's pixels per point.
       const layer = h('div');
       page.style.setProperty('--total-scale-factor', String(page.clientWidth / this.sizes[index].width));
       const pieces = await renderTextLayer(doc, index, layer);
-      if (doc !== this.doc) return;
+      // A newer paint of this page (a zoom, a change) may have replaced the picture meanwhile; its own text layer wins.
+      if (doc !== this.doc || !fresh.isConnected) return;
       page.querySelector('.textLayer')?.remove();
       fresh.after(layer);
       page.dataset.text = String(pieces);
@@ -405,6 +407,11 @@ export class Reader {
     return this.bytes;
   }
 
+  /** The open document's bytes when `file` is it and it has unsaved changes; otherwise null. */
+  unsaved(file: string): Uint8Array | null {
+    return this.dirty && file === this.file ? this.bytes : null;
+  }
+
   // The dock: the mode bar (modebar.ts), or the controls of the tool in use
 
   private drawDock(): void {
@@ -494,6 +501,9 @@ export class Reader {
     const found = new Map<number, PageRect[]>();
     const selection = window.getSelection();
     if (!selection || selection.isCollapsed) return found;
+    // Boxes are joined per page and per direction of the text, which comes from the page's rotation plus the span's
+    // own (pdf.js sets --rotate on rotated runs); a box's shape says nothing about it.
+    const byLine = new Map<string, { index: number; direction: TextDirection; boxes: PageRect[] }>();
     const pages = this.pageEls();
     for (let r = 0; r < selection.rangeCount; r++) {
       const range = selection.getRangeAt(r);
@@ -502,9 +512,15 @@ export class Reader {
       const nodes: Node[] = range.commonAncestorContainer.nodeType === Node.TEXT_NODE ? [range.commonAncestorContainer] : [];
       for (let node = walker.nextNode(); node; node = walker.nextNode()) nodes.push(node);
       for (const node of nodes) {
-        const page = node.parentElement?.closest('.textLayer')?.closest<HTMLElement>('.page');
-        if (!page || !range.intersectsNode(node)) continue;
+        const layer = node.parentElement?.closest<HTMLElement>('.textLayer');
+        const page = layer?.closest<HTMLElement>('.page');
+        if (!layer || !page || !range.intersectsNode(node)) continue;
         const index = pages.indexOf(page);
+        const turn = Number(layer.getAttribute('data-main-rotation') || 0) + (parseFloat(node.parentElement!.style.getPropertyValue('--rotate')) || 0);
+        const direction: TextDirection = Math.round(turn / 90) % 2 ? 'down' : 'across';
+        const key = `${index}:${direction}`;
+        const line = byLine.get(key) ?? { index, direction, boxes: [] };
+        byLine.set(key, line);
         const part = document.createRange();
         part.selectNodeContents(node);
         if (node === range.startContainer) part.setStart(node, range.startOffset);
@@ -515,14 +531,13 @@ export class Reader {
           const y = Math.max(0, (rect.top - box.top) / box.height);
           const right = Math.min(1, (rect.right - box.left) / box.width);
           const bottom = Math.min(1, (rect.bottom - box.top) / box.height);
-          if (right > x && bottom > y) found.set(index, [...(found.get(index) ?? []), { x, y, width: right - x, height: bottom - y }]);
+          if (right > x && bottom > y) line.boxes.push({ x, y, width: right - x, height: bottom - y });
         }
       }
     }
-    for (const [index, boxes] of found) {
-      const joined = joinBoxes(boxes);
-      if (joined.length) found.set(index, joined);
-      else found.delete(index);
+    for (const { index, direction, boxes } of byLine.values()) {
+      const joined = joinBoxes(boxes, direction);
+      if (joined.length) found.set(index, [...(found.get(index) ?? []), ...joined]);
     }
     return found;
   }
