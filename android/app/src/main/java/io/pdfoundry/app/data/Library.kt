@@ -399,6 +399,56 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
         return destination
     }
 
+    /**
+     * Extract Pages from the Tools tab: copies the chosen pages into a new library document. The
+     * source is only read. A file opened in place is read as it is now from where it lives, into a
+     * temporary file, so neither the real file nor its working copy (nor its link) is touched; if it
+     * can't be reached, the working copy is used.
+     */
+    suspend fun extractPages(source: File, pages: List<Int>): File {
+        val destination = withContext(Dispatchers.IO) {
+            val current = gate.withLock {
+                link(source)?.let { link ->
+                    File(context.cacheDir, "extract-${link.id}.pdf").takeIf { temp ->
+                        val ok = runCatching { outside.read(link.uri, temp) && isPdf(temp) }.getOrDefault(false)
+                        if (!ok) temp.delete()
+                        ok
+                    }
+                }
+            }
+            try {
+                uniqueFile("${source.nameWithoutExtension} extract").also { PdfEngine.extract(current ?: source, pages, it) }
+            } finally {
+                current?.delete()
+            }
+        }
+        refresh()
+        return destination
+    }
+
+    /**
+     * A private, temporary copy of a picked file, for a tool that only reads it (Extract Pages): the
+     * file is neither opened in place nor added to the library. Null when it isn't a readable PDF.
+     * Remove it with [discardTemporary].
+     */
+    suspend fun temporaryCopy(uri: Uri): File? = withContext(Dispatchers.IO) {
+        val name = sanitized(outside.name(uri) ?: "").ifEmpty { "Untitled" }
+        val file = File(pickedDirectory, "${java.util.UUID.randomUUID()}/$name.pdf")
+        file.parentFile?.mkdirs()
+        val ok = runCatching { outside.read(uri, file) && isPdf(file) }.getOrDefault(false)
+        if (ok) file else {
+            file.parentFile?.deleteRecursively()
+            null
+        }
+    }
+
+    fun discardTemporary(file: File) {
+        val folder = file.parentFile ?: return
+        if (folder.parentFile == pickedDirectory) folder.deleteRecursively()
+    }
+
+    private val pickedDirectory get() = File(context.cacheDir, "picked")
+
     suspend fun rename(item: PdfItem, newName: String) {
         val clean = sanitized(newName)
         if (clean.isEmpty() || clean == item.name || item.inPlace) return

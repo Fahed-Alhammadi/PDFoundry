@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -37,6 +38,7 @@ import io.pdfoundry.app.ui.LibraryScreen
 import io.pdfoundry.app.ui.PDFoundryTheme
 import io.pdfoundry.app.ui.ReaderScreen
 import io.pdfoundry.app.ui.SettingsScreen
+import io.pdfoundry.app.ui.ToolsScreen
 import kotlinx.coroutines.launch
 
 class PdfApp : Application() {
@@ -121,12 +123,17 @@ private fun AppRoot(incoming: Uri?, onIncomingHandled: () -> Unit) {
         bottomBar = {
             NavigationBar {
                 NavigationBarItem(selected = tab == 0, onClick = { tab = 0 }, icon = { Icon(Icons.Filled.Description, null) }, label = { Text("Documents") })
-                NavigationBarItem(selected = tab == 1, onClick = { tab = 1 }, icon = { Icon(Icons.Filled.Settings, null) }, label = { Text("Settings") })
+                NavigationBarItem(selected = tab == 1, onClick = { tab = 1 }, icon = { Icon(Icons.Filled.GridView, null) }, label = { Text("Tools") })
+                NavigationBarItem(selected = tab == 2, onClick = { tab = 2 }, icon = { Icon(Icons.Filled.Settings, null) }, label = { Text("Settings") })
             }
         }
     ) { padding ->
         Box(Modifier.padding(bottom = padding.calculateBottomPadding())) {
-            if (tab == 0) LibraryScreen(onOpen = { openDocument = it.file.path }) else SettingsScreen()
+            when (tab) {
+                0 -> LibraryScreen(onOpen = { openDocument = it.file.path })
+                1 -> ToolsScreen(onOpen = { openDocument = it.file.path })
+                else -> SettingsScreen()
+            }
         }
     }
 }
