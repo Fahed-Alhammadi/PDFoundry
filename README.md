@@ -38,6 +38,7 @@ Native apps for iPhone, iPad and Android.
 - [Releases](#releases)
 - [Project structure](#project-structure)
 - [Privacy](#privacy)
+- [Security](#security)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -209,6 +210,10 @@ PDFoundry/
 ## Privacy
 
 PDFoundry collects nothing. Documents and signatures stay on the device, and the apps contain no analytics or advertising. The Android build removes the network permission altogether, so it cannot reach the internet. Read the [privacy policy](https://fahed-alhammadi.github.io/PDFoundry/privacy.html).
+
+## Security
+
+Found a vulnerability? Please report it privately, as described in the [security policy](SECURITY.md), not in a public issue.
 
 ## Contributing
 

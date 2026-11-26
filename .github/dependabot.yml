@@ -1,0 +1,24 @@
+# Dependabot: weekly (Monday) dependency updates, kept quiet on purpose: minor/patch bumps come as ONE grouped PR per
+# folder, major bumps as their own PRs, at most 5 open PRs per folder. Security updates are on in the repo settings.
+# Merging an update only runs CI; nothing is released until a release tag is pushed.
+# The iOS app has no third-party dependencies, so it has no entry here.
+version: 2
+updates:
+
+  # Android app (Gradle: AGP, Kotlin, Compose, AndroidX, PdfBox-Android, ML Kit)
+  - package-ecosystem: gradle
+    directory: /android
+    schedule: { interval: weekly, day: monday }
+    commit-message: { prefix: "Android deps" }
+    groups:
+      android-minor:
+        update-types: [minor, patch]
+
+  # GitHub Actions used by the workflows
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    commit-message: { prefix: "CI" }
+    groups:
+      actions:
+        patterns: ["*"]
