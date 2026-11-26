@@ -161,6 +161,12 @@ struct ToolsView: View {
                 }
             }
         }
+        .sheet(item: $extractSource) { source in
+            ExtractPagesView(item: source) { created in
+                show(confirmation: "Saved \(created.pageCount == 1 ? "1 page" : "\(created.pageCount) pages") as “\(created.name)” in Documents.")
+            }
+            .presentationSizing(.page)
+        }
         .alert("Something Went Wrong", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
             Button("OK", role: .cancel) {}
         } message: {

@@ -327,6 +327,39 @@ final class DocumentStore {
         return destination
     }
 
+    /// Copies the pages at `pages` (zero-based, kept in document order) of the file at `url` into a new document in
+    /// the library, named "<name> (pages)". The source is only read, never written: it may be a file opened in
+    /// place, whose every change would otherwise land in the real file. It is not added to the library either.
+    func extractPages(from url: URL, pages: IndexSet) async throws -> PDFItem {
+        let name = url.deletingPathExtension().lastPathComponent
+        guard let data = await Self.readCoordinated(url), let source = PDFDocument(data: data) else {
+            throw PDFoundryError.unreadable(name)
+        }
+        guard !source.isLocked else { throw PDFoundryError.locked(name) }
+        let extracted = try PDFOperations.extract(Array(pages), from: source)
+        let destination = try await save(extracted, named: name + " (pages)")
+        return items.first { $0.url.standardizedFileURL == destination.standardizedFileURL } ?? PDFItem(
+            url: destination,
+            name: destination.deletingPathExtension().lastPathComponent,
+            pageCount: extracted.pageCount,
+            size: 0,
+            modified: .now,
+            isLocked: false
+        )
+    }
+
+    /// Reads a file's bytes through a file coordinator (so a file in iCloud is downloaded first), with access to it
+    /// if it was picked in Files.
+    @concurrent
+    nonisolated static func readCoordinated(_ url: URL) async -> Data? {
+        FileAccess.with(url) {
+            var data: Data?
+            var error: NSError?
+            NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &error) { data = try? Data(contentsOf: $0) }
+            return data
+        }
+    }
+
     // MARK: Changing
 
     func rename(_ item: PDFItem, to newName: String) async throws {
