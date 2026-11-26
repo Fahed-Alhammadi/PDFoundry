@@ -164,42 +164,43 @@ struct PDFOperationsTests {
         #expect(store.items.map(\.name).sorted() == ["File 1", "File 2", "File 3", "File 4"])
     }
 
-    @Test func changesAreWrittenToTheSameFileOnlyOnSave() async throws {
+    @Test func changesAreSavedToTheSameFileStraightAway() async throws {
         let (store, library, elsewhere) = try makeStore()
         let contract = elsewhere.appending(path: "Contract.pdf")
         try FileManager.default.moveItem(at: try makePDF(named: "Contract", pages: 2), to: contract)
         try await store.open([contract])
-        let before = try Data(contentsOf: contract)
 
         let model = ReaderModel(url: contract)
-        #expect(!model.hasChanges)
+        #expect(!model.canRevert)
         try #require(model.document).page(at: 0)?.rotation = 90
         model.pagesDidChange()
 
-        #expect(model.hasChanges)
-        #expect(try Data(contentsOf: contract) == before, "nothing is written before Done")
-
-        #expect(model.save())
-        #expect(!model.hasChanges)
-        #expect(PDFDocument(url: contract)?.page(at: 0)?.rotation == 90, "Done writes to the same file")
-        #expect(try libraryFiles(library).isEmpty)
+        #expect(PDFDocument(url: contract)?.page(at: 0)?.rotation == 90, "the change is in the same file without a Save step")
+        #expect(model.canRevert)
+        #expect(try libraryFiles(library).isEmpty, "nothing is copied into PDFoundry")
         #expect(try FileManager.default.contentsOfDirectory(atPath: elsewhere.path) == ["Contract.pdf"], "no stray files beside it")
     }
 
-    @Test func leavingWithoutSavingKeepsTheFileAsItWas() async throws {
+    @Test func revertPutsTheFileBackExactlyAsItWasOpened() async throws {
         let (_, _, elsewhere) = try makeStore()
         let contract = elsewhere.appending(path: "Contract.pdf")
-        try FileManager.default.moveItem(at: try makePDF(named: "Contract", pages: 1), to: contract)
+        try FileManager.default.moveItem(at: try makePDF(named: "Contract", pages: 3), to: contract)
         let before = try Data(contentsOf: contract)
 
-        do {
-            let model = ReaderModel(url: contract)
-            try #require(model.document).page(at: 0)?.rotation = 180
-            model.pagesDidChange()
-            #expect(model.hasChanges)
-        } // discarded: the reader goes away without save()
+        let model = ReaderModel(url: contract)
+        let document = try #require(model.document)
+        document.page(at: 0)?.rotation = 180
+        document.removePage(at: 2) // a deleted page cannot be brought back any other way
+        model.pagesDidChange()
+        #expect(try Data(contentsOf: contract) != before)
+        #expect(PDFDocument(url: contract)?.pageCount == 2)
 
-        #expect(try Data(contentsOf: contract) == before)
+        #expect(model.revertToOriginal())
+
+        #expect(try Data(contentsOf: contract) == before, "the file is byte for byte what it was")
+        #expect(model.pageCount == 3 && model.document?.page(at: 0)?.rotation == 0)
+        #expect(!model.canRevert && !model.canUndo)
+        #expect(!model.revertToOriginal(), "nothing left to revert")
     }
 
     @Test func removingAnOpenedFileNeverDeletesIt() async throws {

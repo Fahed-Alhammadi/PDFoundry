@@ -14,7 +14,7 @@ struct ReaderView: View {
     @State private var newText = ""
     @State private var password = ""
     @State private var wrongPassword = false
-    @State private var askToSave = false
+    @State private var askToRevert = false
     @State private var shared: SharedFile?
 
     init(url: URL) {
@@ -25,8 +25,7 @@ struct ReaderView: View {
         content
             .navigationTitle(model.title)
             .navigationBarTitleDisplayMode(.inline)
-            // With unsaved changes the system Back button (and the swipe back) is replaced by Close, which asks first.
-            .navigationBarBackButtonHidden(model.mode != .reading || model.hasChanges)
+            .navigationBarBackButtonHidden(model.mode != .reading)
             .toolbar(.hidden, for: .tabBar)
             .toolbar { toolbar }
             .sheet(isPresented: $showPages) {
@@ -58,21 +57,15 @@ struct ReaderView: View {
             } message: {
                 Text(model.errorMessage ?? "")
             }
-            .confirmationDialog("Save the changes to “\(model.title)”?", isPresented: $askToSave, titleVisibility: .visible) {
-                Button("Save") { finish() }
-                Button("Discard Changes", role: .destructive) { dismiss() }
+            .confirmationDialog("Revert “\(model.title)” to the original?", isPresented: $askToRevert, titleVisibility: .visible) {
+                Button("Revert to Original", role: .destructive) { model.revertToOriginal() }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("Your changes will be lost if you don't save them.")
+                Text("Everything you changed since opening this document will be removed.")
             }
             .sheet(item: $shared) { file in
                 ActivityView(url: file.url)
             }
-    }
-
-    /// Done: writes the changes to the file and goes back. Stays here if the file could not be written.
-    private func finish() {
-        if model.save() { dismiss() }
     }
 
     /// When the file can't be changed where it is, the edited document is kept as a new one inside PDFoundry.
@@ -206,14 +199,6 @@ struct ReaderView: View {
 
     @ToolbarContentBuilder
     private var readingToolbar: some ToolbarContent {
-        if model.hasChanges {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("Close", systemImage: "xmark") { askToSave = true }
-            }
-            ToolbarItem(placement: .confirmationAction) {
-                Button("Done") { finish() }
-            }
-        }
         ToolbarItemGroup(placement: .topBarTrailing) {
             Button("Search", systemImage: "magnifyingglass") { model.showSearch() }
             Menu("More", systemImage: "ellipsis") {
@@ -224,6 +209,11 @@ struct ReaderView: View {
                     if let url = model.temporaryCopy() { shared = SharedFile(url: url) }
                 }
                 Button("Print", systemImage: "printer") { model.printDocument() }
+                if model.canEdit {
+                    Divider()
+                    Button("Revert to Original", systemImage: "arrow.uturn.backward.circle", role: .destructive) { askToRevert = true }
+                        .disabled(!model.canRevert)
+                }
             }
         }
 
