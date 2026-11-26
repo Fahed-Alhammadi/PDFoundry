@@ -188,6 +188,25 @@ final class DocumentStore {
         return destination
     }
 
+    /// Describes a file picked in the Files app for a single job (a tool), without opening it here or adding it
+    /// to the list. It carries its location, so it counts as a file that lives elsewhere and is never deleted.
+    nonisolated static func pickedItem(_ url: URL) -> PDFItem? {
+        FileAccess.with(url) {
+            guard isPDF(url) else { return nil }
+            let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            let document = PDFDocument(url: url)
+            return PDFItem(
+                url: url,
+                name: url.deletingPathExtension().lastPathComponent,
+                pageCount: document?.pageCount ?? 0,
+                size: Int64(values?.fileSize ?? 0),
+                modified: values?.contentModificationDate ?? .now,
+                isLocked: document?.isLocked ?? false,
+                location: location(of: url)
+            )
+        }
+    }
+
     private nonisolated static func isPDF(_ url: URL) -> Bool {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return url.pathExtension.lowercased() == "pdf" }
         defer { try? handle.close() }

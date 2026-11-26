@@ -54,11 +54,11 @@ struct LibraryView: View {
         .onChange(of: photoItems) { _, items in
             guard !items.isEmpty else { return }
             photoItems = []
-            perform { try await createFromPhotos(items) }
+            perform { try await store.createFromPhotos(items) }
         }
         .fullScreenCover(isPresented: $showScanner) {
             DocumentScanner { images in
-                perform { try await store.create(from: images, named: "Scan \(Date.now.formatted(date: .abbreviated, time: .shortened))") }
+                perform { try await store.createFromScan(images) }
             }
             .ignoresSafeArea()
         }
@@ -275,19 +275,9 @@ struct LibraryView: View {
             }
         }
     }
-
-    private func createFromPhotos(_ items: [PhotosPickerItem]) async throws {
-        var images: [UIImage] = []
-        for item in items {
-            if let data = try await item.loadTransferable(type: Data.self), let image = UIImage(data: data) {
-                images.append(image)
-            }
-        }
-        try await store.create(from: images, named: "Photos \(Date.now.formatted(date: .abbreviated, time: .shortened))")
-    }
 }
 
-private struct MergeRequest: Identifiable {
+struct MergeRequest: Identifiable {
     let items: [PDFItem]
     var id: [URL] { items.map(\.url) }
 }
