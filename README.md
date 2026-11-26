@@ -21,7 +21,7 @@ Apps for iPhone, iPad, Android, macOS, Windows and Linux.
 <img src="screenshots/ios/iphone-6.9/01-library.png" width="23%" alt="Document library on iPhone">
 <img src="screenshots/ios/iphone-6.9/08-signed.png" width="23%" alt="A signed and highlighted document on iPhone">
 <img src="screenshots/ios/iphone-6.9/05-pages.png" width="23%" alt="Page organizer on iPhone">
-<img src="screenshots/ios/iphone-6.9/02-merge.png" width="23%" alt="Merging documents on iPhone">
+<img src="screenshots/ios/iphone-6.9/09-tools.png" width="23%" alt="The Tools tab on iPhone">
 
 </div>
 
@@ -86,7 +86,7 @@ On every platform, signatures and edits are written into the PDF itself, so they
 
 <p>
   <img src="screenshots/ios/ipad-13/01-library.png" width="32%" alt="Document library on iPad">
-  <img src="screenshots/ios/ipad-13/02-signed.png" width="32%" alt="A signed document on iPad">
+  <img src="screenshots/ios/ipad-13/07-tools.png" width="32%" alt="The Tools tab on iPad">
   <img src="screenshots/ios/ipad-13/05-pages.png" width="32%" alt="Page organizer on iPad">
 </p>
 
@@ -105,7 +105,7 @@ On every platform, signatures and edits are written into the PDF itself, so they
   <img src="screenshots/android/phone/01-library.png" width="23%" alt="Document library on Android">
   <img src="screenshots/android/phone/02-signed.png" width="23%" alt="A signed and highlighted document on Android">
   <img src="screenshots/android/phone/04-pages.png" width="23%" alt="Page organizer on Android">
-  <img src="screenshots/android/phone/06-about.png" width="23%" alt="About screen on Android">
+  <img src="screenshots/android/phone/07-tools.png" width="23%" alt="The Tools tab on Android">
 </p>
 
 ## Tech stack
