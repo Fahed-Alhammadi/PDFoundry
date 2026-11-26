@@ -1,6 +1,7 @@
 // Turning what the user draws or types into PNG images that the PDF engine stamps onto a page.
 
-export type Stroke = { points: { x: number; y: number }[]; color: string; width: number };
+/** `marker`: the highlighter pen, saved see-through over the page (it darkens like a marker instead of covering). */
+export type Stroke = { points: { x: number; y: number }[]; color: string; width: number; marker?: boolean };
 export type Placed = { png: Uint8Array; url: string; aspect: number };
 
 export async function toPng(canvas: HTMLCanvasElement): Promise<Uint8Array> {
@@ -63,7 +64,11 @@ function drawStroke(ctx: CanvasRenderingContext2D, stroke: Stroke, toX: (x: numb
 export function paintStrokes(canvas: HTMLCanvasElement, strokes: Stroke[]): void {
   const ctx = canvas.getContext('2d')!;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  for (const s of strokes) drawStroke(ctx, s, (x) => x * canvas.width, (y) => y * canvas.height, s.width * canvas.width);
+  for (const s of strokes) {
+    ctx.globalAlpha = s.marker ? 0.55 : 1; // a preview of how the marker will look once saved
+    drawStroke(ctx, s, (x) => x * canvas.width, (y) => y * canvas.height, s.width * canvas.width);
+  }
+  ctx.globalAlpha = 1;
 }
 
 /**

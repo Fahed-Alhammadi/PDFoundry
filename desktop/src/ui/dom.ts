@@ -68,6 +68,11 @@ const ICONS: Record<string, string> = {
   rename: 'M4 20h4L19 9l-4-4L4 16z M13 7l4 4',
   save: 'M12 4v11 M8 11l4 4 4-4 M5 20h14',
   pages: 'M4 4h7v7H4z M13 4h7v7h-7z M4 13h7v7H4z M13 13h7v7h-7z',
+  markup: 'M4 20h4L19 9l-4-4L4 16z M13 7l4 4 M14 20h6',
+  underline: 'M7 4v7a5 5 0 0 0 10 0V4 M5 20h14',
+  strike: 'M4 12h16 M16.5 7C15.6 5.4 14 4.5 12 4.5c-2.6 0-4.3 1.4-4.3 3.2 0 1 .5 1.8 1.4 2.4 M8 16.3c.9 1.9 2.5 3.2 4.4 3.2 2.6 0 4.3-1.4 4.3-3.3 0-.7-.2-1.3-.6-1.8',
+  caret: 'M7 10l5 5 5-5',
+  grid: 'M4 4h7v7H4z M13 4h7v7h-7z M4 13h7v7H4z M15 14v6 M12 17h6',
 };
 
 export function icon(name: string, size = 20): SVGSVGElement {
@@ -119,7 +124,7 @@ export function toast(message: string, error = false): void {
   toastTimer = setTimeout(() => el.remove(), error ? 6000 : 3200);
 }
 
-export type MenuItem = { label: string; icon?: string; danger?: boolean; disabled?: boolean; action: () => void } | 'separator';
+export type MenuItem = { label: string; icon?: string; swatch?: string; danger?: boolean; disabled?: boolean; action: () => void } | 'separator';
 
 /** A pop-up menu anchored under (or above) a button. */
 export function showMenu(anchor: HTMLElement, items: MenuItem[]): void {
@@ -134,7 +139,7 @@ export function showMenu(anchor: HTMLElement, items: MenuItem[]): void {
       h('button', {
         type: 'button', role: 'menuitem', disabled: item.disabled, class: item.danger ? 'danger' : '',
         onclick: () => { closeMenu(); item.action(); },
-      }, item.icon ? icon(item.icon, 18) : null, item.label),
+      }, item.icon ? icon(item.icon, 18) : null, item.swatch ? swatchDot(item.swatch) : null, item.label),
     );
   }
   document.body.append(menu);
@@ -148,6 +153,13 @@ export function showMenu(anchor: HTMLElement, items: MenuItem[]): void {
     document.addEventListener('pointerdown', outside, true);
     document.addEventListener('keydown', escape, true);
   });
+}
+
+/** A round colour sample for a menu item. Set through CSSOM, which the window's content policy allows. */
+function swatchDot(colour: string): HTMLElement {
+  const dot = h('span.menu-swatch');
+  dot.style.background = colour;
+  return dot;
 }
 
 function outside(e: Event): void {

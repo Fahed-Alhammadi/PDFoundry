@@ -1,4 +1,4 @@
-// The window: a side rail (Documents, Settings) and the view beside it. Opening a document replaces the library
+// The window: a side rail (Files, Tools, Settings) and the view beside it. Opening a document replaces the library
 // with the reader until the user goes back.
 import { api } from './api.ts';
 import type { Opened, UpdateState } from './api.ts';
@@ -6,9 +6,10 @@ import { h, icon, message, toast } from './dom.ts';
 import { Library } from './library.ts';
 import { Reader } from './reader.ts';
 import { SettingsView } from './settings.ts';
+import { ToolsView } from './tools.ts';
 import { runDemo } from './demo.ts';
 
-type Route = 'documents' | 'settings';
+export type Route = 'documents' | 'tools' | 'settings';
 
 async function start(): Promise<void> {
   const info = await api.info();
@@ -24,8 +25,13 @@ async function start(): Promise<void> {
     },
     opened: () => show('documents'),
   });
-  const library = new Library({ openDocument: (file) => void reader.open(file) });
+  const library = new Library({
+    openDocument: (file) => void reader.open(file),
+    openFile: () => reader.file,
+    contents: async (file) => reader.unsaved(file) ?? (await api.read(file)),
+  });
   const settings = new SettingsView(info);
+  const tools = new ToolsView({ library, openFile: () => reader.file, unsaved: (file) => reader.unsaved(file) });
 
   const nav = (target: Route, symbol: string, label: string) =>
     h('button.nav', { type: 'button', dataset: { route: target }, onclick: () => (target === 'documents' && route === 'documents' && reader.file ? void reader.close() : show(target)) }, icon(symbol, 20), label);
@@ -33,11 +39,12 @@ async function start(): Promise<void> {
   const rail = h('nav.rail', { 'aria-label': 'PDFoundry' },
     h('div.rail-brand', h('img', { src: 'logo.png', alt: '', width: 30, height: 30 }), h('span', 'PDFoundry')),
     nav('documents', 'documents', 'Files'),
+    nav('tools', 'grid', 'Tools'),
     nav('settings', 'settings', 'Settings'),
     h('span.spacer'),
     updatePill,
   );
-  const main = h('main', library.el, reader.el, settings.el);
+  const main = h('main', library.el, reader.el, tools.el, settings.el);
   document.getElementById('app')!.append(rail, main);
 
   function show(target: Route): void {
@@ -45,6 +52,7 @@ async function start(): Promise<void> {
     const reading = target === 'documents' && !!reader.file;
     library.el.hidden = target !== 'documents' || reading;
     reader.el.hidden = !reading;
+    tools.el.hidden = target !== 'tools';
     settings.el.hidden = target !== 'settings';
     for (const b of rail.querySelectorAll<HTMLElement>('.nav')) b.setAttribute('aria-current', String(b.dataset.route === target));
     if (target === 'settings') settings.showSettings();
@@ -108,7 +116,7 @@ async function start(): Promise<void> {
   await library.refresh();
   api.ready();
 
-  if (info.selfTest || info.shots) void runDemo(info, { library, reader, settings, show });
+  if (info.selfTest || info.shots) void runDemo(info, { library, reader, settings, tools, show });
 }
 
 window.addEventListener('unhandledrejection', (e) => toast(message(e.reason), true));

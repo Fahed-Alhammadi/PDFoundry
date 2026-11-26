@@ -1,4 +1,5 @@
-// The reader: one document, shown page by page, with the tools that change it (highlight, text, draw, sign),
+// The reader: one document, shown page by page, with the tools that change it (Markup: highlight, underline and
+// strikethrough on selected text, typed text, drawing; Fill & Sign: signatures and text; Pages: the organizer),
 // search, zoom, printing and undo. The file is opened where it is. Changes are kept in memory until the user
 // chooses Save (back to the same file) or Save As; leaving with unsaved changes asks first.
 import { api, revealLabel, title } from './api.ts';
@@ -6,26 +7,34 @@ import { button, choose, dialog, h, icon, iconButton, message, prompt, showMenu,
 import type { MenuItem } from './dom.ts';
 import { paintStrokes, rasterize, textImage } from './images.ts';
 import type { Placed, Stroke } from './images.ts';
+import { HIGHLIGHT_COLOURS, MARK_RED, modeBar } from './modebar.ts';
+import type { TextTool, ToolMode } from './modebar.ts';
 import { organizer } from './organizer.ts';
-import { PasswordNeeded, openPdf, pageSizes, renderPage, search } from './pdfview.ts';
+import { PasswordNeeded, openPdf, pageSizes, renderPage, renderTextLayer, search } from './pdfview.ts';
 import type { Match, PDFDocumentProxy, Size } from './pdfview.ts';
 import { signatureDialog } from './sign.ts';
 import * as pdf from '../core/pdf.ts';
+import type { PageRect, TextMark } from '../core/pdf.ts';
+import { joinBoxes } from '../core/rects.ts';
+import type { TextDirection } from '../core/rects.ts';
 
 const UNDO_STEPS = 10;
-const HIGHLIGHTS = [
-  { name: 'Yellow', color: '#ffe14d' },
-  { name: 'Green', color: '#8be28b' },
-  { name: 'Pink', color: '#ff9ec4' },
-  { name: 'Blue', color: '#8fcbff' },
-];
 const PENS = [
   { name: 'Black', color: '#111318' },
   { name: 'Blue', color: '#1a3fb0' },
   { name: 'Red', color: '#c62828' },
 ];
+/** Draw's highlighter pen: the freehand marker of earlier versions. */
+const MARKER = { name: 'Highlighter', color: '#ffe14d' };
+const NO_TEXT = 'This page has no text to mark up. Use Draw instead.';
+const MARK_HINTS: Record<TextMark, string> = {
+  highlight: 'Select text to highlight it.',
+  underline: 'Select text to underline it.',
+  strikethrough: 'Select text to strike it through.',
+};
 
-type Ink = { highlighter: boolean; color: string; strokes: Map<number, Stroke[]> };
+/** A drawing in progress. `marker`: the highlighter pen is the one in use. */
+type Ink = { marker: boolean; color: string; strokes: Map<number, Stroke[]> };
 type Placement = { item: Placed; page: number; x: number; y: number; width: number; box: HTMLElement };
 
 export type ReaderHost = { back: () => void; opened: (file: string) => void };
@@ -46,6 +55,10 @@ export class Reader {
   private busy = false;
   private ink: Ink | null = null;
   private placement: Placement | null = null;
+  /** The bar's mode. The reader always opens in the reading bar, and stays in a mode until its close button. */
+  toolMode: ToolMode = 'none';
+  /** Highlight, Underline or Strikethrough waiting for the user to select text (Markup only). */
+  private textTool: TextTool | null = null;
   private matches: Match[] = [];
   private matchAt = -1;
   private observer: IntersectionObserver | null = null;
@@ -60,6 +73,7 @@ export class Reader {
   private readonly findBar = h('div.find-bar', { hidden: true });
   private readonly scroller = h('div.pages', { tabIndex: 0, 'aria-label': 'Pages' });
   private readonly dock = h('div.dock', { role: 'toolbar', 'aria-label': 'Editing tools' });
+  private readonly dockNote = h('div.dock-note', { role: 'status', hidden: true });
 
   constructor(host: ReaderHost) {
     this.host = host;
@@ -82,9 +96,16 @@ export class Reader {
       this.findBar,
       this.notice,
       this.scroller,
+      this.dockNote,
       this.dock,
     );
     this.scroller.addEventListener('scroll', () => this.updateCounter(), { passive: true });
+    // With a text tool chosen, letting go of the mouse after selecting text marks it.
+    this.scroller.addEventListener('pointerup', (e) => {
+      if (this.textTool) setTimeout(() => void this.markSelection(e), 0);
+    });
+    // Pressing a tool must not take away the text selection it is meant for.
+    this.dock.addEventListener('mousedown', (e) => e.preventDefault());
     new ResizeObserver(() => {
       if (this.doc && this.zoom === 'fit') this.layout(true);
     }).observe(this.scroller);
@@ -129,6 +150,8 @@ export class Reader {
     this.undoStack = [];
     this.ink = null;
     this.placement = null;
+    this.toolMode = 'none';
+    this.textTool = null;
     this.matches = [];
     this.matchAt = -1;
     this.findBar.hidden = true;
@@ -260,10 +283,20 @@ export class Reader {
     page.dataset.painted = key;
     const doc = this.doc;
     try {
+      const index = Number(page.dataset.index);
       const fresh = h('canvas.sheet');
-      await (await renderPage(doc, Number(page.dataset.index), fresh, page.clientWidth)).promise;
-      if (doc !== this.doc) return;
+      await (await renderPage(doc, index, fresh, page.clientWidth)).promise;
+      if (doc !== this.doc || page.dataset.painted !== key) return; // outdated: a newer paint is under way
       page.querySelector('canvas.sheet')?.replaceWith(fresh); // swapped in when ready, so a redraw never flashes blank
+      // The selectable text over the picture, sized by the page box's pixels per point.
+      const layer = h('div');
+      page.style.setProperty('--total-scale-factor', String(page.clientWidth / this.sizes[index].width));
+      const pieces = await renderTextLayer(doc, index, layer);
+      // A newer paint of this page (a zoom, a change) may have replaced the picture meanwhile; its own text layer wins.
+      if (doc !== this.doc || !fresh.isConnected) return;
+      page.querySelector('.textLayer')?.remove();
+      fresh.after(layer);
+      page.dataset.text = String(pieces);
     } catch {
       delete page.dataset.painted;
     }
@@ -374,11 +407,16 @@ export class Reader {
     return this.bytes;
   }
 
-  // The dock: tools, or the controls of the tool in use
+  /** The open document's bytes when `file` is it and it has unsaved changes; otherwise null. */
+  unsaved(file: string): Uint8Array | null {
+    return this.dirty && file === this.file ? this.bytes : null;
+  }
+
+  // The dock: the mode bar (modebar.ts), or the controls of the tool in use
 
   private drawDock(): void {
-    const tool = (name: string, label: string, onclick: () => void, disabled = false) =>
-      h('button.tool', { type: 'button', disabled: disabled || !this.editable, onclick }, icon(name, 22), h('span', label));
+    this.dock.hidden = !this.doc || !this.editable; // a protected PDF is only read: no tools
+    this.dockNote.hidden = true;
     if (this.placement) {
       this.dock.replaceChildren(
         h('span.dock-hint', 'Drag it into place. Drag the corner to resize.'),
@@ -387,41 +425,149 @@ export class Reader {
       );
     } else if (this.ink) {
       const ink = this.ink;
-      const swatches = (ink.highlighter ? HIGHLIGHTS : PENS).map((option) =>
+      const choice = (name: string, color: string, marker: boolean) =>
         h('button.swatch', {
-          type: 'button', title: option.name, 'aria-label': option.name, 'aria-pressed': String(option.color === ink.color),
+          type: 'button', title: name, 'aria-label': name, 'aria-pressed': String(ink.marker === marker && ink.color === color),
           onclick: () => {
-            ink.color = option.color;
+            ink.color = color;
+            ink.marker = marker;
             this.drawDock();
           },
-        }, h('span', { class: `colour-${option.name.toLowerCase()}${ink.highlighter ? '-light' : ''}` })),
-      );
+        }, h('span', { class: marker ? 'colour-marker' : `colour-${name.toLowerCase()}` }));
       const count = [...ink.strokes.values()].reduce((n, s) => n + s.length, 0);
       this.dock.replaceChildren(
-        h('span.dock-hint', ink.highlighter ? 'Drag over what you want to highlight.' : 'Draw on the page.'),
-        ...swatches,
+        h('span.dock-hint', ink.marker ? 'Drag over what you want to mark.' : 'Draw on the page.'),
+        ...PENS.map((pen) => choice(pen.name, pen.color, false)),
+        choice(MARKER.name, MARKER.color, true),
         h('button.tool.compact', { type: 'button', disabled: !count, onclick: () => this.removeLastStroke() }, icon('undo', 20), h('span', 'Remove last')),
         button('Cancel', () => this.endInk()),
         h('button.button.primary', { type: 'button', disabled: !count, onclick: () => void this.saveInk() }, 'Done'),
       );
     } else {
-      this.dock.replaceChildren(
-        tool('highlight', 'Highlight', () => this.beginInk(true)),
-        tool('text', 'Text', () => this.textDialog()),
-        tool('draw', 'Draw', () => this.beginInk(false)),
-        tool('sign', 'Sign', () => void signatureDialog((signature) => this.beginPlacement(signature, 0.32))),
-        tool('undo', 'Undo', () => void this.undo(), !this.undoStack.length),
-      );
+      this.dock.replaceChildren(...modeBar(this.toolMode, { canUndo: this.undoStack.length > 0, armed: this.textTool }, {
+        setMode: (mode) => this.setMode(mode),
+        highlight: (anchor) => this.highlightMenu(anchor),
+        textMark: (mark) => this.chooseTextTool({ mark, rgba: MARK_RED }, true),
+        text: () => {
+          this.textTool = null;
+          this.textDialog();
+        },
+        draw: () => this.beginInk(),
+        signature: () => void signatureDialog((signature) => this.beginPlacement(signature, 0.32)),
+        pages: () => this.organize(),
+        undo: () => void this.undo(),
+      }));
+      if (this.textTool) {
+        this.dockNote.textContent = MARK_HINTS[this.textTool.mark];
+        this.dockNote.hidden = false;
+      }
     }
     this.el.classList.toggle('inking', !!this.ink);
-    this.el.classList.toggle('highlighting', !!this.ink?.highlighter);
+    this.el.classList.toggle('placing', !!this.placement);
+    this.el.classList.toggle('marking', !!this.textTool && !this.ink && !this.placement);
   }
 
-  // Drawing and highlighting
+  /** Switches the bar to a mode (or back to reading with 'none'). */
+  setMode(mode: ToolMode): void {
+    if (!this.editable && mode !== 'none') return;
+    this.toolMode = mode;
+    this.textTool = null;
+    this.drawDock();
+  }
 
-  private beginInk(highlighter: boolean): void {
+  // Marking selected text (Markup: Highlight, Underline, Strikethrough)
+
+  private highlightMenu(anchor: HTMLElement): void {
+    const waiting = this.selectedBoxes(); // the menu may take the selection away; remember it now
+    showMenu(anchor, HIGHLIGHT_COLOURS.map((colour) => ({
+      label: colour.name,
+      swatch: colour.css,
+      action: () => this.chooseTextTool({ mark: 'highlight', rgba: colour.rgba }, false, waiting),
+    })));
+  }
+
+  /**
+   * Picks a text tool. Text that is already selected is marked at once; otherwise the tool waits for a selection.
+   * `toggle`: choosing the tool that is already waiting puts it away again.
+   */
+  private chooseTextTool(tool: TextTool, toggle: boolean, waiting = this.selectedBoxes()): void {
+    this.textTool = toggle && this.textTool?.mark === tool.mark ? null : tool;
+    this.drawDock();
+    if (this.textTool && waiting.size) void this.applyMark(waiting);
+  }
+
+  /** The selected text as boxes on each page (fractions of the page), one box per line. Empty when nothing is selected. */
+  private selectedBoxes(): Map<number, PageRect[]> {
+    const found = new Map<number, PageRect[]>();
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed) return found;
+    // Boxes are joined per page and per direction of the text, which comes from the page's rotation plus the span's
+    // own (pdf.js sets --rotate on rotated runs); a box's shape says nothing about it.
+    const byLine = new Map<string, { index: number; direction: TextDirection; boxes: PageRect[] }>();
+    const pages = this.pageEls();
+    for (let r = 0; r < selection.rangeCount; r++) {
+      const range = selection.getRangeAt(r);
+      // Only the text itself: a range also reports whole elements it covers (a page, a canvas), which must not count.
+      const walker = document.createTreeWalker(range.commonAncestorContainer, NodeFilter.SHOW_TEXT);
+      const nodes: Node[] = range.commonAncestorContainer.nodeType === Node.TEXT_NODE ? [range.commonAncestorContainer] : [];
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) nodes.push(node);
+      for (const node of nodes) {
+        const layer = node.parentElement?.closest<HTMLElement>('.textLayer');
+        const page = layer?.closest<HTMLElement>('.page');
+        if (!layer || !page || !range.intersectsNode(node)) continue;
+        const index = pages.indexOf(page);
+        const turn = Number(layer.getAttribute('data-main-rotation') || 0) + (parseFloat(node.parentElement!.style.getPropertyValue('--rotate')) || 0);
+        const direction: TextDirection = Math.round(turn / 90) % 2 ? 'down' : 'across';
+        const key = `${index}:${direction}`;
+        const line = byLine.get(key) ?? { index, direction, boxes: [] };
+        byLine.set(key, line);
+        const part = document.createRange();
+        part.selectNodeContents(node);
+        if (node === range.startContainer) part.setStart(node, range.startOffset);
+        if (node === range.endContainer) part.setEnd(node, range.endOffset);
+        const box = page.getBoundingClientRect();
+        for (const rect of part.getClientRects()) {
+          const x = Math.max(0, (rect.left - box.left) / box.width);
+          const y = Math.max(0, (rect.top - box.top) / box.height);
+          const right = Math.min(1, (rect.right - box.left) / box.width);
+          const bottom = Math.min(1, (rect.bottom - box.top) / box.height);
+          if (right > x && bottom > y) line.boxes.push({ x, y, width: right - x, height: bottom - y });
+        }
+      }
+    }
+    for (const { index, direction, boxes } of byLine.values()) {
+      const joined = joinBoxes(boxes, direction);
+      if (joined.length) found.set(index, [...(found.get(index) ?? []), ...joined]);
+    }
+    return found;
+  }
+
+  /** After a selection with a text tool chosen: marks it, or explains why a page without text cannot be marked. */
+  private async markSelection(e: PointerEvent): Promise<void> {
+    if (!this.textTool || this.ink || this.placement || this.busy) return;
+    const boxes = this.selectedBoxes();
+    if (boxes.size) return void this.applyMark(boxes);
+    const page = (e.target as HTMLElement | null)?.closest?.<HTMLElement>('.page');
+    if (page?.dataset.text === '0') toast(NO_TEXT);
+  }
+
+  private async applyMark(boxes: Map<number, PageRect[]>): Promise<void> {
+    const tool = this.textTool;
+    if (!tool) return;
+    window.getSelection()?.removeAllRanges();
+    await this.change(async (bytes) => {
+      let out = bytes;
+      for (const [index, rects] of boxes) out = await pdf.markText(out, index, rects, tool.mark, tool.rgba);
+      return out;
+    });
+  }
+
+  // Drawing (Markup > Draw), with the highlighter pen
+
+  private beginInk(): void {
     if (!this.editable) return;
-    this.ink = { highlighter, color: (highlighter ? HIGHLIGHTS : PENS)[0].color, strokes: new Map() };
+    this.textTool = null;
+    this.ink = { marker: false, color: PENS[0].color, strokes: new Map() };
     this.drawDock();
   }
 
@@ -472,7 +618,7 @@ export class Reader {
       y: Math.min(1, Math.max(0, (ev.clientY - box.top) / box.height)),
     });
     // Widths are in points, stored as a fraction of the page width: a 14 pt marker, a 2 pt pen.
-    const stroke: Stroke = { points: [point(e)], color: ink.color, width: (ink.highlighter ? 14 : 2) / this.sizes[index].width };
+    const stroke: Stroke = { points: [point(e)], color: ink.color, width: (ink.marker ? 14 : 2) / this.sizes[index].width, marker: ink.marker };
     const strokes = ink.strokes.get(index) ?? [];
     strokes.push(stroke);
     ink.strokes.set(index, strokes);
@@ -514,8 +660,11 @@ export class Reader {
     const ok = await this.change(async (bytes) => {
       let out = bytes;
       for (const [index, strokes] of ink.strokes) {
-        const image = await rasterize(strokes, this.sizes[index]);
-        if (image) out = await pdf.stamp(out, index, image.png, image.rect, ink.highlighter ? { multiply: true, opacity: 0.55 } : {});
+        // Pen strokes cover the page; marker strokes darken it, so they are saved as a second, see-through image.
+        const pen = await rasterize(strokes.filter((s) => !s.marker), this.sizes[index]);
+        if (pen) out = await pdf.stamp(out, index, pen.png, pen.rect);
+        const marker = await rasterize(strokes.filter((s) => s.marker), this.sizes[index]);
+        if (marker) out = await pdf.stamp(out, index, marker.png, marker.rect, { multiply: true, opacity: 0.55 });
       }
       return out;
     });
