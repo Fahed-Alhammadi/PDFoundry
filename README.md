@@ -55,9 +55,9 @@ The phone apps are native: Swift and SwiftUI on iPhone and iPad, Kotlin and Jetp
 |---|---|---|
 | iPhone and iPad | 1.0.0 | Submitted to the App Store, waiting for review. Available to testers on TestFlight |
 | Android | 1.0.0 | In closed testing on Google Play |
-| macOS, Windows and Linux | 1.0.0 | Built and tested. Not released yet |
+| macOS, Windows and Linux | 1.0.0 | Released. [Download](https://github.com/Fahed-Alhammadi/PDFoundry/releases/latest). The Mac app is signed and notarized |
 
-Store and download links will be added here and on the [website](https://fahed-alhammadi.github.io/PDFoundry/) when the apps are public.
+Store links for the phone apps will be added here and on the [website](https://fahed-alhammadi.github.io/PDFoundry/) when the apps are public.
 
 ## Features
 

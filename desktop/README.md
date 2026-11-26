@@ -1,6 +1,6 @@
 # PDFoundry for macOS, Windows and Linux
 
-The desktop app: read, merge, edit and sign PDFs. Built with Electron and TypeScript, without a UI framework.
+The desktop app: read, merge, edit and sign PDFs. [Download the latest release](https://github.com/Fahed-Alhammadi/PDFoundry/releases/latest). Built with Electron and TypeScript, without a UI framework.
 
 ## Build and run
 
