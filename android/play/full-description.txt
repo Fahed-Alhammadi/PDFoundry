@@ -1,0 +1,37 @@
+PDFoundry is a simple, private PDF app. Open a document, do what you need, and send it on. Everything happens on your device.
+
+READ
+• Open PDFs from your files, email, browser or any app's share menu
+• Search the text of a document
+• Pinch to zoom
+• Scan paper with the camera, or build a PDF from your photos
+
+MERGE
+• Select two or more documents and join them into one
+• Put the files in the order you want before merging
+
+EDIT
+• Highlight with a marker
+• Type text anywhere on a page
+• Draw with your finger or a stylus
+• Reorder, rotate, duplicate, extract and delete pages
+• Add blank pages
+• Undo your last changes
+
+SIGN
+• Draw your signature once and reuse it
+• Choose black or blue ink
+• Drag the signature onto the line, resize it, and place it
+• Signed documents look the same in every PDF reader
+
+ORGANISE
+• Rename, duplicate, share, print and delete documents
+• Sort and search your library
+
+PRIVATE BY DESIGN
+• No account and no sign-in
+• No ads and no analytics
+• Nothing is uploaded: your documents and signatures never leave your device
+• PDFoundry asks for no permissions
+
+PDFoundry is open source under the MIT License.
