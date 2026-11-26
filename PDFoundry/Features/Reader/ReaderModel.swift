@@ -45,8 +45,10 @@ final class ReaderModel {
 
     let url: URL
     private(set) var document: PDFDocument?
-    /// A file still in iCloud is being downloaded.
-    private(set) var isLoading = false
+    /// The file is being read. It has not been shown yet.
+    private(set) var isLoading = true
+    /// The file is in iCloud and is being downloaded first.
+    private(set) var isDownloading = false
     private(set) var isLocked = false
     private(set) var pageIndex = 0
     private(set) var pageCount = 0
@@ -65,7 +67,8 @@ final class ReaderModel {
     @ObservationIgnored private var undoStack: [[(PDFPage, PDFAnnotation)]] = []
     @ObservationIgnored private var hintTask: Task<Void, Never>?
     /// Keeps a file from the Files app readable and writable while it is open here.
-    @ObservationIgnored private let access: FileAccess
+    @ObservationIgnored private var access: FileAccess?
+    @ObservationIgnored private var didLoad = false
 
     var title: String { url.deletingPathExtension().lastPathComponent }
 
@@ -75,22 +78,33 @@ final class ReaderModel {
     /// Password-protected files open read-only, so saving never strips their protection.
     var canEdit: Bool { document.map { !$0.isEncrypted } ?? false }
 
+    /// Does no work: SwiftUI may create a model more than once for the same screen. `load` reads the file.
     init(url: URL) {
         self.url = url
+    }
+
+    /// Reads the file, away from the main thread, and shows it. Only the first call does anything.
+    func load() async {
+        guard !didLoad else { return }
+        didLoad = true
         access = FileAccess(url)
-        adopt(PDFDocument(url: url))
-        original = document == nil ? nil : try? Data(contentsOf: url)
-        if document == nil {
+        var data = await Self.data(at: url)
+        if data == nil {
             // Perhaps a file in iCloud that is not on this device yet: reading it through a file coordinator
             // downloads it first.
-            isLoading = true
-            Task {
-                let data = await Self.coordinatedData(at: url)
-                adopt(data.flatMap(PDFDocument.init(data:)))
-                original = document == nil ? nil : data
-                isLoading = false
-            }
+            isDownloading = true
+            data = await Self.coordinatedData(at: url)
+            isDownloading = false
         }
+        // The document is built from the bytes in memory, which are also the original kept for Revert.
+        adopt(data.flatMap(PDFDocument.init(data:)))
+        original = document == nil ? nil : data
+        isLoading = false
+    }
+
+    @concurrent
+    private nonisolated static func data(at url: URL) async -> Data? {
+        try? Data(contentsOf: url)
     }
 
     private func adopt(_ loaded: PDFDocument?) {
@@ -281,9 +295,11 @@ final class ReaderModel {
         var written = false
         var error: NSError?
         NSFileCoordinator().coordinate(writingItemAt: url, options: .forReplacing, error: &error) { target in
-            written = (try? original.write(to: target, options: .atomic)) != nil
+            // Not an atomic write: that needs a temporary file beside the target, and a file picked in Files
+            // gives access to the file alone, not its folder. The coordinator already makes it one change.
+            written = (try? original.write(to: target)) != nil
         }
-        guard written, let restored = PDFDocument(url: url) ?? PDFDocument(data: original) else {
+        guard written, let restored = PDFDocument(data: original) else {
             errorMessage = "The original couldn't be put back."
             return false
         }
@@ -304,6 +320,12 @@ final class ReaderModel {
         let folder = FileManager.default.temporaryDirectory.appending(path: "Share-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let copy = folder.appending(path: title + ".pdf")
+        if document.isEncrypted {
+            // Writing the open document would save it without its password, so the file itself is shared, byte for
+            // byte. It is read-only here, so the file is the document as shown.
+            if (try? FileManager.default.copyItem(at: url, to: copy)) != nil { return copy }
+            return (try? original?.write(to: copy)) != nil ? copy : nil
+        }
         return document.write(to: copy) ? copy : nil
     }
 

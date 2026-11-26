@@ -66,6 +66,7 @@ struct ReaderView: View {
             .sheet(item: $shared) { file in
                 ActivityView(url: file.url)
             }
+            .task { await model.load() }
     }
 
     /// When the file can't be changed where it is, the edited document is kept as a new one inside PDFoundry.
@@ -81,7 +82,8 @@ struct ReaderView: View {
     @ViewBuilder
     private var content: some View {
         if model.isLoading {
-            ProgressView("Downloading from iCloud…")
+            // Reading a file on the device is too quick for a label; a download from iCloud says what it is doing.
+            ProgressView(model.isDownloading ? "Downloading from iCloud…" : "")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if model.document == nil {
             ContentUnavailableView("Unable to Open", systemImage: "doc.questionmark", description: Text("This file isn't a readable PDF."))

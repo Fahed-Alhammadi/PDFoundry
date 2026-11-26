@@ -171,6 +171,7 @@ struct PDFOperationsTests {
         try await store.open([contract])
 
         let model = ReaderModel(url: contract)
+        await model.load()
         #expect(!model.canRevert)
         try #require(model.document).page(at: 0)?.rotation = 90
         model.pagesDidChange()
@@ -181,6 +182,23 @@ struct PDFOperationsTests {
         #expect(try FileManager.default.contentsOfDirectory(atPath: elsewhere.path) == ["Contract.pdf"], "no stray files beside it")
     }
 
+    @Test func sharingAPasswordProtectedFileKeepsItsPassword() async throws {
+        let (_, _, elsewhere) = try makeStore()
+        let secret = elsewhere.appending(path: "Secret.pdf")
+        let plain = try #require(PDFDocument(url: try makePDF(named: "Secret", pages: 1)))
+        #expect(plain.write(to: secret, withOptions: [.userPasswordOption: "open-me", .ownerPasswordOption: "open-me"]))
+
+        let model = ReaderModel(url: secret)
+        await model.load()
+        #expect(model.isLocked)
+        #expect(model.unlock(with: "open-me"))
+
+        let shared = try #require(model.temporaryCopy())
+        let copy = try #require(PDFDocument(url: shared))
+        #expect(copy.isLocked, "the shared copy still asks for the password")
+        #expect(try Data(contentsOf: shared) == Data(contentsOf: secret))
+    }
+
     @Test func revertPutsTheFileBackExactlyAsItWasOpened() async throws {
         let (_, _, elsewhere) = try makeStore()
         let contract = elsewhere.appending(path: "Contract.pdf")
@@ -188,6 +206,7 @@ struct PDFOperationsTests {
         let before = try Data(contentsOf: contract)
 
         let model = ReaderModel(url: contract)
+        await model.load()
         let document = try #require(model.document)
         document.page(at: 0)?.rotation = 180
         document.removePage(at: 2) // a deleted page cannot be brought back any other way

@@ -91,12 +91,24 @@ final class DocumentStore {
         await refresh()
     }
 
+    /// Counts the refreshes, so one that started earlier never replaces the list of one that started later.
+    @ObservationIgnored private var refreshCount = 0
+
     func refresh() async {
+        refreshCount += 1
+        let turn = refreshCount
         let kept = await Self.scan(directory)
-        let (linked, dead) = await Self.resolve(links)
-        // Files deleted or moved away drop off the list. Only those exact bookmarks are removed: another file may
-        // have been opened while this was working, and it must not be lost.
-        if !dead.isEmpty { links = links.filter { !dead.contains($0.bookmark) } }
+        let (linked, dead, renewed) = await Self.resolve(links)
+        // Files that were deleted drop off the list. Only those exact bookmarks are removed: another file may
+        // have been opened while this was working, and it must not be lost. A file that just can't be reached
+        // right now (its app is signed out, a drive is unplugged) keeps its bookmark and comes back later.
+        if !dead.isEmpty || !renewed.isEmpty {
+            links = links.filter { !dead.contains($0.bookmark) }.map { link in
+                renewed[link.bookmark].map { Link(bookmark: $0, added: link.added) } ?? link
+            }
+        }
+        // A later refresh has started and has newer facts: the list is left to it.
+        guard turn == refreshCount else { return }
         let own = Set(kept.map { $0.url.standardizedFileURL })
         items = kept + linked.filter { !own.contains($0.url.standardizedFileURL) }
         isLoaded = true
@@ -160,7 +172,8 @@ final class DocumentStore {
         guard !gone.isEmpty else { return }
         links = links.filter { link in
             var stale = false
-            guard let url = try? URL(resolvingBookmarkData: link.bookmark, bookmarkDataIsStale: &stale) else { return false }
+            // A bookmark that can't be read right now is kept: refresh removes the ones that are really dead.
+            guard let url = try? URL(resolvingBookmarkData: link.bookmark, bookmarkDataIsStale: &stale) else { return true }
             return !gone.contains(url.standardizedFileURL)
         }
         await refresh()
@@ -280,9 +293,12 @@ final class DocumentStore {
     @discardableResult
     func merge(_ sources: [PDFItem], named name: String, deleteOriginals: Bool) async throws -> URL {
         let access = sources.map { FileAccess($0.url) }
-        let merged = try withExtendedLifetime(access) { try PDFOperations.merge(sources.map(\.url)) }
         let destination = uniqueURL(named: name)
-        guard merged.write(to: destination) else { throw PDFoundryError.writeFailed }
+        // PDFKit reads page contents from the source files while it writes, so access lasts until the write is done.
+        try withExtendedLifetime(access) {
+            let merged = try PDFOperations.merge(sources.map(\.url))
+            guard merged.write(to: destination) else { throw PDFoundryError.writeFailed }
+        }
         if deleteOriginals {
             // Only documents kept in PDFoundry are deleted. Files opened in place are just taken off the list.
             for source in sources where !source.isExternal { try? FileManager.default.removeItem(at: source.url) }
@@ -361,22 +377,41 @@ final class DocumentStore {
 }
 
 extension DocumentStore {
-    /// Turns the saved bookmarks back into files. Returns the items to show, and the bookmarks whose file is gone
-    /// (deleted or moved away) so they can be dropped.
+    /// The file is certainly gone (deleted), not just out of reach for now.
+    private nonisolated static func isGone(_ error: Error) -> Bool {
+        let error = error as NSError
+        guard error.domain == NSCocoaErrorDomain else { return false }
+        return error.code == NSFileNoSuchFileError || error.code == NSFileReadNoSuchFileError
+    }
+
+    /// Turns the saved bookmarks back into files. Returns the items to show, the bookmarks whose file is gone
+    /// (deleted) so they can be dropped, and fresh bookmarks for the ones the system reported as stale.
+    /// A file that can't be reached right now is left out of the items but keeps its bookmark.
     @concurrent
-    fileprivate nonisolated static func resolve(_ links: [Link]) async -> ([PDFItem], Set<Data>) {
+    fileprivate nonisolated static func resolve(_ links: [Link]) async -> ([PDFItem], Set<Data>, [Data: Data]) {
         var items: [PDFItem] = []
         var dead: Set<Data> = []
+        var renewed: [Data: Data] = [:]
         var seen: Set<URL> = []
         let keys: Set<URLResourceKey> = [.fileSizeKey, .contentModificationDateKey, .ubiquitousItemDownloadingStatusKey]
         for link in links {
             var stale = false
-            guard let url = try? URL(resolvingBookmarkData: link.bookmark, bookmarkDataIsStale: &stale) else {
-                dead.insert(link.bookmark)
+            let url: URL
+            do {
+                url = try URL(resolvingBookmarkData: link.bookmark, bookmarkDataIsStale: &stale)
+            } catch {
+                if isGone(error) { dead.insert(link.bookmark) }
                 continue
             }
             let kept: Bool = FileAccess.with(url) {
-                guard (try? url.checkResourceIsReachable()) == true, seen.insert(url.standardizedFileURL).inserted else { return false }
+                do {
+                    guard try url.checkResourceIsReachable() else { return true }
+                } catch {
+                    return !isGone(error)
+                }
+                // The same file listed twice: the second bookmark is dropped.
+                guard seen.insert(url.standardizedFileURL).inserted else { return false }
+                if stale, let fresh = try? url.bookmarkData() { renewed[link.bookmark] = fresh }
                 let values = try? url.resourceValues(forKeys: keys)
                 let waiting = values?.ubiquitousItemDownloadingStatus.map { $0 != .current } ?? false
                 let document = waiting ? nil : PDFDocument(url: url)
@@ -394,7 +429,7 @@ extension DocumentStore {
             }
             if !kept { dead.insert(link.bookmark) }
         }
-        return (items, dead)
+        return (items, dead, renewed)
     }
 }
 
