@@ -47,10 +47,14 @@ nonisolated final class ImageStampAnnotation: PDFAnnotation {
 enum PDFOperations {
     /// Joins the given files, in order, into one new document.
     static func merge(_ urls: [URL]) throws -> PDFDocument {
+        try merge(urls.map { (name: $0.deletingPathExtension().lastPathComponent, data: try? Data(contentsOf: $0)) })
+    }
+
+    /// Joins documents already read into memory, in order. A nil `data` is a file that couldn't be read.
+    static func merge(_ sources: [(name: String, data: Data?)]) throws -> PDFDocument {
         let merged = PDFDocument()
-        for url in urls {
-            let name = url.deletingPathExtension().lastPathComponent
-            guard let source = PDFDocument(url: url) else { throw PDFoundryError.unreadable(name) }
+        for (name, data) in sources {
+            guard let source = data.flatMap(PDFDocument.init(data:)) else { throw PDFoundryError.unreadable(name) }
             guard !source.isLocked else { throw PDFoundryError.locked(name) }
             for index in 0..<source.pageCount {
                 guard let page = source.page(at: index)?.copy() as? PDFPage else { continue }

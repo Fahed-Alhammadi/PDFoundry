@@ -1,9 +1,8 @@
-New in this build: fixes for files opened where they are.
+New in this build: a new Tools tab and a clearer reader.
 
-• Sharing a password-protected PDF keeps its password.
-• Revert to Original now works for files opened from Files and iCloud Drive.
-• Merging files opened from Files or iCloud Drive is more reliable.
-• A file that can't be reached for a moment (signed-out cloud app, unplugged drive) is no longer removed from the list.
-• Large files open without freezing the screen.
+• Tools tab: Scan Document, Create from Photos, Merge PDFs and Extract Pages in one place.
+• Extract Pages saves the pages you choose as a new PDF and never changes the original.
+• The reader's bar now has labelled groups: Markup (highlight, underline, strikethrough, text, draw), Fill & Sign (signature, text) and Pages.
+• After you place a signature the bar stays in Fill & Sign, so signing a second spot takes one tap.
 
-Please try: open a PDF from Files or iCloud Drive, sign or add text, then More (…) > Revert to Original. Also merge two PDFs opened from Files, and share a password-protected PDF.
+Please try: Tools > Extract Pages on a file opened from Files, then check the original is unchanged. Sign a document in two places. Highlight, underline and strike through some text.

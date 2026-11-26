@@ -28,6 +28,7 @@ struct ReaderView: View {
             .navigationBarBackButtonHidden(model.mode != .reading)
             .toolbar(.hidden, for: .tabBar)
             .toolbar { toolbar }
+            .safeAreaInset(edge: .bottom) { bottomBar }
             .sheet(isPresented: $showPages) {
                 PageOrganizerView(model: model)
                     .presentationSizing(.page)
@@ -173,6 +174,34 @@ struct ReaderView: View {
         password = ""
     }
 
+    // MARK: Bottom bar
+
+    /// The mode bar while reading. Drawing and placing use the top bar's Cancel and Done / Place instead.
+    @ViewBuilder
+    private var bottomBar: some View {
+        if model.document != nil, !model.isLocked, model.mode == .reading {
+            if model.canEdit {
+                ModeBar(model: model) {
+                    showPages = true
+                } onText: {
+                    newText = ""
+                    showTextPrompt = true
+                } onSignature: {
+                    showSignatures = true
+                }
+            } else {
+                Label("Password-protected documents are read-only.", systemImage: "lock.fill")
+                    .labelStyle(.titleAndIcon)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .glassEffect()
+                    .padding(.bottom, 6)
+            }
+        }
+    }
+
     // MARK: Toolbar
 
     @ToolbarContentBuilder
@@ -204,9 +233,6 @@ struct ReaderView: View {
         ToolbarItemGroup(placement: .topBarTrailing) {
             Button("Search", systemImage: "magnifyingglass") { model.showSearch() }
             Menu("More", systemImage: "ellipsis") {
-                if model.canEdit {
-                    Button("Organize Pages", systemImage: "square.grid.2x2") { showPages = true }
-                }
                 Button("Share", systemImage: "square.and.arrow.up") {
                     if let url = model.temporaryCopy() { shared = SharedFile(url: url) }
                 }
@@ -216,40 +242,6 @@ struct ReaderView: View {
                     Button("Revert to Original", systemImage: "arrow.uturn.backward.circle", role: .destructive) { askToRevert = true }
                         .disabled(!model.canRevert)
                 }
-            }
-        }
-
-        if model.canEdit {
-            ToolbarItemGroup(placement: .bottomBar) {
-                Menu("Mark Up Text", systemImage: "highlighter") {
-                    Section("Highlight") {
-                        Button("Yellow") { model.markup(.highlight, color: .systemYellow.withAlphaComponent(0.5)) }
-                        Button("Green") { model.markup(.highlight, color: .systemGreen.withAlphaComponent(0.4)) }
-                        Button("Pink") { model.markup(.highlight, color: .systemPink.withAlphaComponent(0.4)) }
-                        Button("Blue") { model.markup(.highlight, color: .systemBlue.withAlphaComponent(0.35)) }
-                    }
-                    Button("Underline", systemImage: "underline") { model.markup(.underline, color: .systemRed) }
-                    Button("Strikethrough", systemImage: "strikethrough") { model.markup(.strikeOut, color: .systemRed) }
-                }
-                Spacer()
-                Button("Add Text", systemImage: "textformat") {
-                    newText = ""
-                    showTextPrompt = true
-                }
-                Spacer()
-                Button("Draw", systemImage: "pencil.tip.crop.circle") { model.beginDrawing() }
-                Spacer()
-                Button("Sign", systemImage: "signature") { showSignatures = true }
-                Spacer()
-                Button("Undo", systemImage: "arrow.uturn.backward") { model.undo() }
-                    .disabled(!model.canUndo)
-            }
-        } else {
-            ToolbarItem(placement: .bottomBar) {
-                Label("Password-protected documents are read-only.", systemImage: "lock.fill")
-                    .labelStyle(.titleAndIcon)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
             }
         }
     }

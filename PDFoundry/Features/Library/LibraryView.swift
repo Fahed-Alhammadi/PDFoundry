@@ -54,11 +54,11 @@ struct LibraryView: View {
         .onChange(of: photoItems) { _, items in
             guard !items.isEmpty else { return }
             photoItems = []
-            perform { try await createFromPhotos(items) }
+            perform { try await store.createFromPhotos(items) }
         }
         .fullScreenCover(isPresented: $showScanner) {
             DocumentScanner { images in
-                perform { try await store.create(from: images, named: "Scan \(Date.now.formatted(date: .abbreviated, time: .shortened))") }
+                perform { try await store.createFromScan(images) }
             }
             .ignoresSafeArea()
         }
@@ -275,19 +275,9 @@ struct LibraryView: View {
             }
         }
     }
-
-    private func createFromPhotos(_ items: [PhotosPickerItem]) async throws {
-        var images: [UIImage] = []
-        for item in items {
-            if let data = try await item.loadTransferable(type: Data.self), let image = UIImage(data: data) {
-                images.append(image)
-            }
-        }
-        try await store.create(from: images, named: "Photos \(Date.now.formatted(date: .abbreviated, time: .shortened))")
-    }
 }
 
-private struct MergeRequest: Identifiable {
+struct MergeRequest: Identifiable {
     let items: [PDFItem]
     var id: [URL] { items.map(\.url) }
 }
@@ -375,6 +365,12 @@ struct MergeSheet: View {
 
     private var totalPages: Int { items.reduce(0) { $0 + $1.pageCount } }
 
+    /// Deleting originals only applies to documents kept in PDFoundry. Files that live elsewhere (opened in place or
+    /// picked in Files) are never deleted, so the switch isn't offered when there are only those.
+    static func offersDeletingOriginals(_ items: [PDFItem]) -> Bool {
+        items.contains { !$0.isExternal && !$0.isPicked }
+    }
+
     var body: some View {
         NavigationStack {
             List {
@@ -400,8 +396,10 @@ struct MergeSheet: View {
                 } footer: {
                     Text("Drag to rearrange. The merged document will have \(totalPages) pages.")
                 }
-                Section {
-                    Toggle("Delete Originals After Merging", isOn: $deleteOriginals)
+                if Self.offersDeletingOriginals(items) {
+                    Section {
+                        Toggle("Delete Originals After Merging", isOn: $deleteOriginals)
+                    }
                 }
             }
             .environment(\.editMode, .constant(.active))
@@ -413,7 +411,7 @@ struct MergeSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Merge") {
-                        onMerge(items, name, deleteOriginals)
+                        onMerge(items, name, deleteOriginals && Self.offersDeletingOriginals(items))
                         dismiss()
                     }
                     .disabled(DocumentStore.sanitized(name).isEmpty)

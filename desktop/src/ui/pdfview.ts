@@ -63,6 +63,19 @@ export async function renderPage(doc: PDFDocumentProxy, index: number, canvas: H
   return task;
 }
 
+/**
+ * Lays the page's text over its picture as invisible, selectable text (pdf.js's text layer), so the user can select
+ * words to mark up or copy. `container` gets the class "textLayer" and fills the page box; the page box must set
+ * --total-scale-factor to its CSS pixels per point. Returns how many pieces of text the page has (0 = a scan).
+ */
+export async function renderTextLayer(doc: PDFDocumentProxy, index: number, container: HTMLElement): Promise<number> {
+  const page = await doc.getPage(index + 1);
+  const content = await page.getTextContent();
+  container.classList.add('textLayer');
+  await new pdfjs.TextLayer({ textContentSource: content, container, viewport: page.getViewport({ scale: 1 }) }).render();
+  return content.items.filter((item) => 'str' in item && item.str.trim()).length;
+}
+
 /** A small picture of the first page, as an object URL, and the page count. */
 export async function thumbnail(bytes: Uint8Array, width = 360): Promise<{ url: string; pages: number }> {
   const doc = await openPdf(bytes);

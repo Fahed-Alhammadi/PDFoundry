@@ -15,7 +15,7 @@ struct PDFoundryApp: App {
 }
 
 struct RootView: View {
-    private enum AppTab: Hashable { case documents, settings }
+    private enum AppTab: Hashable { case documents, tools, settings }
 
     @Environment(DocumentStore.self) private var store
     @AppStorage(SettingsKey.appearance) private var appearance = Appearance.system
@@ -25,6 +25,9 @@ struct RootView: View {
         TabView(selection: $tab) {
             Tab("Documents", systemImage: "doc.on.doc.fill", value: AppTab.documents) {
                 LibraryView()
+            }
+            Tab("Tools", systemImage: "square.grid.2x2.fill", value: AppTab.tools) {
+                ToolsView()
             }
             Tab("Settings", systemImage: "gearshape.fill", value: AppTab.settings) {
                 SettingsView()

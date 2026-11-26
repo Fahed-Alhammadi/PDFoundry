@@ -21,6 +21,7 @@ import com.tom_roush.pdfbox.pdmodel.graphics.image.JPEGFactory
 import com.tom_roush.pdfbox.pdmodel.graphics.image.LosslessFactory
 import com.tom_roush.pdfbox.pdmodel.graphics.state.PDExtendedGraphicsState
 import com.tom_roush.pdfbox.text.PDFTextStripper
+import com.tom_roush.pdfbox.text.TextPosition
 import com.tom_roush.pdfbox.util.Matrix
 import java.io.File
 import java.io.IOException
@@ -32,6 +33,19 @@ data class PagePoint(val x: Float, val y: Float)
 data class InkStroke(val points: List<PagePoint>, val argb: Int, val width: Float, val highlighter: Boolean)
 
 data class SearchHit(val page: Int, val snippet: String)
+
+/** A side of a rect on the displayed page. */
+enum class Edge { Bottom, Left, Top, Right }
+
+/**
+ * One word on a page. `rect` is in fractions of the displayed page from the top-left (rotation and crop
+ * applied); `lower` is the side of it below the text (Bottom for upright text, Left or Right for text
+ * running down or up the screen).
+ */
+data class TextWord(val text: String, val rect: RectF, val lower: Edge = Edge.Bottom)
+
+/** A mark drawn over selected text. */
+enum class TextMark { Highlight, Underline, Strikethrough }
 
 class PdfException(message: String) : IOException(message)
 
@@ -241,6 +255,216 @@ object PdfEngine {
     }
 
     // endregion
+    // region Text markup
+
+    /**
+     * The words on a page, in the order the document writes them (so a column is read to its end
+     * before the next one starts), with where each one is on the displayed page. A page without text
+     * (a scan) has none.
+     *
+     * Each glyph's box is built in PDF space from its text matrix, so text drawn turned (a rotated table
+     * header, a landscape scan with /Rotate and counter-rotated content) lands where it is shown, and
+     * [TextWord.lower] says which side of the rect is below the text.
+     */
+    fun words(file: File, pageIndex: Int): List<TextWord> = PDDocument.load(file, memory()).use { document ->
+        if (pageIndex !in 0 until document.numberOfPages) return@use emptyList()
+        val page = document.getPage(pageIndex)
+        val box = page.cropBox
+        val rotation = ((page.rotation % 360) + 360) % 360
+        val found = mutableListOf<TextWord>()
+        val stripper = object : PDFTextStripper() {
+            // The word being collected. It carries over between calls: the stripper may hand over a whole
+            // line or (on a page with /Rotate) a single glyph at a time, so words are split by geometry only.
+            var current = mutableListOf<TextPosition>()
+
+            fun flush() {
+                if (current.isNotEmpty()) word(current)?.let { found += it }
+                current = mutableListOf()
+            }
+
+            override fun writeString(text: String, positions: MutableList<TextPosition>) {
+                for (position in positions) {
+                    if (position.unicode.orEmpty().isBlank()) {
+                        flush()
+                        continue
+                    }
+                    val previous = current.lastOrNull()
+                    if (previous != null && !sameWord(previous, position)) flush()
+                    current += position
+                }
+            }
+
+            /**
+             * True when [next] carries on the word [previous] is in: same direction, same line, and
+             * no more than a small gap after it. Measured in PDF space along the text's own direction,
+             * so it works for text drawn turned and on pages with /Rotate.
+             */
+            private fun sameWord(previous: TextPosition, next: TextPosition): Boolean {
+                val a = previous.textMatrix
+                val b = next.textMatrix
+                val size = kotlin.math.hypot(a.shearX, a.scaleY)
+                val nextSize = kotlin.math.hypot(b.shearX, b.scaleY)
+                if (size <= 0f || nextSize <= 0f) return false
+                val upX = a.shearX / size
+                val upY = a.scaleY / size
+                // Turned differently: a new word.
+                if (upX * b.shearX / nextSize + upY * b.scaleY / nextSize < 0.95f) return false
+                // Along the line is "up" turned a quarter clockwise.
+                val alongX = upY
+                val alongY = -upX
+                val fromEndX = b.translateX - previous.endX
+                val fromEndY = b.translateY - previous.endY
+                val gap = fromEndX * alongX + fromEndY * alongY
+                val offLine = kotlin.math.abs((b.translateX - a.translateX) * upX + (b.translateY - a.translateY) * upY)
+                return offLine <= size * 0.5f && gap <= size * 0.18f && gap >= -size
+            }
+
+            private fun word(positions: List<TextPosition>): TextWord? {
+                var minX = Float.MAX_VALUE
+                var minY = Float.MAX_VALUE
+                var maxX = -Float.MAX_VALUE
+                var maxY = -Float.MAX_VALUE
+                var downX = 0f
+                var downY = 0f
+                for (position in positions) {
+                    // The text rendering matrix, in PDF space measured from the crop box's lower-left corner.
+                    val matrix = position.textMatrix
+                    val originX = matrix.translateX
+                    val originY = matrix.translateY
+                    // "Up" for this glyph; its length is the font size in points.
+                    var upX = matrix.shearX
+                    var upY = matrix.scaleY
+                    val size = kotlin.math.hypot(upX, upY)
+                    if (size <= 0f) continue
+                    upX /= size
+                    upY /= size
+                    val advanceX = position.endX - originX
+                    val advanceY = position.endY - originY
+                    val ascent = size * 0.78f
+                    val descent = size * 0.22f
+                    for ((x, y) in listOf(
+                        originX - upX * descent to originY - upY * descent,
+                        originX + upX * ascent to originY + upY * ascent,
+                        originX + advanceX - upX * descent to originY + advanceY - upY * descent,
+                        originX + advanceX + upX * ascent to originY + advanceY + upY * ascent
+                    )) {
+                        minX = minOf(minX, x); maxX = maxOf(maxX, x)
+                        minY = minOf(minY, y); maxY = maxOf(maxY, y)
+                    }
+                    downX -= upX
+                    downY -= upY
+                }
+                if (maxX <= minX || maxY <= minY) return null
+                // To the unrotated crop box measured from its top-left, then to the page as displayed.
+                val rect = displayed(RectF(minX, box.height - maxY, maxX, box.height - minY), box.width, box.height, rotation)
+                return TextWord(positions.joinToString("") { it.unicode.orEmpty() }, rect, lowerEdge(downX, -downY, rotation))
+            }
+        }
+        // Keep the document's own order: sorting by position would read across the gutter of a two-column page.
+        stripper.sortByPosition = false
+        stripper.startPage = pageIndex + 1
+        stripper.endPage = pageIndex + 1
+        stripper.getText(document)
+        stripper.flush()
+        found
+    }
+
+    /** A rect in the unrotated crop box (points from its top-left) as fractions of the page as displayed. */
+    private fun displayed(rect: RectF, width: Float, height: Float, rotation: Int): RectF {
+        fun point(u: Float, v: Float): Pair<Float, Float> = when (rotation) {
+            90 -> (height - v) / height to u / width
+            180 -> (width - u) / width to (height - v) / height
+            270 -> v / height to (width - u) / width
+            else -> u / width to v / height
+        }
+        val (x1, y1) = point(rect.left, rect.top)
+        val (x2, y2) = point(rect.right, rect.bottom)
+        return RectF(minOf(x1, x2), minOf(y1, y2), maxOf(x1, x2), maxOf(y1, y2))
+    }
+
+    /** Which side of the displayed rect a "down" direction (unrotated crop box, y pointing down) faces. */
+    private fun lowerEdge(downU: Float, downV: Float, rotation: Int): Edge {
+        val (x, y) = when (rotation) {
+            90 -> -downV to downU
+            180 -> -downU to -downV
+            270 -> downV to -downU
+            else -> downU to downV
+        }
+        return if (kotlin.math.abs(x) > kotlin.math.abs(y)) (if (x > 0) Edge.Right else Edge.Left) else (if (y < 0) Edge.Top else Edge.Bottom)
+    }
+
+    /** The text's lower side for text drawn upright on a page with this rotation. */
+    private fun defaultLower(rotation: Int) = when (rotation) {
+        90 -> Edge.Left
+        180 -> Edge.Top
+        270 -> Edge.Right
+        else -> Edge.Bottom
+    }
+
+    /**
+     * Marks text on a page: a highlight fills each rect with a multiply blend (so the text stays
+     * readable); underline and strikethrough draw a line along the text. `rects` are page fractions;
+     * `lower` gives, per rect, the side below its text (see [TextWord.lower]); without it, text is taken
+     * to be upright on the page.
+     */
+    fun markText(file: File, pageIndex: Int, rects: List<RectF>, mark: TextMark, argb: Int, lower: List<Edge>? = null) = edit(file) { document ->
+        if (rects.isEmpty()) return@edit
+        val fallback = defaultLower(((document.getPage(pageIndex).rotation % 360) + 360) % 360)
+        document.overlay(pageIndex) { stream, width, height ->
+            stream.saveGraphicsState()
+            val alpha = Color.alpha(argb) / 255f
+            stream.setGraphicsStateParameters(PDExtendedGraphicsState().apply {
+                if (mark == TextMark.Highlight) {
+                    nonStrokingAlphaConstant = alpha
+                    blendMode = BlendMode.MULTIPLY
+                } else {
+                    strokingAlphaConstant = alpha
+                }
+            })
+            val red = Color.red(argb) / 255f
+            val green = Color.green(argb) / 255f
+            val blue = Color.blue(argb) / 255f
+            rects.forEachIndexed { index, rect ->
+                // Display points, origin at the bottom-left.
+                val left = rect.left * width
+                val right = rect.right * width
+                val top = height - rect.top * height
+                val bottom = height - rect.bottom * height
+                val rectWidth = right - left
+                val rectHeight = top - bottom
+                when (mark) {
+                    TextMark.Highlight -> {
+                        stream.setNonStrokingColor(red, green, blue)
+                        stream.addRect(left, bottom, rectWidth, rectHeight)
+                        stream.fill()
+                    }
+                    TextMark.Underline, TextMark.Strikethrough -> {
+                        // How far from the text's top edge towards its lower side.
+                        val along = if (mark == TextMark.Underline) 0.92f else 0.5f
+                        stream.setStrokingColor(red, green, blue)
+                        stream.setLineCapStyle(0)
+                        when (lower?.getOrNull(index) ?: fallback) {
+                            Edge.Bottom -> line(stream, left, top - rectHeight * along, right, top - rectHeight * along, rectHeight)
+                            Edge.Top -> line(stream, left, bottom + rectHeight * along, right, bottom + rectHeight * along, rectHeight)
+                            Edge.Left -> line(stream, right - rectWidth * along, bottom, right - rectWidth * along, top, rectWidth)
+                            Edge.Right -> line(stream, left + rectWidth * along, bottom, left + rectWidth * along, top, rectWidth)
+                        }
+                    }
+                }
+            }
+            stream.restoreGraphicsState()
+        }
+    }
+
+    /** A line about 7% as thick as the text is tall. */
+    private fun line(stream: PDPageContentStream, x1: Float, y1: Float, x2: Float, y2: Float, textHeight: Float) {
+        stream.setLineWidth((textHeight * 0.07f).coerceAtLeast(0.5f))
+        stream.moveTo(x1, y1)
+        stream.lineTo(x2, y2)
+        stream.stroke()
+    }
+
+    // endregion
     // region Bitmaps
 
     /** Typed text as a transparent bitmap. Drawn by Android, so any script (Arabic included) is shaped correctly. */
@@ -296,8 +520,8 @@ object PdfEngine {
             listOf(
                 "Read" to "Open any PDF from Files, scan paper with the camera, or build a PDF from your photos. Search the text and jump between pages.",
                 "Merge" to "Press and hold a document in the library, choose two or more, then tap Merge. Put the files into the order you want.",
-                "Edit" to "Highlight with the marker, add typed text, draw with your finger, and reorder, rotate, duplicate or delete pages.",
-                "Sign" to "Draw your signature once and reuse it. Drag it into place, resize it, and tap Place.",
+                "Edit" to "In Markup, highlight, underline or strike through text, add typed text and draw. Pages reorders, rotates, duplicates or deletes pages.",
+                "Sign" to "In Fill & Sign, draw your signature once and reuse it. Drag it into place, resize it, and tap Place.",
                 "Private" to "Everything stays on this device. PDFoundry has no account, no ads and no tracking."
             ).forEach { (title, body) ->
                 drawText(title, 56f, y, paint(19f, ember, bold = true))
@@ -309,9 +533,9 @@ object PdfEngine {
         val second = document.startPage(PdfDocument.PageInfo.Builder(612, 792, 2).create())
         second.canvas.apply {
             drawText("Try it on this page", 56f, 100f, paint(30f, ink, bold = true))
-            var y = paragraph("Tap the marker in the toolbar and drag across this sentence to highlight it.", 56f, 156f, 500f, paint(16f, ink)) + 24f
-            y = paragraph("Tap the pencil to draw anywhere on the page. Tap the text tool to type a note.", 56f, y, 500f, paint(16f, ink)) + 24f
-            paragraph("Tap the signature tool and place your signature on the line below.", 56f, y, 500f, paint(16f, ink))
+            var y = paragraph("Tap Markup, then Highlight, and drag across this sentence to highlight it.", 56f, 156f, 500f, paint(16f, ink)) + 24f
+            y = paragraph("In Markup, tap Draw to draw anywhere on the page, or Text to type a note.", 56f, y, 500f, paint(16f, ink)) + 24f
+            paragraph("Tap Fill & Sign, then Signature, and place your signature on the line below.", 56f, y, 500f, paint(16f, ink))
             val rule = Paint().apply { color = Color.rgb(140, 140, 140) }
             drawRect(56f, 560f, 356f, 561f, rule)
             drawText("Signature", 56f, 580f, paint(12f, Color.rgb(115, 115, 115)))

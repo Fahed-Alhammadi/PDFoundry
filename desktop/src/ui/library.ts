@@ -22,7 +22,13 @@ function thumbFor(file: RecentFile): Promise<Thumb> {
   return made;
 }
 
-export type LibraryHost = { openDocument: (file: string) => void };
+export type LibraryHost = {
+  openDocument: (file: string) => void;
+  /** The file open in the reader ('' when none): a new file may never be saved over it. */
+  openFile: () => string;
+  /** A file's contents as the user sees them: the reader's unsaved edits when it is the open document. */
+  contents: (file: string) => Promise<Uint8Array>;
+};
 
 export class Library {
   readonly el = h('section.view.library', { 'aria-label': 'Recent files' });
@@ -163,7 +169,7 @@ export class Library {
     const n = this.selected.size;
     this.bar.hidden = !this.selecting;
     if (!this.selecting) return;
-    const merge = h('button.button.primary', { type: 'button', disabled: n < 2, onclick: () => this.mergeDialog() }, icon('merge', 18), 'Merge');
+    const merge = h('button.button.primary', { type: 'button', disabled: n < 2, onclick: () => this.mergeFiles(this.visible().filter((f) => this.selected.has(f.path)).map((f) => f.path)) }, icon('merge', 18), 'Merge');
     const remove = h('button.button', {
       type: 'button', disabled: n < 1,
       onclick: () => void this.run(async () => {
@@ -205,13 +211,14 @@ export class Library {
     await this.run(async () => {
       const images = await api.pickImages();
       if (!images.length) return;
-      const saved = await api.saveAs(images.length === 1 ? images[0].name : 'Images', await pdf.imagesToPdf(images));
+      const saved = await api.saveAs(images.length === 1 ? images[0].name : 'Images', await pdf.imagesToPdf(images), undefined, [this.host.openFile()]);
       if (saved) this.host.openDocument(saved);
     });
   }
 
-  private mergeDialog(): void {
-    let order = this.visible().filter((f) => this.selected.has(f.path)).map((f) => f.path);
+  /** The merge sheet for recent files, in the order given (the user can change it), then where to save. */
+  mergeFiles(files: string[]): void {
+    let order = [...files];
     const list = h('ol.merge-list');
     const draw = () => {
       list.replaceChildren(
@@ -237,8 +244,8 @@ export class Library {
       merge.disabled = true;
       try {
         const sources = [];
-        for (const file of order) sources.push(await api.read(file));
-        const saved = await api.saveAs('Merged document', await pdf.merge(sources), order[0]);
+        for (const file of order) sources.push(await this.host.contents(file)); // unsaved edits included
+        const saved = await api.saveAs('Merged document', await pdf.merge(sources), order[0], [...order, this.host.openFile()]);
         merge.disabled = false;
         if (!saved) return; // cancelled in the save dialog: stay here
         d.close();

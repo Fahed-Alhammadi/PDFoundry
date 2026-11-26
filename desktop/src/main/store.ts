@@ -23,6 +23,31 @@ export function cleanName(name: string): string {
   return base || 'Document';
 }
 
+/** Refuses files that do not start like a PDF. */
+function checkPdf(file: string): void {
+  const head = Buffer.alloc(1024);
+  const fd = openSync(file, 'r');
+  try {
+    const read = readSync(fd, head, 0, head.length, 0);
+    if (!head.subarray(0, read).toString('latin1').includes('%PDF-')) throw new Error(`${path.basename(file)} is not a PDF.`);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Are two paths the same file? Compared without case on macOS and Windows, whose disks usually ignore it. */
+function sameFile(a: string, b: string): boolean {
+  const [x, y] = [path.resolve(a), path.resolve(b)];
+  if (x === y) return true;
+  if (process.platform !== 'linux' && x.toLowerCase() === y.toLowerCase()) return true;
+  try {
+    const [sa, sb] = [statSync(x), statSync(y)];
+    return sa.dev === sb.dev && sa.ino === sb.ino; // the same file under another name (a link)
+  } catch {
+    return false;
+  }
+}
+
 export class Store {
   /** Where the welcome guide lives, and where documents of versions before 1.1 were kept. */
   readonly ownFolder: string;
@@ -93,14 +118,7 @@ export class Store {
   /** Puts a PDF at the top of the recent list. Refuses files that are not PDFs. */
   remember(file: string): string {
     const resolved = path.resolve(file);
-    const head = Buffer.alloc(1024);
-    const fd = openSync(resolved, 'r');
-    try {
-      const read = readSync(fd, head, 0, head.length, 0);
-      if (!head.subarray(0, read).toString('latin1').includes('%PDF-')) throw new Error(`${path.basename(resolved)} is not a PDF.`);
-    } finally {
-      closeSync(fd);
-    }
+    checkPdf(resolved);
     this.write([{ path: resolved, opened: Date.now() }, ...this.saved.filter((e) => e.path !== resolved)]);
     return resolved;
   }
@@ -115,6 +133,16 @@ export class Store {
     this.write([]);
   }
 
+  /**
+   * Reads a PDF the user has just picked in an open dialog, for a tool that only reads it (Extract Pages). It is not
+   * listed as recent, so this gives the window no lasting access to the file: it can never read or save it again.
+   */
+  readOnce(file: string): Uint8Array {
+    if (typeof file !== 'string' || !path.isAbsolute(file)) throw new Error('That file could not be found.');
+    checkPdf(file);
+    return readFileSync(file);
+  }
+
   read(file: string): Uint8Array {
     if (!this.knows(file)) throw new Error('That file is not open in PDFoundry.');
     return readFileSync(path.resolve(file));
@@ -126,9 +154,19 @@ export class Store {
     this.writeFile(path.resolve(file), bytes);
   }
 
-  /** Writes a new file at a place the user just chose in a save dialog, and lists it as recent. */
-  saveNew(file: string, bytes: Uint8Array): string {
-    const target = /\.pdf$/i.test(file) ? path.resolve(file) : `${path.resolve(file)}.pdf`;
+  /**
+   * Writes a new file at a place the user just chose in a save dialog, and lists it as recent.
+   * `keep`: files that must not be replaced: the ones the new file is made from (extract, merge) and the document
+   * open in the reader. When ".pdf" had to be added to the name, the system dialog never asked about replacing a
+   * file of that name (the Linux dialog does not add it), so an existing file is refused rather than overwritten.
+   */
+  saveNew(file: string, bytes: Uint8Array, keep: string[] = []): string {
+    const typed = /\.pdf$/i.test(file);
+    const target = typed ? path.resolve(file) : `${path.resolve(file)}.pdf`;
+    if (keep.some((k) => typeof k === 'string' && k !== '' && sameFile(target, k))) {
+      throw new Error('Choose another name: that would replace a file it is made from, or the open document.');
+    }
+    if (!typed && existsSync(target)) throw new Error(`“${path.basename(target)}” already exists. Choose another name.`);
     this.writeFile(target, bytes);
     return this.remember(target);
   }

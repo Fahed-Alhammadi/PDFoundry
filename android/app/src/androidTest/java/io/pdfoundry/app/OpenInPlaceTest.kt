@@ -35,7 +35,7 @@ import java.io.IOException
  * Stands in for the system file picker's links, which a test cannot obtain: plain files in a folder
  * play the files that live outside the app.
  */
-private class FolderFiles(context: Context) : OutsideFiles(context) {
+internal class FolderFiles(context: Context) : OutsideFiles(context) {
     val kept = mutableSetOf<Uri>()
     var handover = false
     var writable = true
