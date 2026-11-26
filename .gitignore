@@ -57,3 +57,8 @@ android/dist/
 android/.kotlin/
 *.apk
 *.aab
+
+# Desktop (Electron)
+desktop/node_modules/
+desktop/out/
+desktop/dist/

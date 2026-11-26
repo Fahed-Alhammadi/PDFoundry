@@ -12,6 +12,7 @@ still exists there.
 |---|---|---|
 | iPhone and iPad | Latest release | App Store / TestFlight |
 | Android | Latest release | Google Play |
+| macOS, Windows and Linux | Latest release | [Releases](https://github.com/Fahed-Alhammadi/PDFoundry/releases/latest) (updates itself) |
 
 ## Reporting a vulnerability
 
@@ -23,7 +24,7 @@ Report it privately through GitHub:
 
 Please include:
 
-- the app (iPhone, iPad or Android) and its version (Settings → About PDFoundry);
+- the app (iPhone, iPad, Android or desktop) and its version (Settings → About PDFoundry);
 - the device and operating system version;
 - what an attacker can do, and what they need for it (a crafted PDF, another app on the device, physical access);
 - steps to reproduce;
@@ -42,7 +43,8 @@ Please **don't** include real personal documents or signatures. Use test files.
 
 In scope:
 
-- the iPhone, iPad and Android apps: opening, displaying, editing, merging, signing and saving PDFs;
+- the iPhone, iPad, Android and desktop apps: opening, displaying, editing, merging, signing and saving PDFs;
+- the desktop app's updates: how it checks for, verifies and installs a new version;
 - how the apps store documents and signatures on the device;
 - how the apps receive files from other apps (share menu, "Open with") and hand files to them (share, print);
 - the release workflows in this repository.
@@ -58,8 +60,12 @@ Out of scope:
 ## How PDFoundry protects your documents
 
 - **Nothing leaves the device.** The apps have no account, no server, no analytics and no advertising. The Android
-  app does not have the internet permission.
+  app does not have the internet permission. The desktop app goes online only to check GitHub for its own updates,
+  and its window is blocked from the network.
+- **Desktop updates are verified** before they are installed: by the Developer ID signature on macOS, and by a
+  signed list of checksums on Windows and Linux.
 - **Documents and signatures are stored on the device**, protected by the device's own file encryption. A document
   leaves the app only when you share or print it.
-- **Minimal permissions.** On iPhone and iPad, the camera, asked only when you tap Scan Document. On Android, none.
+- **Minimal permissions.** On iPhone and iPad, the camera, asked only when you tap Scan Document. On Android and
+  on the desktop, none.
 - **Keep the app and your device updated.**

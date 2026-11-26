@@ -1,0 +1,39 @@
+{
+  "name": "pdfoundry-desktop",
+  "productName": "PDFoundry",
+  "version": "1.0.0",
+  "description": "Read, merge, edit and sign PDFs on your computer",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "author": "Fahed Alhammadi",
+  "homepage": "https://fahed-alhammadi.github.io/PDFoundry/",
+  "main": "out/main.cjs",
+  "scripts": {
+    "build": "tsc -p . && node scripts/build.mjs",
+    "start": "npm run build && electron .",
+    "typecheck": "tsc -p .",
+    "test": "node --test test/*.test.ts",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:linux": "npm run build && electron-builder --linux",
+    "selftest": "npm run build && node scripts/selftest.mjs",
+    "screenshots": "npm run build && node scripts/selftest.mjs --screenshots"
+  },
+  "dependencies": {
+    "electron-updater": "6.8.11"
+  },
+  "devDependencies": {
+    "@cantoo/pdf-lib": "2.11.1",
+    "@types/node": "24.19.2",
+    "electron": "45.5.0",
+    "electron-builder": "26.18.0",
+    "esbuild": "0.28.2",
+    "pdfjs-dist": "6.5.438",
+    "typescript": "7.0.2"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "electron-winstaller": false
+  }
+}

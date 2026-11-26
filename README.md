@@ -6,12 +6,13 @@
 
 **Read, merge, edit and sign PDFs. Private, on your device, with no account.**
 
-Native apps for iPhone, iPad and Android.
+Apps for iPhone, iPad, Android, macOS, Windows and Linux.
 
 [![iOS](https://github.com/Fahed-Alhammadi/PDFoundry/actions/workflows/ios.yml/badge.svg)](https://github.com/Fahed-Alhammadi/PDFoundry/actions/workflows/ios.yml)
 [![Android](https://github.com/Fahed-Alhammadi/PDFoundry/actions/workflows/android.yml/badge.svg)](https://github.com/Fahed-Alhammadi/PDFoundry/actions/workflows/android.yml)
+[![Desktop](https://github.com/Fahed-Alhammadi/PDFoundry/actions/workflows/desktop.yml/badge.svg)](https://github.com/Fahed-Alhammadi/PDFoundry/actions/workflows/desktop.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-E2511B.svg)](LICENSE)
-![Platforms](https://img.shields.io/badge/platforms-iOS%2026%2B%20%7C%20Android%208%2B-2B3042.svg)
+![Platforms](https://img.shields.io/badge/platforms-iOS%20%7C%20Android%20%7C%20macOS%20%7C%20Windows%20%7C%20Linux-2B3042.svg)
 
 [Website](https://fahed-alhammadi.github.io/PDFoundry/) · [Privacy policy](https://fahed-alhammadi.github.io/PDFoundry/privacy.html) · [Report a problem](https://github.com/Fahed-Alhammadi/PDFoundry/issues)
 
@@ -44,9 +45,9 @@ Native apps for iPhone, iPad and Android.
 
 ## Overview
 
-PDFoundry is a small PDF app that does four jobs well: reading, merging, editing and signing. It works entirely on the device. There is no account, no server, no advertising and no analytics, and the apps make no network requests.
+PDFoundry is a small PDF app that does four jobs well: reading, merging, editing and signing. It works entirely on the device. There is no account, no server, no advertising and no analytics. The phone apps make no network requests; the desktop app goes online only to check for its own updates.
 
-Both apps are native: Swift and SwiftUI on iPhone and iPad, Kotlin and Jetpack Compose on Android.
+The phone apps are native: Swift and SwiftUI on iPhone and iPad, Kotlin and Jetpack Compose on Android. The desktop app is built with Electron and runs on macOS, Windows and Linux.
 
 ## Status
 
@@ -54,27 +55,28 @@ Both apps are native: Swift and SwiftUI on iPhone and iPad, Kotlin and Jetpack C
 |---|---|---|
 | iPhone and iPad | 1.0.0 | Submitted to the App Store, waiting for review. Available to testers on TestFlight |
 | Android | 1.0.0 | In closed testing on Google Play |
+| macOS, Windows and Linux | 1.0.0 | Built and tested. Not released yet |
 
-Store links will be added here and on the [website](https://fahed-alhammadi.github.io/PDFoundry/) when the apps are public.
+Store and download links will be added here and on the [website](https://fahed-alhammadi.github.io/PDFoundry/) when the apps are public.
 
 ## Features
 
-| | iPhone and iPad | Android |
-|---|---|---|
-| **Read** | Open from Files, Mail, Safari or the share sheet. Search the text. Scroll vertically or sideways | Open from any app's share menu or file picker. Search the text. Pinch to zoom |
-| **Scan and create** | Scan paper with the camera. Build a PDF from photos | Scan paper with Google's document scanner. Build a PDF from photos |
-| **Merge** | Select documents, drag them into order, merge | Select documents, order them with arrows, merge |
-| **Highlight** | Select text, then highlight (four colours), underline or strike through | Drag a marker over the page |
-| **Text and drawing** | Type anywhere. Draw with a finger or Apple Pencil | Type anywhere (Arabic shapes correctly). Draw with a finger or stylus |
-| **Sign** | Draw once in black or blue ink, reuse, drag and resize before placing | Same |
-| **Pages** | Reorder by dragging. Rotate, duplicate, extract, delete, add blank pages | Reorder with arrows. Rotate, duplicate, extract, delete, add blank pages |
-| **Undo** | Tap any mark to remove it, or undo recent edits | Undo the last ten changes while the document is open |
-| **Manage** | Rename, duplicate, share, print, delete | Rename, duplicate, share, print, delete |
-| **Storage** | The app's folder in Files, easy to back up | Inside the app. Share a copy to send it elsewhere |
-| **Protected PDFs** | Open with the password, read-only | Open with the password, read-only |
-| **Permissions** | Camera, asked only when you tap Scan Document | None |
+| | iPhone and iPad | Android | macOS, Windows and Linux |
+|---|---|---|---|
+| **Read** | Open from Files, Mail, Safari or the share sheet. Search the text. Scroll vertically or sideways | Open from any app's share menu or file picker. Search the text. Pinch to zoom | Import, or drop a PDF onto the window. Search the text. Zoom |
+| **Scan and create** | Scan paper with the camera. Build a PDF from photos | Scan paper with Google's document scanner. Build a PDF from photos | Build a PDF from images. No scanning |
+| **Merge** | Select documents, drag them into order, merge | Select documents, order them with arrows, merge | Select documents, order them with arrows, merge |
+| **Highlight** | Select text, then highlight (four colours), underline or strike through | Drag a marker over the page | Drag a marker over the page, four colours |
+| **Text and drawing** | Type anywhere. Draw with a finger or Apple Pencil | Type anywhere (Arabic shapes correctly). Draw with a finger or stylus | Type anywhere (Arabic shapes correctly). Draw with the mouse or a pen |
+| **Sign** | Draw once in black or blue ink, reuse, drag and resize before placing | Same | Same |
+| **Pages** | Reorder by dragging. Rotate, duplicate, extract, delete, add blank pages | Reorder with arrows. Rotate, duplicate, extract, delete, add blank pages | Reorder by dragging or with arrows. Rotate, duplicate, extract, delete, add blank pages |
+| **Undo** | Tap any mark to remove it, or undo recent edits | Undo the last ten changes while the document is open | Undo the last ten changes while the document is open |
+| **Manage** | Rename, duplicate, share, print, delete | Rename, duplicate, share, print, delete | Rename, duplicate, save a copy, print, delete (to the system trash) |
+| **Storage** | The app's folder in Files, easy to back up | Inside the app. Share a copy to send it elsewhere | The app's own folder on the computer. Save a copy to put one elsewhere |
+| **Protected PDFs** | Open with the password, read-only | Open with the password, read-only | Open with the password, read-only |
+| **Permissions** | Camera, asked only when you tap Scan Document | None | None. Goes online only to check for its own updates |
 
-Signatures and edits are written into the PDF itself, so they look the same in every other PDF reader. Password-protected documents open read-only so their protection is never removed.
+On every platform, signatures and edits are written into the PDF itself, so they look the same in every other PDF reader. Password-protected documents open read-only so their protection is never removed.
 
 ## Screenshots
 
@@ -84,6 +86,15 @@ Signatures and edits are written into the PDF itself, so they look the same in e
   <img src="screenshots/ios/ipad-13/01-library.png" width="32%" alt="Document library on iPad">
   <img src="screenshots/ios/ipad-13/02-signed.png" width="32%" alt="A signed document on iPad">
   <img src="screenshots/ios/ipad-13/05-pages.png" width="32%" alt="Page organizer on iPad">
+</p>
+
+**macOS, Windows and Linux**
+
+<p>
+  <img src="screenshots/desktop/01-library.png" width="49%" alt="Document library on the desktop">
+  <img src="screenshots/desktop/02-signed.png" width="49%" alt="A signed and highlighted document on the desktop">
+  <img src="screenshots/desktop/04-pages.png" width="49%" alt="Page organizer on the desktop">
+  <img src="screenshots/desktop/08-library-dark.png" width="49%" alt="Document library in dark mode on the desktop">
 </p>
 
 **Android**
@@ -97,18 +108,18 @@ Signatures and edits are written into the PDF itself, so they look the same in e
 
 ## Tech stack
 
-| | iPhone and iPad | Android |
-|---|---|---|
-| Language | Swift 6, strict concurrency, main-actor default isolation | Kotlin |
-| UI | SwiftUI with Liquid Glass | Jetpack Compose, Material 3 |
-| PDF engine | PDFKit | [PdfBox-Android](https://github.com/TomRoush/PdfBox-Android) for editing, the platform `PdfRenderer` for display |
-| Drawing | PencilKit | Compose canvas |
-| Scanning | VisionKit document camera | ML Kit document scanner |
-| Minimum OS | iOS 26.0 | Android 8.0 (API 26) |
-| Project | [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`project.yml`) | Gradle (Kotlin DSL) |
-| Tests | Swift Testing | Instrumented JUnit tests |
+| | iPhone and iPad | Android | macOS, Windows and Linux |
+|---|---|---|---|
+| Language | Swift 6, strict concurrency, main-actor default isolation | Kotlin | TypeScript |
+| UI | SwiftUI with Liquid Glass | Jetpack Compose, Material 3 | Electron, plain HTML and CSS, no framework |
+| PDF engine | PDFKit | [PdfBox-Android](https://github.com/TomRoush/PdfBox-Android) for editing, the platform `PdfRenderer` for display | [pdf-lib](https://github.com/cantoo-scribe/pdf-lib) for editing, [PDF.js](https://mozilla.github.io/pdf.js/) for display |
+| Drawing | PencilKit | Compose canvas | Canvas |
+| Scanning | VisionKit document camera | ML Kit document scanner | None |
+| Minimum OS | iOS 26.0 | Android 8.0 (API 26) | A current macOS, Windows 10 or later, a current Linux desktop |
+| Project | [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`project.yml`) | Gradle (Kotlin DSL) | npm, esbuild, electron-builder |
+| Tests | Swift Testing | Instrumented JUnit tests | Node test runner, plus a self-test in a real window |
 
-The iOS app has no third-party dependencies.
+The iOS app has no third-party dependencies. The desktop app bundles everything it needs, so its window never uses the network.
 
 ## Getting started
 
@@ -139,18 +150,30 @@ cd android
 
 The debug build installs next to a Play Store copy, under the ID `io.pdfoundry.app.debug`. See [android/README.md](android/README.md) for release signing.
 
+### macOS, Windows and Linux
+
+Requires Node.js 24 or later.
+
+```bash
+cd desktop
+npm install
+npm start
+```
+
+`npm run dist:mac`, `dist:win` or `dist:linux` builds the installers into `desktop/dist/`. See [desktop/README.md](desktop/README.md).
+
 ## Usage
 
-| To | iPhone and iPad | Android |
-|---|---|---|
-| Add a document | **+** in the library: Import from Files, Scan Document, or Create from Photos | **+** in the library: Import PDF, Scan document, or Create from photos |
-| Merge | **Select**, choose documents, tap the merge button | Press and hold to select, choose documents, tap the merge button |
-| Highlight | Press and hold text to select it, then tap the highlighter | Tap **Highlight**, then drag over the page |
-| Add text | Tap **Aa**, type, drag the text into place, tap **Place** | Tap **Text**, type, drag the text into place, tap **Place** |
-| Draw | Tap the pencil, draw, tap **Done** | Tap **Draw**, draw, tap **Done** |
-| Sign | Tap the signature button, draw or pick a signature, position it, tap **Place** | Tap **Sign**, draw or pick a signature, position it, tap **Place** |
-| Edit pages | **…** then **Organize Pages** | **⋮** then **Organize pages** |
-| Remove an edit | Tap it, then **Delete** | Tap **Undo** |
+| To | iPhone and iPad | Android | macOS, Windows and Linux |
+|---|---|---|---|
+| Add a document | **+** in the library: Import from Files, Scan Document, or Create from Photos | **+** in the library: Import PDF, Scan document, or Create from photos | **Add** in the library: Import PDF or Create from images. Or drop a PDF on the window |
+| Merge | **Select**, choose documents, tap the merge button | Press and hold to select, choose documents, tap the merge button | **Select**, choose documents, **Merge** |
+| Highlight | Press and hold text to select it, then tap the highlighter | Tap **Highlight**, then drag over the page | Click **Highlight**, then drag over the page |
+| Add text | Tap **Aa**, type, drag the text into place, tap **Place** | Tap **Text**, type, drag the text into place, tap **Place** | Click **Text**, type, drag the text into place, **Place** |
+| Draw | Tap the pencil, draw, tap **Done** | Tap **Draw**, draw, tap **Done** | Click **Draw**, draw, **Done** |
+| Sign | Tap the signature button, draw or pick a signature, position it, tap **Place** | Tap **Sign**, draw or pick a signature, position it, tap **Place** | Click **Sign**, draw or pick a signature, position it, **Place** |
+| Edit pages | **…** then **Organize Pages** | **⋮** then **Organize pages** | The grid button in the toolbar, or **View > Organize Pages** |
+| Remove an edit | Tap it, then **Delete** | Tap **Undo** | **Undo** |
 
 ## Tests
 
@@ -161,9 +184,12 @@ xcodebuild test -project PDFoundry.xcodeproj -scheme PDFoundry \
 
 # Android: PDF engine tests on a running emulator or device
 cd android && ./gradlew :app:connectedDebugAndroidTest
+
+# Desktop: unit tests, then the self-test in a real window
+cd desktop && npm test && npm run selftest
 ```
 
-Both suites run in GitHub Actions on every push.
+All three suites run in GitHub Actions on every push. The desktop self-test runs on macOS, Windows and Linux.
 
 ## Configuration
 
@@ -175,8 +201,9 @@ The apps need no API keys, servers or environment variables to build and run.
 |---|---|---|
 | iOS | Push a tag `ios-X.Y.Z`, or run the **iOS** workflow with "upload" ticked | Signed archive uploaded to TestFlight, internal and external testers |
 | Android | Push a tag `android-X.Y.Z`, or run the **Android** workflow with "upload" ticked | Signed bundle uploaded to Google Play closed testing |
+| Desktop | Push a tag `desktop-X.Y.Z` | Installers for all three systems on the GitHub release, the Mac app signed and notarized. Installed apps update themselves from it |
 
-Release notes come from `AppStore/whatsnew/en-US.txt` and `android/whatsnew/whatsnew-en-US`. Promotion to the public stores is done by hand.
+Release notes come from `AppStore/whatsnew/en-US.txt` and `android/whatsnew/whatsnew-en-US`. Promotion to the public stores is done by hand. Desktop release notes are the commits that touched `desktop/`.
 
 ## Project structure
 
@@ -199,17 +226,22 @@ PDFoundry/
 │   ├── app/src/androidTest/    # PDF engine tests
 │   ├── play/                   # Google Play listing text and store images
 │   └── whatsnew/               # Google Play release notes
+├── desktop/                    # Desktop app (Electron)
+│   ├── src/core/               # PDF engine, shared by the window and the tests
+│   ├── src/main/               # Main process: files, updates, window
+│   ├── src/ui/                 # The window: library, reader, organizer, settings
+│   └── test/                   # Unit tests
 ├── AppStore/                   # App Store listing text, store images, release notes
 ├── Tools/                      # Scripts that render the icons and store images
-├── scripts/                    # CI helper for TestFlight
+├── scripts/                    # CI helpers: TestFlight, desktop release and update signing
 ├── Website/                    # Project website (GitHub Pages)
 ├── screenshots/                # Screenshots by platform
-└── .github/workflows/          # iOS, Android and website workflows
+└── .github/workflows/          # iOS, Android, desktop and website workflows
 ```
 
 ## Privacy
 
-PDFoundry collects nothing. Documents and signatures stay on the device, and the apps contain no analytics or advertising. The Android build removes the network permission altogether, so it cannot reach the internet. Read the [privacy policy](https://fahed-alhammadi.github.io/PDFoundry/privacy.html).
+PDFoundry collects nothing. Documents and signatures stay on the device, and the apps contain no analytics or advertising. The Android build removes the network permission altogether, so it cannot reach the internet. The desktop app's window is blocked from the network too; the only connection it makes is to GitHub, to check for and download its own updates. Read the [privacy policy](https://fahed-alhammadi.github.io/PDFoundry/privacy.html).
 
 ## Security
 
