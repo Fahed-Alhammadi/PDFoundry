@@ -117,7 +117,7 @@ fun SettingsScreen() {
                     SettingsRow(Icons.Filled.Storage, Color(0xFF8E8E93), "Documents", value = "${store.items.size} · ${formatSize(store.items.sumOf { it.size })}")
                 }
                 Text(
-                    "Your documents are stored on this device, inside PDFoundry. Use Share to send a copy anywhere else.",
+                    "Scans, new PDFs and received files are stored on this device, inside PDFoundry. Files you open from elsewhere stay where they are. Use Share to send a copy anywhere else.",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp)
                 )
             }

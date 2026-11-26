@@ -2,6 +2,8 @@ package io.pdfoundry.app.ui
 
 import android.graphics.RectF
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.fillMaxSize
@@ -15,6 +17,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -39,9 +42,17 @@ fun TextSelectionLayer(words: List<TextWord>, aspect: Float, mark: TextMark, arg
     var focus by remember(words) { mutableStateOf<Int?>(null) }
     val selected = selectedWords(words, anchor, focus)
     val tint = Color(argb)
+    // detectDragGestures reports where the finger is once it has moved past the touch slop, not where it went
+    // down, so the word under the first touch is remembered here; otherwise a drag would skip the first word.
+    var downAt by remember(words) { mutableStateOf<Offset?>(null) }
 
     Canvas(
         Modifier.fillMaxSize()
+            .pointerInput(words) {
+                awaitEachGesture {
+                    downAt = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial).position
+                }
+            }
             .pointerInput(words) {
                 detectTapGestures { point ->
                     // A tap must land on a word (or right next to it): a tap in the margin marks nothing.
@@ -51,8 +62,9 @@ fun TextSelectionLayer(words: List<TextWord>, aspect: Float, mark: TextMark, arg
             }
             .pointerInput(words) {
                 detectDragGestures(
-                    onDragStart = { start ->
-                        // A drag starts on (or beside) a word; after that it follows the finger to the nearest word.
+                    onDragStart = { slopPosition ->
+                        // A drag starts on (or beside) the word first touched; after that it follows the finger to the nearest word.
+                        val start = downAt ?: slopPosition
                         anchor = wordAt(words, start.x / size.width, start.y / size.height, aspect, slop = 1f)
                         focus = anchor
                     },
