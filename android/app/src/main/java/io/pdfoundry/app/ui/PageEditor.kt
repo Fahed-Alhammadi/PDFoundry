@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -80,14 +81,24 @@ import androidx.compose.ui.unit.dp
 import io.pdfoundry.app.app
 import io.pdfoundry.app.data.InkStroke
 import io.pdfoundry.app.data.PagePoint
+import io.pdfoundry.app.data.TextMark
+import io.pdfoundry.app.data.TextWord
 import kotlin.math.roundToInt
 
 val SignatureIcon: ImageVector = Icons.Filled.Gesture
 
 private class LiveStroke(val points: MutableList<Offset>, val color: Color, val width: Float, val highlighter: Boolean)
 
-private val PenColors = listOf(Color.Black, Color(0xFF0D3399), Color(0xFFC62828))
-private val MarkerColors = listOf(Color(0xFFFFE600), Color(0xFF6BE675), Color(0xFFFF8FC0), Color(0xFF7CC4FF))
+/** A pen in Draw: three inks, and the freehand highlighter (a wide, see-through marker) in four colours. */
+private data class Pen(val name: String, val color: Color, val highlighter: Boolean)
+
+private val Pens = listOf(Pen("Black pen", Color.Black, false), Pen("Blue pen", Color(0xFF0D3399), false), Pen("Red pen", Color(0xFFC62828), false))
+private val Highlighters = listOf(
+    Pen("Yellow highlighter", Color(0xFFFFE600), true),
+    Pen("Green highlighter", Color(0xFF6BE675), true),
+    Pen("Pink highlighter", Color(0xFFFF8FC0), true),
+    Pen("Blue highlighter", Color(0xFF7CC4FF), true)
+)
 
 /** One page, fitted to the screen, for highlighting, drawing, or positioning a signature or text. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -98,7 +109,8 @@ fun PageEditor(
     mode: EditMode,
     onCancel: () -> Unit,
     onInk: (List<InkStroke>) -> Unit,
-    onPlace: (Bitmap, RectF) -> Unit
+    onPlace: (Bitmap, RectF) -> Unit,
+    onMarkText: (List<RectF>) -> Unit = {}
 ) {
     val source = state.source ?: return
     val pageSize = state.sizes.getOrNull(pageIndex) ?: Size(612, 792)
@@ -106,9 +118,11 @@ fun PageEditor(
 
     val strokes = remember { mutableStateListOf<LiveStroke>() }
     var revision by remember { mutableIntStateOf(0) }
-    val isMarker = (mode as? EditMode.Ink)?.highlighter == true
-    val palette = if (isMarker) MarkerColors else PenColors
-    var color by remember { mutableStateOf(palette.first()) }
+    var pen by remember { mutableStateOf(if ((mode as? EditMode.Ink)?.highlighter == true) Highlighters.first() else Pens.first()) }
+    // Words on the page, for text markup; null while they load.
+    val words by produceState<List<TextWord>?>(null, pageIndex, state.version, mode is EditMode.TextMark) {
+        value = if (mode is EditMode.TextMark) state.words(pageIndex) else emptyList()
+    }
     // The item being placed, as fractions of the page: centre and width.
     var centerX by remember { mutableFloatStateOf(0.5f) }
     var centerY by remember { mutableFloatStateOf(0.5f) }
@@ -116,8 +130,13 @@ fun PageEditor(
     var boxSize by remember { mutableStateOf(Offset(1f, 1f)) }
 
     val title = when (mode) {
-        is EditMode.Ink -> if (mode.highlighter) "Highlight" else "Draw"
+        is EditMode.Ink -> "Draw"
         is EditMode.Place -> "Place ${mode.label}"
+        is EditMode.TextMark -> when (mode.mark) {
+            TextMark.Highlight -> "Highlight"
+            TextMark.Underline -> "Underline"
+            TextMark.Strikethrough -> "Strikethrough"
+        }
     }
 
     Scaffold(
@@ -150,23 +169,32 @@ fun PageEditor(
                             val heightFraction = widthFraction * boxSize.x / imageAspect / boxSize.y
                             onPlace(mode.image, RectF(centerX - widthFraction / 2, centerY - heightFraction / 2, centerX + widthFraction / 2, centerY + heightFraction / 2))
                         }) { Text("Place") }
+                        // Lifting the finger applies the mark: nothing to confirm.
+                        is EditMode.TextMark -> Unit
                     }
                 }
             )
         },
         bottomBar = {
             Surface(tonalElevation = 3.dp) {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
+                Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
                     when (mode) {
-                        is EditMode.Ink -> palette.forEach { option ->
-                            Box(
-                                Modifier.padding(horizontal = 8.dp).size(36.dp).clip(CircleShape).background(option)
-                                    .border(if (option == color) 3.dp else 1.dp, if (option == color) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline, CircleShape)
-                                    .clickable { color = option }
-                                    .semantics { contentDescription = "Ink colour" }
-                            )
+                        is EditMode.Ink -> {
+                            Pens.forEach { option -> PenSwatch(option, selected = option == pen) { pen = option } }
+                            Box(Modifier.padding(horizontal = 6.dp).size(width = 1.dp, height = 28.dp).background(MaterialTheme.colorScheme.outlineVariant))
+                            Highlighters.forEach { option -> PenSwatch(option, selected = option == pen) { pen = option } }
                         }
                         is EditMode.Place -> Text("Drag to move. Use the handle to resize.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        is EditMode.TextMark -> Text(
+                            when {
+                                words == null -> "Finding the text on this page…"
+                                words?.isEmpty() == true -> "This page has no text to mark up. Use Draw instead."
+                                else -> "Drag across the words, or tap one."
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
                     }
                 }
             }
@@ -187,12 +215,15 @@ fun PageEditor(
                 bitmap?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds) }
 
                 when (mode) {
+                    is EditMode.TextMark -> words?.takeIf { it.isNotEmpty() }?.let { found ->
+                        TextSelectionLayer(found, mode.mark, mode.argb, onSelect = onMarkText)
+                    }
                     is EditMode.Ink -> {
-                        val strokeWidth = if (mode.highlighter) widthPx * 0.028f else widthPx * 0.006f
+                        val strokeWidth = if (pen.highlighter) widthPx * 0.028f else widthPx * 0.006f
                         Canvas(
-                            Modifier.fillMaxSize().pointerInput(color, strokeWidth) {
+                            Modifier.fillMaxSize().pointerInput(pen, strokeWidth) {
                                 detectDragGestures(
-                                    onDragStart = { start -> strokes.add(LiveStroke(mutableListOf(start), color, strokeWidth, mode.highlighter)); revision++ },
+                                    onDragStart = { start -> strokes.add(LiveStroke(mutableListOf(start), pen.color, strokeWidth, pen.highlighter)); revision++ },
                                     onDrag = { change, _ ->
                                         strokes.lastOrNull()?.points?.add(Offset(change.position.x.coerceIn(0f, widthPx), change.position.y.coerceIn(0f, heightPx)))
                                         revision++
@@ -255,6 +286,18 @@ fun PageEditor(
             }
         }
     }
+}
+
+@Composable
+private fun PenSwatch(pen: Pen, selected: Boolean, onClick: () -> Unit) {
+    // Pens are round; highlighters are rounded squares, like a marker's tip.
+    val shape = if (pen.highlighter) RoundedCornerShape(8.dp) else CircleShape
+    Box(
+        Modifier.padding(horizontal = 4.dp).size(34.dp).clip(shape).background(pen.color)
+            .border(if (selected) 3.dp else 1.dp, if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline, shape)
+            .clickable(onClickLabel = pen.name) { onClick() }
+            .semantics { contentDescription = pen.name + if (selected) ", selected" else "" }
+    )
 }
 
 // region Signatures
