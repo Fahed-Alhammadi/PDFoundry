@@ -1,7 +1,7 @@
 {
   "name": "pdfoundry-desktop",
   "productName": "PDFoundry",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Read, merge, edit and sign PDFs on your computer",
   "private": true,
   "type": "module",
@@ -17,7 +17,7 @@
     "dist:mac": "npm run build && electron-builder --mac",
     "dist:win": "npm run build && electron-builder --win",
     "dist:linux": "npm run build && electron-builder --linux",
-    "selftest": "npm run build && node scripts/selftest.mjs",
+    "selftest": "npm run build && node scripts/selftest.mjs --reopen && node scripts/selftest.mjs",
     "screenshots": "npm run build && node scripts/selftest.mjs --screenshots"
   },
   "dependencies": {

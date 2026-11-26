@@ -76,7 +76,13 @@ function openPaths(paths: string[]): { opened: string[]; errors: string[] } {
 function openFromSystem(paths: string[]): void {
   const pdfs = paths.filter((p) => /\.pdf$/i.test(p) && existsSync(p));
   if (!pdfs.length) return;
-  if (!win) return void pending.push(...pdfs);
+  if (!win) {
+    // No window yet (still starting), or it was closed (macOS keeps the app running): the new window asks for
+    // these as soon as it is ready.
+    pending.push(...pdfs);
+    if (app.isReady() && store) createWindow();
+    return;
+  }
   send('opened', openPaths(pdfs));
   if (win.isMinimized()) win.restore();
   win.focus();
@@ -291,8 +297,15 @@ function menu(): Menu {
   return Menu.buildFromTemplate(template);
 }
 
-function createWindow(): void {
-  // The window's own session: it serves the interface from app://ui/ and refuses everything else.
+let uiSession: Electron.Session | null = null;
+
+/**
+ * The window's own session: it serves the interface from app://ui/ and refuses everything else.
+ * Set up once. On macOS the window can be closed and opened again while the app keeps running, and registering
+ * the app:// address a second time is an error.
+ */
+function windowSession(): Electron.Session {
+  if (uiSession) return uiSession;
   const ui = session.fromPartition('pdfoundry-window');
   ui.protocol.handle('app', (request) => {
     const url = new URL(request.url);
@@ -304,7 +317,11 @@ function createWindow(): void {
     done({ cancel: !/^(app|blob|data|devtools):/.test(details.url) });
   });
   ui.setPermissionRequestHandler((_wc, _permission, done) => done(false));
+  return (uiSession = ui);
+}
 
+function createWindow(): void {
+  const ui = windowSession();
   closing = false;
   unsaved = false;
   win = new BrowserWindow({
@@ -395,12 +412,39 @@ if (!app.requestSingleInstanceLock()) {
     createWindow();
     if (app.isPackaged) updater.start();
 
+    // Development check (npm run selftest): the window must survive being closed and opened again, twice.
+    if (dev && process.env.PDFOUNDRY_REOPEN) {
+      const result = process.env.PDFOUNDRY_REOPEN;
+      let rounds = 0;
+      const again = () => {
+        win!.webContents.once('did-finish-load', () => {
+          if (++rounds === 3) {
+            writeFileSync(result, JSON.stringify({ checks: [{ name: 'the window can be closed and opened again', pass: true }] }));
+            closing = true;
+            return app.quit();
+          }
+          win!.once('closed', () => {
+            try {
+              createWindow();
+              again();
+            } catch (e) {
+              writeFileSync(result, JSON.stringify({ checks: [{ name: 'the window can be closed and opened again', pass: false, detail: String(e) }] }));
+              app.quit();
+            }
+          });
+          closing = true;
+          win!.close();
+        });
+      };
+      again();
+    }
+
     app.on('activate', () => {
       if (!win) createWindow();
     });
   });
 
   app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') app.quit();
+    if (process.platform !== 'darwin' && !(dev && process.env.PDFOUNDRY_REOPEN)) app.quit();
   });
 }
