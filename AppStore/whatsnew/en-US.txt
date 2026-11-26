@@ -1,10 +1,1 @@
-First test build of PDFoundry.
-
-Please try:
-• Importing a PDF, scanning a page, and building a PDF from photos
-• Highlighting text, adding typed text and drawing
-• Drawing a signature and placing it on a page
-• Merging two documents
-• Reordering, rotating and deleting pages
-
-Send feedback from TestFlight with a screenshot if anything looks wrong.
+Opening a PDF that is already in your library now opens it, instead of adding a second copy.

@@ -85,6 +85,31 @@ struct PDFOperationsTests {
         #expect(AppInfo.websiteDisplay == "fahed-alhammadi.github.io/PDFoundry")
     }
 
+    @Test func openingTheSameFileAgainDoesNotAddItAgain() async throws {
+        let library = folder.appending(path: "Library")
+        try FileManager.default.createDirectory(at: library, withIntermediateDirectories: true)
+        let store = DocumentStore(directory: library)
+        let report = try makePDF(named: "Report", pages: 2)
+
+        let first = try await store.importFiles([report])
+        let again = try await store.importFiles([report])
+        #expect(again == first)
+        #expect(store.items.count == 1)
+
+        // The same contents under another name (as Mail or Files hand them over) are still the same document.
+        let renamedCopy = folder.appending(path: "Report from Mail.pdf")
+        try FileManager.default.copyItem(at: report, to: renamedCopy)
+        #expect(try await store.importFiles([renamedCopy, report]) == first)
+        #expect(store.items.count == 1)
+
+        // A different document with the same name is added beside it.
+        try FileManager.default.removeItem(at: report)
+        let other = try makePDF(named: "Report", pages: 3)
+        let added = try await store.importFiles([other])
+        #expect(added.first?.lastPathComponent == "Report 2.pdf")
+        #expect(store.items.count == 2)
+    }
+
     @Test func libraryNamesNeverCollideOrEscapeTheFolder() async throws {
         let store = DocumentStore(directory: folder)
         let first = try makePDF(named: "Report", pages: 1)

@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.pdf.PdfDocument
+import android.net.Uri
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.pdfoundry.app.data.DocumentStore
@@ -167,6 +168,32 @@ class PdfEngineTest {
         assertTrue(bitmap.width > bitmap.height && canvas.width > 0)
         val hasInk = (0 until bitmap.width step 4).any { x -> (0 until bitmap.height step 4).any { y -> Color.alpha(bitmap.getPixel(x, y)) > 0 } }
         assertTrue("The text should be drawn", hasInk)
+    }
+
+    @Test
+    fun openingTheSameFileAgainDoesNotAddItAgain() = runBlocking {
+        val store = DocumentStore(context)
+        val before = store.directory.listFiles()!!.toSet()
+        val report = makePdf("Duplicate check ${System.nanoTime()}", 2)
+        val added = mutableListOf<File>()
+        try {
+            val first = store.import(listOf(Uri.fromFile(report)), "Duplicate check")
+            added += first
+            assertEquals(1, first.size)
+            assertEquals(first, store.import(listOf(Uri.fromFile(report)), "Duplicate check"))
+
+            // The same contents arriving under another name are still the same document.
+            val copy = File(folder, "From another app.pdf").also { report.copyTo(it) }
+            assertEquals(first, store.import(listOf(Uri.fromFile(copy), Uri.fromFile(report))))
+            assertEquals(1, (store.directory.listFiles()!!.toSet() - before).size)
+
+            // A different document with the same name is added beside it.
+            val other = store.import(listOf(Uri.fromFile(makePdf("Other ${System.nanoTime()}", 3))), "Duplicate check")
+            added += other
+            assertEquals("Duplicate check 2.pdf", other.single().name)
+        } finally {
+            added.forEach { it.delete() }
+        }
     }
 
     @Test

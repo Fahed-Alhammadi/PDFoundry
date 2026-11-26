@@ -69,7 +69,8 @@ final class DocumentStore {
 
     // MARK: Adding
 
-    /// Copies files into the library and returns their new locations.
+    /// Brings files into the library and returns where each one is.
+    /// A file whose contents are already in the library is not copied again: its existing document is returned.
     @discardableResult
     func importFiles(_ urls: [URL]) async throws -> [URL] {
         var imported: [URL] = []
@@ -80,12 +81,30 @@ final class DocumentStore {
             }
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            if let existing = existingCopy(of: url) {
+                if !imported.contains(existing) { imported.append(existing) }
+                continue
+            }
             let destination = uniqueURL(named: url.deletingPathExtension().lastPathComponent)
             try FileManager.default.copyItem(at: url, to: destination)
             imported.append(destination)
         }
         await refresh()
         return imported
+    }
+
+    /// A document already in the library with exactly the same contents as `url`, if there is one.
+    /// Files handed over by other apps arrive as temporary copies, so contents are the only thing to compare.
+    func existingCopy(of url: URL) -> URL? {
+        let manager = FileManager.default
+        guard let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize,
+              let files = try? manager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey])
+        else { return nil }
+        return files.first { candidate in
+            candidate.pathExtension.lowercased() == "pdf"
+                && (try? candidate.resourceValues(forKeys: [.fileSizeKey]))?.fileSize == size
+                && manager.contentsEqual(atPath: candidate.path, andPath: url.path)
+        }
     }
 
     /// Handles a PDF handed to the app by Files, Mail, Safari or the share sheet.

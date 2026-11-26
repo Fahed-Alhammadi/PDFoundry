@@ -103,7 +103,11 @@ class DocumentStore(private val context: Context) {
         return candidate
     }
 
-    /** Copies PDFs picked or received from other apps into the library. Returns the new files. */
+    /**
+     * Brings PDFs picked or received from other apps into the library and returns where each one is.
+     * A PDF whose contents are already in the library is not added again: its existing document is returned.
+     * (Other apps hand files over as one-time links, so contents are the only thing to compare.)
+     */
     suspend fun import(uris: List<Uri>, nameOverride: String? = null): List<File> {
         val imported = withContext(Dispatchers.IO) {
             uris.mapNotNull { uri ->
@@ -118,7 +122,13 @@ class DocumentStore(private val context: Context) {
                         destination.delete()
                         null
                     } else {
-                        destination
+                        val twin = directory.listFiles()?.firstOrNull { it != destination && it.extension.equals("pdf", ignoreCase = true) && sameContents(it, destination) }
+                        if (twin != null) {
+                            destination.delete()
+                            twin
+                        } else {
+                            destination
+                        }
                     }
                 } catch (e: Exception) {
                     destination.delete()
@@ -127,7 +137,33 @@ class DocumentStore(private val context: Context) {
             }
         }
         refresh()
-        return imported
+        return imported.distinct()
+    }
+
+    private fun sameContents(a: File, b: File): Boolean {
+        if (a.length() != b.length()) return false
+        // Fills the buffer unless the file ends first (a plain read may return less than asked for).
+        fun fill(stream: java.io.InputStream, buffer: ByteArray): Int {
+            var total = 0
+            while (total < buffer.size) {
+                val read = stream.read(buffer, total, buffer.size - total)
+                if (read < 0) break
+                total += read
+            }
+            return total
+        }
+        a.inputStream().use { first ->
+            b.inputStream().use { second ->
+                val x = ByteArray(64 * 1024)
+                val y = ByteArray(64 * 1024)
+                while (true) {
+                    val read = fill(first, x)
+                    if (read != fill(second, y)) return false
+                    if (read == 0) return true
+                    for (index in 0 until read) if (x[index] != y[index]) return false
+                }
+            }
+        }
     }
 
     suspend fun createFromImages(uris: List<Uri>, name: String): File? {
