@@ -16,6 +16,7 @@ export type AppInfo = {
   shots: string | null;
 };
 export type Opened = { opened: string[]; errors: string[] };
+export type PickedPdf = { path: string; name: string; bytes: Uint8Array };
 export type PickedImage = { name: string; type: 'png' | 'jpeg'; bytes: Uint8Array };
 export type LinkName = 'website' | 'privacy' | 'help' | 'feedback' | 'releases' | 'license';
 
@@ -39,7 +40,12 @@ export const api = {
   read: async (file: string): Promise<Uint8Array> => new Uint8Array(await bridge.call('read', file)),
   save: (file: string, bytes: Uint8Array): Promise<void> => bridge.call('save', file, bytes),
   /** Asks where to save, writes the file and returns its path; null when the user cancels. */
-  saveAs: (suggested: string, bytes: Uint8Array, beside?: string): Promise<string | null> => bridge.call('saveAs', suggested, bytes, beside),
+  saveAs: (suggested: string, bytes: Uint8Array, beside?: string, keep?: string): Promise<string | null> => bridge.call('saveAs', suggested, bytes, beside, keep),
+  /** Extract Pages: asks for one PDF and reads it once, without listing it as recent. Null when cancelled. */
+  pickPdf: async (): Promise<PickedPdf | null> => {
+    const picked = await bridge.call('pickPdf');
+    return picked ? { ...picked, bytes: new Uint8Array(picked.bytes) } : null;
+  },
   forget: (file: string): Promise<void> => bridge.call('forget', file),
   clearRecent: (): Promise<void> => bridge.call('clearRecent'),
   reveal: (file: string): Promise<void> => bridge.call('reveal', file),
@@ -56,6 +62,8 @@ export const api = {
   installUpdate: (): Promise<void> => bridge.call('installUpdate'),
 
   devCreate: (name: string, bytes: Uint8Array): Promise<string> => bridge.call('devCreate', name, bytes),
+  devWrite: (name: string, bytes: Uint8Array): Promise<string> => bridge.call('devWrite', name, bytes),
+  devAnswer: (answer: { save?: string; pick?: string }): Promise<void> => bridge.call('devAnswer', answer),
   devRead: async (file: string): Promise<Uint8Array> => new Uint8Array(await bridge.call('devRead', file)),
   devCapture: (name: string): Promise<void> => bridge.call('devCapture', name),
   devDone: (result: unknown): Promise<void> => bridge.call('devDone', result),

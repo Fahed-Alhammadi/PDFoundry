@@ -262,7 +262,7 @@ export async function welcomeGuide(): Promise<Uint8Array> {
   page.drawText('Welcome to PDFoundry', { x: 56, y: 730, size: 26, font: bold, color: rgb(1, 1, 1) });
   const lines: [string, string][] = [
     ['Read', 'Choose Open, or drop a PDF onto the window. It opens where it is: nothing is copied.'],
-    ['Merge', 'Select two or more recent files, then choose Merge and say where to save the result.'],
+    ['Merge', 'Tools merges files and extracts pages. Or select two or more recent files and choose Merge.'],
     ['Edit', 'Markup highlights, underlines or strikes through text you select, adds text and draws. Pages reorders pages.'],
     ['Save', 'Your file changes only when you choose Save. Save As keeps the original and makes a new file.'],
     ['Sign', 'Choose Fill & Sign, draw your signature once, then drag it onto the line and place it.'],

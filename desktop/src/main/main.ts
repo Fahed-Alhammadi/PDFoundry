@@ -4,6 +4,8 @@
 //
 // A PDF is opened where it is and saved back to the same file when the user chooses Save; nothing is copied into
 // the app. The window may read and save only files the user picked (a system dialog, a drop, or "Open with").
+// The one exception only reads: Extract Pages gets the bytes of the file picked in its own dialog, once, and that
+// file is not listed (so the window cannot read or save it afterwards).
 //
 // The window itself can never use the network: it is served from the app:// scheme and every other request is
 // refused. The only thing that goes online is the update check in this process (GitHub releases).
@@ -44,6 +46,8 @@ const pending: string[] = [];
 let unsaved = false;
 /** Set once the user has answered the "save your changes?" question, so the window may really close. */
 let closing = false;
+/** Development only (the self-test): the answer to the next save or open dialog, so no system dialog is shown. */
+let devAnswer: { save?: string; pick?: string } = {};
 
 const updater = new Updater((state) => send('update', state));
 
@@ -90,6 +94,11 @@ function openFromSystem(paths: string[]): void {
 
 /** Asks where to save a new file. Returns null when cancelled. */
 async function chooseSavePath(title: string, suggested: string, folder?: string): Promise<string | null> {
+  if (dev && devAnswer.save) {
+    const answer = devAnswer.save;
+    delete devAnswer.save;
+    return answer;
+  }
   const picked = await dialog.showSaveDialog(win!, {
     title,
     defaultPath: path.join(folder && existsSync(folder) ? folder : app.getPath('documents'), `${cleanName(suggested)}.pdf`),
@@ -136,13 +145,36 @@ const handlers: Record<string, Handler> = {
   openPaths: (paths: string[]) => openPaths(Array.isArray(paths) ? paths : []),
   read: (file: string) => store.read(file),
   save: (file: string, bytes: Uint8Array) => store.save(file, bytes),
-  /** Save As: asks where, writes the file there and returns its path (null when cancelled). */
-  saveAs: async (suggested: string, bytes: Uint8Array, beside?: string) => {
+  /**
+   * Save As: asks where, writes the file there and returns its path (null when cancelled). `keep` is a file the new
+   * one must not replace (the source of Extract Pages).
+   */
+  saveAs: async (suggested: string, bytes: Uint8Array, beside?: string, keep?: string) => {
     const target = await chooseSavePath('Save As', suggested, typeof beside === 'string' ? path.dirname(beside) : undefined);
     if (!target) return null;
-    const saved = store.saveNew(target, bytes);
+    const saved = store.saveNew(target, bytes, typeof keep === 'string' ? keep : undefined);
     app.addRecentDocument(saved);
     return saved;
+  },
+  /**
+   * Extract Pages: asks for one PDF and hands its bytes to the window, once. The file is not added to the recent
+   * list, so this grants no access beyond this read. Null when cancelled.
+   */
+  pickPdf: async () => {
+    let file: string | undefined;
+    if (dev && devAnswer.pick) {
+      file = devAnswer.pick;
+      delete devAnswer.pick;
+    } else {
+      const picked = await dialog.showOpenDialog(win!, {
+        title: 'Extract Pages',
+        properties: ['openFile'],
+        filters: [{ name: 'PDF documents', extensions: ['pdf'] }],
+      });
+      file = picked.canceled ? undefined : picked.filePaths[0];
+    }
+    if (!file) return null;
+    return { path: file, name: path.basename(file), bytes: store.readOnce(file) };
   },
   forget: (file: string) => store.forget(file),
   clearRecent: () => {
@@ -202,6 +234,19 @@ const handlers: Record<string, Handler> = {
     const file = path.join(folder, `${cleanName(name)}.pdf`);
     writeFileSync(file, bytes);
     return store.remember(file);
+  },
+  /** Writes a file into the throwaway data folder without opening it (it is not listed). */
+  devWrite: (name: string, bytes: Uint8Array) => {
+    if (!dev) return null;
+    const folder = path.join(app.getPath('userData'), 'Test files');
+    mkdirSync(folder, { recursive: true });
+    const file = path.join(folder, `${cleanName(name)}.pdf`);
+    writeFileSync(file, bytes);
+    return file;
+  },
+  /** The answer the next save dialog (`save`) or Extract Pages open dialog (`pick`) gives, without showing it. */
+  devAnswer: (answer: { save?: string; pick?: string }) => {
+    if (dev) devAnswer = { ...devAnswer, ...answer };
   },
   devRead: (file: string) => (dev ? readFileSync(file) : null),
   devCapture: async (name: string) => {

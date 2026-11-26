@@ -9,9 +9,11 @@ import type { Library } from './library.ts';
 import { openPdf, renderPage, search } from './pdfview.ts';
 import type { Reader } from './reader.ts';
 import type { SettingsView } from './settings.ts';
+import type { ToolsView } from './tools.ts';
+import type { Route } from './app.ts';
 import * as pdf from '../core/pdf.ts';
 
-type App = { library: Library; reader: Reader; settings: SettingsView; show: (route: 'documents' | 'settings') => void };
+type App = { library: Library; reader: Reader; settings: SettingsView; tools: ToolsView; show: (route: Route) => void };
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -277,6 +279,7 @@ async function interfaceTest(checks: { name: string; pass: boolean; detail?: str
   await app.reader.close();
 
   await modesTest(check, app);
+  await toolsTest(check, app);
 
   // The window may touch only files the user opened, and cannot reach the network.
   let refused = false;
@@ -473,6 +476,70 @@ async function modesTest(check: (name: string, pass: boolean, detail?: string) =
   check('leaving without saving keeps the file as it was', (await closing) === true && sameBytes(await api.devRead(file), sample) && !app.reader.file);
 }
 
+/** The Tools view: today's tools, and Extract Pages from a recent file and from a picked one. Neither source changes. */
+async function toolsTest(check: (name: string, pass: boolean, detail?: string) => void, app: App): Promise<void> {
+  const rail = document.querySelector('.rail')!;
+  const view = app.tools.el;
+  const widths = async (bytes: Uint8Array) => (await PDFDocument.load(bytes)).getPages().map((p) => p.getWidth());
+  const lastDialog = () => [...document.querySelectorAll<HTMLElement>('.dialog')].pop()!;
+  const toastText = () => document.querySelector('.toast')?.textContent ?? '';
+
+  const made = await PDFDocument.create();
+  for (const width of [200, 300, 400]) made.addPage([width, 500]);
+  const sourceBytes = await made.save();
+  const source = await api.devCreate('Extract source', sourceBytes);
+  const listedBefore = (await api.recent()).find((f) => f.path === source)!.opened;
+
+  clickButton(rail, 'Tools');
+  const sections = [...view.querySelectorAll('.tool-section h2')].map((e) => e.textContent);
+  check('the Tools view lists today’s tools in their sections', !view.hidden && JSON.stringify(sections) === '["Create","Combine & split"]'
+    && ['Create from Images', 'Merge PDFs', 'Extract Pages'].every((t) => hasButton(view, t)) && !hasButton(view, 'Scan Document'), JSON.stringify(sections));
+
+  // From a recent file: pick it, tick pages 1 and 3, Extract, and say where to save.
+  const extractFrom = async (choose: () => void, tick: number[], out: string) => {
+    clickButton(view, 'Extract Pages');
+    await until(() => !!document.querySelector('.dialog.picker'), 'the document picker');
+    await until(() => document.querySelectorAll('.picker-row').length > 1, 'the recent files');
+    choose();
+    await until(() => document.querySelectorAll('.dialog.extract .organizer-page').length > 0, 'the pages to extract');
+    for (const i of tick) (document.querySelectorAll('.dialog.extract .organizer-page')[i] as HTMLElement).click();
+    await api.devAnswer({ save: out });
+    clickButton(lastDialog(), 'Extract');
+    await until(() => !document.querySelector('.dialog.extract') && /^Saved/.test(toastText()), 'the extracted file');
+  };
+  const out = source.replace(/[^\\/]+$/, 'Extract out.pdf');
+  await extractFrom(() => clickButton(document.querySelector('.dialog.picker')!, 'Extract source'), [0, 2], out);
+  const entry = (await api.recent()).find((f) => f.path === source);
+  check('Extract Pages saves the chosen pages and leaves the source alone',
+    sameBytes(await api.devRead(source), sourceBytes) && JSON.stringify(await widths(await api.devRead(out))) === '[200,400]'
+    && !app.reader.file && !view.hidden && entry?.opened === listedBefore && /2 pages/.test(toastText()),
+    JSON.stringify({ toast: toastText(), reader: app.reader.file, opened: [entry?.opened, listedBefore] }));
+
+  // From Browse…: the picked file is read once and is not added to the recent list.
+  const picked = await api.devWrite('Picked source', sourceBytes);
+  const out2 = source.replace(/[^\\/]+$/, 'Extract out 2.pdf');
+  await api.devAnswer({ pick: picked });
+  await extractFrom(() => clickButton(document.querySelector('.dialog.picker')!, 'Browse…'), [1], out2);
+  const recent = (await api.recent()).map((f) => f.path);
+  let readable = true;
+  await api.read(picked).catch(() => (readable = false));
+  check('Extract Pages from a picked file does not list it or open it', sameBytes(await api.devRead(picked), sourceBytes) && !recent.includes(picked)
+    && !readable && JSON.stringify(await widths(await api.devRead(out2))) === '[300]' && !app.reader.file, JSON.stringify({ recent, readable }));
+
+  // The new file may never replace its source.
+  await api.devAnswer({ save: source });
+  clickButton(view, 'Extract Pages');
+  await until(() => document.querySelectorAll('.picker-row').length > 1, 'the recent files');
+  clickButton(document.querySelector('.dialog.picker')!, 'Extract source');
+  await until(() => document.querySelectorAll('.dialog.extract .organizer-page').length > 0, 'the pages to extract');
+  (document.querySelector('.dialog.extract .organizer-page') as HTMLElement).click();
+  clickButton(lastDialog(), 'Extract');
+  await until(() => /replace the file you are extracting from/.test(toastText()), 'the refusal');
+  check('Extract Pages never saves over its source', sameBytes(await api.devRead(source), sourceBytes) && !!document.querySelector('.dialog.extract'));
+  clickButton(lastDialog(), 'Cancel');
+  app.show('documents');
+}
+
 // Screenshots
 
 async function sampleDocument(heading: string, color: [number, number, number], pages: string[][], signLine = false): Promise<Uint8Array> {
@@ -567,9 +634,36 @@ async function screenshots(app: App): Promise<void> {
   app.reader.scrollToPage(2);
   await shot('02-signed');
 
+  // Markup: words selected on page 1 and highlighted, with the Markup bar showing.
+  const dock = document.querySelector('.dock')!;
+  app.reader.scrollToPage(0);
+  app.reader.setMode('markup');
+  const first = document.querySelectorAll<HTMLElement>('.page')[0];
+  await until(() => !!first.querySelector('.textLayer span'), 'the text of page 1');
+  const span = [...first.querySelectorAll('.textLayer span')].find((e) => e.textContent?.includes('monthly rent'));
+  if (span?.firstChild) {
+    const at = span.textContent!.indexOf('monthly rent');
+    const range = document.createRange();
+    range.setStart(span.firstChild, at);
+    range.setEnd(span.firstChild, at + 'monthly rent'.length);
+    window.getSelection()!.removeAllRanges();
+    window.getSelection()!.addRange(range);
+    const before = app.reader.data;
+    clickButton(dock, 'Highlight');
+    await until(() => !!document.querySelector('.menu'), 'the highlight colours');
+    clickButton(document.querySelector('.menu')!, 'Yellow');
+    await until(() => app.reader.data !== before && !document.querySelector('.reader.busy'), 'the highlight');
+  }
+  await shot('09-markup');
+
+  // Fill & Sign on the last page, then placing a signature from it.
+  app.reader.setMode('fillSign');
+  app.reader.scrollToPage(2);
+  await shot('10-fill-sign');
   app.reader.beginPlacement(await placedFromPng(signature), 0.3);
   await shot('03-place-signature');
   (document.querySelector('.dock .button:not(.primary)') as HTMLElement).click(); // Cancel
+  app.reader.setMode('none');
 
   app.reader.organize();
   await wait(900);
@@ -577,6 +671,7 @@ async function screenshots(app: App): Promise<void> {
   await shot('04-pages');
   (document.querySelector('.dialog-actions .primary') as HTMLElement).click();
 
+  await app.reader.undo(); // the highlight: leave the file as it is on disk
   await app.reader.close();
   await wait(500);
   (document.querySelector('.select-toggle') as HTMLElement).click();
@@ -586,6 +681,18 @@ async function screenshots(app: App): Promise<void> {
   await shot('05-merge');
   (document.querySelector('.dialog-actions .button') as HTMLElement).click();
   (document.querySelector('.select-toggle') as HTMLElement).click();
+
+  // Tools, and Extract Pages from the rental agreement.
+  app.show('tools');
+  await shot('11-tools');
+  void app.tools.run('extract');
+  await until(() => !!document.querySelector('.dialog.picker [aria-label="Rental Agreement"]'), 'the document picker');
+  clickButton(document.querySelector('.dialog.picker')!, 'Rental Agreement');
+  await until(() => document.querySelectorAll('.dialog.extract .organizer-page').length === 3, 'the pages to extract');
+  for (const i of [0, 2]) (document.querySelectorAll('.dialog.extract .organizer-page')[i] as HTMLElement).click();
+  await wait(600);
+  await shot('12-extract');
+  clickButton([...document.querySelectorAll('.dialog')].pop()!, 'Cancel');
 
   app.show('settings');
   await shot('06-settings');
