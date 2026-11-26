@@ -48,6 +48,8 @@ class PdfApp : Application() {
         private set
     lateinit var settings: Settings
         private set
+    /** For work that must finish even if the screen that started it goes away (a merge or an extraction). */
+    val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Main.immediate)
 
     override fun onCreate() {
         super.onCreate()

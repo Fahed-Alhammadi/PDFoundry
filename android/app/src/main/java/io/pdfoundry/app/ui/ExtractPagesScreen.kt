@@ -2,6 +2,7 @@ package io.pdfoundry.app.ui
 
 import android.graphics.Bitmap
 import android.util.Size
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -58,34 +59,57 @@ import androidx.compose.ui.unit.dp
 import io.pdfoundry.app.app
 import io.pdfoundry.app.data.PdfSource
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
- * Extract Pages from the Tools tab: tick pages, then Extract. Only reads [file] (nothing here can
- * change it: no delete, rotate or reorder), and the new document goes into the library.
+ * Extract Pages from the Tools tab: tick pages, then Extract. Only reads the document (nothing here can
+ * change it: no delete, rotate or reorder), and the new document goes into the library. A file opened
+ * in place is first brought up to date, so the pages shown are the pages extracted. This screen owns a
+ * [PickedDocument.temporary] copy: it is discarded when the screen goes, or, once Extract was tapped,
+ * when the extraction has finished.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ExtractPagesScreen(file: File, onCancel: () -> Unit, onExtracted: (File, Int) -> Unit) {
-    val store = LocalContext.current.app.store
-    val scope = rememberCoroutineScope()
+fun ExtractPagesScreen(document: PickedDocument, onCancel: () -> Unit, onExtracted: (File, Int) -> Unit) {
+    val app = LocalContext.current.app
+    val store = app.store
+    val file = document.file
     var chosen by remember(file) { mutableStateOf(setOf<Int>()) }
     var working by remember { mutableStateOf(false) }
+    var started by remember { mutableStateOf(false) }
     var problem by remember { mutableStateOf<String?>(null) }
+    var notice by remember { mutableStateOf<String?>(null) }
 
-    // null while opening; failure leaves it null and says why.
-    val source by produceState<PdfSource?>(null, file) {
-        value = withContext(Dispatchers.IO) {
-            runCatching { PdfSource(file) }.onFailure {
-                problem = if (it is SecurityException) "Pages can't be extracted from a password-protected document." else "This file isn't a readable PDF."
-            }.getOrNull()
+    val screen = remember { object { var gone = false } }
+    DisposableEffect(document) {
+        onDispose {
+            screen.gone = true
+            if (!started) store.release(listOf(document))
         }
     }
-    DisposableEffect(source) {
-        val opened = source
-        onDispose { opened?.let { Thread { it.close() }.start() } }
+    // While the pages are being saved there is no way back: the result is always reported.
+    BackHandler { if (!working) onCancel() }
+
+    // null while opening; failure leaves it null and says why. Closed when the screen goes, even mid-open.
+    val source by produceState<PdfSource?>(null, file) {
+        var opened: PdfSource? = null
+        try {
+            withContext(Dispatchers.IO) {
+                if (!document.temporary && !store.syncForReading(file)) notice = "This file can't be reached right now. It is shown as last seen."
+                try {
+                    opened = PdfSource(file)
+                } catch (e: Exception) {
+                    problem = if (e is SecurityException) "Pages can't be extracted from a password-protected document." else "This file isn't a readable PDF."
+                }
+            }
+            value = opened
+            awaitCancellation()
+        } finally {
+            opened?.let { Thread { it.close() }.start() }
+        }
     }
     val count = source?.pageCount ?: 0
 
@@ -98,7 +122,7 @@ fun ExtractPagesScreen(file: File, onCancel: () -> Unit, onExtracted: (File, Int
                         Text(file.nameWithoutExtension, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 },
-                navigationIcon = { IconButton(onClick = onCancel) { Icon(Icons.Filled.Close, "Cancel") } },
+                navigationIcon = { IconButton(onClick = onCancel, enabled = !working) { Icon(Icons.Filled.Close, "Cancel") } },
                 actions = {
                     if (count > 0) TextButton(onClick = { chosen = if (chosen.size == count) emptySet() else (0 until count).toSet() }) {
                         Text(if (chosen.size == count) "None" else "All")
@@ -114,11 +138,21 @@ fun ExtractPagesScreen(file: File, onCancel: () -> Unit, onExtracted: (File, Int
                         modifier = Modifier.fillMaxWidth(),
                         onClick = {
                             working = true
+                            started = true
                             val pages = chosen.sorted()
-                            scope.launch {
+                            // In the app's scope: finishes, and cleans up, even if the screen goes meanwhile.
+                            app.scope.launch {
                                 try {
-                                    onExtracted(store.extractPages(file, pages), pages.size)
+                                    val result = store.extractPages(file, pages)
+                                    store.release(listOf(document))
+                                    onExtracted(result, pages.size)
                                 } catch (e: Exception) {
+                                    if (screen.gone) {
+                                        store.release(listOf(document))
+                                    } else {
+                                        // Still on screen: the user can try again or cancel (which discards the copy).
+                                        started = false
+                                    }
                                     problem = e.message ?: "The pages could not be saved."
                                 } finally {
                                     working = false
@@ -140,7 +174,7 @@ fun ExtractPagesScreen(file: File, onCancel: () -> Unit, onExtracted: (File, Int
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
             Text(
-                problem ?: "Tap the pages to copy into a new document. The original stays as it is.",
+                problem ?: notice ?: "Tap the pages to copy into a new document. The original stays as it is.",
                 style = MaterialTheme.typography.bodySmall,
                 color = if (problem != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,

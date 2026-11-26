@@ -1,6 +1,5 @@
 package io.pdfoundry.app.ui
 
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -35,6 +34,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -99,18 +100,20 @@ fun ToolsScreen(onOpen: (PdfItem) -> Unit) {
     val tools = remember { PdfTool.entries.filter { it != PdfTool.Scan || scannerAvailable(context) } }
 
     var picking by remember { mutableStateOf<PdfTool?>(null) }
-    var mergeTargets by remember { mutableStateOf<List<PdfItem>?>(null) }
-    /** The document whose pages are being chosen, and whether it is a temporary copy to delete afterwards. */
-    var extracting by remember { mutableStateOf<Pair<File, Boolean>?>(null) }
+    /** Documents waiting in the merge sheet. Temporary copies among them are this screen's to discard. */
+    var mergeTargets by remember { mutableStateOf<List<PickedDocument>?>(null) }
+    /** The document whose pages are being chosen. The extract screen owns a temporary copy. */
+    var extracting by remember { mutableStateOf<PickedDocument?>(null) }
 
-    extracting?.let { (file, temporary) ->
-        val close = {
-            if (temporary) store.discardTemporary(file)
+    // Leaving the tab (or a document arriving from another app) with the merge sheet open.
+    val waitingMerge by rememberUpdatedState(mergeTargets)
+    DisposableEffect(Unit) {
+        onDispose { waitingMerge?.let { store.release(it) } }
+    }
+
+    extracting?.let { document ->
+        ExtractPagesScreen(document = document, onCancel = { extracting = null }, onExtracted = { result, pages ->
             extracting = null
-        }
-        BackHandler(onBack = close)
-        ExtractPagesScreen(file = file, onCancel = close, onExtracted = { result, pages ->
-            close()
             scope.launch { announce(result, "Saved ${if (pages == 1) "1 page" else "$pages pages"} as “${result.nameWithoutExtension}” in Documents.") }
         })
         return
@@ -155,14 +158,12 @@ fun ToolsScreen(onOpen: (PdfItem) -> Unit) {
         DocumentPickerSheet(
             title = if (tool == PdfTool.Merge) "Choose documents to merge" else "Choose a document",
             multiple = tool == PdfTool.Merge,
-            // Extract only reads the file: a file picked from Files is read from a temporary copy and not listed.
-            listPickedFiles = tool == PdfTool.Merge,
             onDismiss = { picking = null },
             onPick = { picked ->
                 picking = null
                 when (tool) {
-                    PdfTool.Merge -> mergeTargets = picked.map { it.item ?: return@map null }.filterNotNull()
-                    else -> picked.firstOrNull()?.let { extracting = it.file to (it.item == null) }
+                    PdfTool.Merge -> mergeTargets = picked
+                    else -> extracting = picked.firstOrNull()
                 }
             },
             onError = { message -> scope.launch { snackbar.showSnackbar(message) } }
@@ -170,14 +171,17 @@ fun ToolsScreen(onOpen: (PdfItem) -> Unit) {
     }
 
     mergeTargets?.let { targets ->
-        MergeDialog(targets, onDismiss = { mergeTargets = null }) { ordered, name, deleteOriginals ->
+        MergeDialog(targets.map { it.item }, onDismiss = { store.release(targets); mergeTargets = null }) { ordered, name, deleteOriginals ->
+            // The merge now owns the documents: it finishes, and cleans up, even if this screen goes.
             mergeTargets = null
-            scope.launch {
+            context.app.scope.launch {
                 try {
                     val merged = store.merge(ordered, name, deleteOriginals)
                     store.items.firstOrNull { it.file == merged }?.let(onOpen)
                 } catch (e: Exception) {
-                    snackbar.showSnackbar(e.message ?: "Something went wrong.")
+                    scope.launch { snackbar.showSnackbar(e.message ?: "Something went wrong.") }
+                } finally {
+                    store.release(targets)
                 }
             }
         }

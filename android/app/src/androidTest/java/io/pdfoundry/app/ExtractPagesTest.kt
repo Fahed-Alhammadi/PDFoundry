@@ -12,6 +12,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -78,6 +79,7 @@ class ExtractPagesTest {
 
         // The new document is in the library with the chosen pages, in order.
         assertEquals(store.directory, extracted.parentFile)
+        assertEquals("named like on iOS", "Lease (pages)", extracted.nameWithoutExtension)
         assertEquals(2, pageCount(extracted))
         assertEquals(listOf(0), PdfEngine.search(extracted, "Lease page 1").map { it.page })
         assertEquals(listOf(1), PdfEngine.search(extracted, "Lease page 3").map { it.page })
@@ -88,7 +90,7 @@ class ExtractPagesTest {
     }
 
     @Test
-    fun aFileChangedByAnotherAppIsExtractedAsItIsNow() = runBlocking {
+    fun aFileChangedByAnotherAppIsShownAndExtractedAsItIsNow() = runBlocking {
         val lease = makePdf("Lease", 2)
         val working = store.open(listOf(Uri.fromFile(lease))).single()
         // Another app adds a page; the working copy has not caught up yet.
@@ -96,10 +98,34 @@ class ExtractPagesTest {
         lease.setLastModified(lease.lastModified() + 5_000)
         val realBefore = md5(lease)
 
+        // The page picker brings the working copy up to date first, so the pages shown are the pages extracted.
+        assertTrue(store.syncForReading(working))
+        assertEquals(3, pageCount(working))
         val extracted = store.extractPages(working, listOf(0, 1, 2))
 
         assertEquals(3, pageCount(extracted))
         assertEquals(realBefore, md5(lease))
+    }
+
+    @Test
+    fun aHalfWrittenRealFileIsNeitherReadNorWritten() {
+        runBlocking {
+            val lease = makePdf("Lease", 1)
+            val working = store.open(listOf(Uri.fromFile(lease))).single()
+            PdfEngine.addBlankPage(working, 0)
+            // The save to the real file is cut short: it is now half-written.
+            outside.cutShort = true
+            assertThrows(java.io.IOException::class.java) { runBlocking { store.push(working) } }
+            outside.cutShort = false
+            val halfWritten = md5(lease)
+            lease.setLastModified(lease.lastModified() + 5_000)
+
+            assertTrue(store.syncForReading(working))
+
+            assertEquals("the real file is not touched (finishing the save is the reader's job)", halfWritten, md5(lease))
+            assertEquals("the working copy keeps the full document", 2, pageCount(working))
+            assertEquals(2, pageCount(store.extractPages(working, listOf(0, 1))))
+        }
     }
 
     @Test
@@ -112,7 +138,7 @@ class ExtractPagesTest {
         store.discardTemporary(picked)
 
         assertEquals(before, md5(lease))
-        assertEquals("Lease extract", extracted.nameWithoutExtension)
+        assertEquals("Lease (pages)", extracted.nameWithoutExtension)
         assertEquals(1, pageCount(extracted))
         // Only the new document is listed: the picked file was neither opened in place nor imported.
         assertEquals(listOf(extracted), store.items.map { it.file })
@@ -127,6 +153,53 @@ class ExtractPagesTest {
     }
 
     @Test
+    fun filesPickedFromFilesForAMergeAreUsedForThatMergeOnly() = runBlocking {
+        val first = makePdf("First", 1)
+        val second = makePdf("Second", 2)
+        val before = md5(first) to md5(second)
+
+        val picked = listOf(first, second).map { store.itemFor(store.temporaryCopy(Uri.fromFile(it))!!) }
+        assertEquals(listOf("First", "Second"), picked.map { it.name })
+        assertEquals(listOf(1, 2), picked.map { it.pages })
+        val merged = store.merge(picked, "Joined", deleteOriginals = false)
+        picked.forEach { store.discardTemporary(it.file) }
+
+        assertEquals(3, pageCount(merged))
+        assertEquals("only the merged document is listed", listOf(merged), store.items.map { it.file })
+        assertEquals(emptySet<Uri>(), outside.kept())
+        assertEquals(before, md5(first) to md5(second))
+        picked.forEach { assertTrue(!it.file.exists()) }
+    }
+
+    @Test
+    fun aLockedFileThatCannotBeOpenedLeavesNothingOpen() {
+        val locked = File(folder, "Locked.pdf")
+        com.tom_roush.pdfbox.pdmodel.PDDocument().use { document ->
+            document.addPage(com.tom_roush.pdfbox.pdmodel.PDPage())
+            document.protect(com.tom_roush.pdfbox.pdmodel.encryption.StandardProtectionPolicy("owner", "secret", com.tom_roush.pdfbox.pdmodel.encryption.AccessPermission()))
+            document.save(locked)
+        }
+        fun openFiles() = File("/proc/self/fd").list()!!.size
+        repeat(5) { runCatching { PdfSource(locked) } }
+        val before = openFiles()
+
+        repeat(40) { assertTrue(runCatching { PdfSource(locked) }.isFailure) }
+
+        assertTrue("open files went from $before to ${openFiles()}", openFiles() - before < 5)
+    }
+
+    @Test
+    fun leftoverTemporaryFilesAreClearedAtStart() = runBlocking {
+        val picked = File(context.cacheDir, "picked/left-over/Old.pdf").apply { parentFile!!.mkdirs(); writeText("x") }
+        val download = File(context.cacheDir, "extract-left-over.pdf").apply { writeText("x") }
+
+        store.start()
+
+        assertTrue(!picked.exists())
+        assertTrue(!download.exists())
+    }
+
+    @Test
     fun extractingFromALibraryDocumentLeavesItUnchanged() = runBlocking {
         val report = makePdf("Report", 4, into = store.directory)
         store.refresh()
@@ -136,7 +209,7 @@ class ExtractPagesTest {
 
         assertEquals(before, md5(report))
         assertEquals(2, pageCount(extracted))
-        assertEquals("Report extract", extracted.nameWithoutExtension)
+        assertEquals("Report (pages)", extracted.nameWithoutExtension)
         assertEquals(listOf(0), PdfEngine.search(extracted, "Report page 2").map { it.page })
     }
 }

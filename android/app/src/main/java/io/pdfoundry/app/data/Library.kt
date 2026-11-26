@@ -104,6 +104,7 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
 
     suspend fun start() {
         withContext(Dispatchers.IO) {
+            clearLeftovers()
             val preferences = context.getSharedPreferences("library", Context.MODE_PRIVATE)
             if (!preferences.getBoolean("seeded", false)) {
                 preferences.edit().putBoolean("seeded", true).apply()
@@ -400,45 +401,68 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
     }
 
     /**
-     * Extract Pages from the Tools tab: copies the chosen pages into a new library document. The
-     * source is only read. A file opened in place is read as it is now from where it lives, into a
-     * temporary file, so neither the real file nor its working copy (nor its link) is touched; if it
-     * can't be reached, the working copy is used.
+     * Before a tool reads a file opened in place: brings its working copy up to date with the real file
+     * if another app changed it, so the pages shown are the pages used. Only ever reads the real file,
+     * and never while a save to it is unfinished (the real file may be half-written: the working copy
+     * is the truth then, and finishing the save is left to the reader). The download happens without
+     * holding the store's lock. False when the real file can't be reached; the working copy is then
+     * used as last seen. Library documents and temporary copies need nothing.
+     */
+    suspend fun syncForReading(file: File): Boolean = withContext(Dispatchers.IO) {
+        val (link, seen) = gate.withLock { link(file)?.let { it to it.stamp } } ?: return@withContext true
+        if (link.pushing) return@withContext true
+        val now = outside.stamp(link.uri) ?: return@withContext false
+        if (now == seen && now.modified != 0L && file.exists()) return@withContext true
+        val incoming = File(file.parentFile, "${file.name}.reading-${System.nanoTime()}")
+        try {
+            if (!outside.read(link.uri, incoming) || !isPdf(incoming)) return@withContext false
+            gate.withLock {
+                // Replaced only if nothing happened meanwhile (a save started, or the link was dropped).
+                if (link.pushing || link !in links || link.stamp != seen) return@withLock true
+                if (!incoming.renameTo(file)) return@withLock false
+                link.stamp = now
+                saveLinks()
+                true
+            }
+        } finally {
+            incoming.delete()
+        }
+    }
+
+    /**
+     * Extract Pages from the Tools tab: copies the chosen pages of [source] into a new library document,
+     * "<name> (pages)". [source] is the file shown in the page picker: a library document, the working
+     * copy of a file opened in place (brought up to date by [syncForReading] first), or a temporary copy.
+     * It is only read.
      */
     suspend fun extractPages(source: File, pages: List<Int>): File {
         val destination = withContext(Dispatchers.IO) {
-            val current = gate.withLock {
-                link(source)?.let { link ->
-                    File(context.cacheDir, "extract-${link.id}.pdf").takeIf { temp ->
-                        val ok = runCatching { outside.read(link.uri, temp) && isPdf(temp) }.getOrDefault(false)
-                        if (!ok) temp.delete()
-                        ok
-                    }
-                }
-            }
-            try {
-                uniqueFile("${source.nameWithoutExtension} extract").also { PdfEngine.extract(current ?: source, pages, it) }
-            } finally {
-                current?.delete()
-            }
+            uniqueFile("${source.nameWithoutExtension} (pages)").also { PdfEngine.extract(source, pages, it) }
         }
         refresh()
         return destination
     }
 
     /**
-     * A private, temporary copy of a picked file, for a tool that only reads it (Extract Pages): the
-     * file is neither opened in place nor added to the library. Null when it isn't a readable PDF.
-     * Remove it with [discardTemporary].
+     * A private, temporary copy of a picked file, for a tool that uses it for one job only (Extract
+     * Pages, Merge PDFs): the file is neither opened in place nor added to the library. Null when it
+     * isn't a readable PDF. Remove it with [discardTemporary]; it is also removed if the caller is
+     * cancelled while it is being copied, and any left over are cleared at [start].
      */
-    suspend fun temporaryCopy(uri: Uri): File? = withContext(Dispatchers.IO) {
+    suspend fun temporaryCopy(uri: Uri): File? {
         val name = sanitized(outside.name(uri) ?: "").ifEmpty { "Untitled" }
         val file = File(pickedDirectory, "${java.util.UUID.randomUUID()}/$name.pdf")
-        file.parentFile?.mkdirs()
-        val ok = runCatching { outside.read(uri, file) && isPdf(file) }.getOrDefault(false)
-        if (ok) file else {
-            file.parentFile?.deleteRecursively()
-            null
+        try {
+            val ok = withContext(Dispatchers.IO) {
+                file.parentFile?.mkdirs()
+                runCatching { outside.read(uri, file) && isPdf(file) }.getOrDefault(false)
+            }
+            if (ok) return file
+            discardTemporary(file)
+            return null
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            discardTemporary(file)
+            throw e
         }
     }
 
@@ -447,7 +471,17 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
         if (folder.parentFile == pickedDirectory) folder.deleteRecursively()
     }
 
+    /** A list entry for a file that is not in the list (a temporary copy), for the merge sheet. */
+    suspend fun itemFor(file: File): PdfItem = withContext(Dispatchers.IO) { describe(file, null) }
+
     private val pickedDirectory get() = File(context.cacheDir, "picked")
+
+    /** Temporary files a tool was using when the app was closed. */
+    private fun clearLeftovers() {
+        pickedDirectory.deleteRecursively()
+        // Downloads made by an earlier version's Extract Pages.
+        context.cacheDir.listFiles { file -> file.name.startsWith("extract-") && file.name.endsWith(".pdf") }?.forEach { it.delete() }
+    }
 
     suspend fun rename(item: PdfItem, newName: String) {
         val clean = sanitized(newName)
@@ -500,14 +534,26 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
 /** An open PDF for display. PdfRenderer allows one page open at a time, so rendering is serialised. */
 class PdfSource(file: File) : Closeable {
     private val descriptor = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
-    private val renderer = PdfRenderer(descriptor)
+    // A file that can't be opened (password-protected, damaged) must not leave its descriptor open.
+    private val renderer = try {
+        PdfRenderer(descriptor)
+    } catch (e: Throwable) {
+        descriptor.close()
+        throw e
+    }
     private val mutex = Mutex()
     private var closed = false
 
     val pageCount: Int = renderer.pageCount
 
     /** Page sizes in points, as displayed (rotation applied). */
-    val sizes: List<Size> = (0 until pageCount).map { index -> renderer.openPage(index).use { Size(it.width, it.height) } }
+    val sizes: List<Size> = try {
+        (0 until pageCount).map { index -> renderer.openPage(index).use { Size(it.width, it.height) } }
+    } catch (e: Throwable) {
+        renderer.close()
+        descriptor.close()
+        throw e
+    }
 
     suspend fun render(index: Int, widthPx: Int): Bitmap? = withContext(Dispatchers.Default) {
         mutex.withLock {
