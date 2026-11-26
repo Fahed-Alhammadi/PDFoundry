@@ -41,7 +41,11 @@ struct AnnotationSelection {
 /// for as long as the document stays open.
 @Observable
 final class ReaderModel {
+    /// What the reader is doing right now: reading, or drawing / placing something on the page.
     enum Mode { case reading, drawing, placing }
+    /// The group of tools the bottom bar shows. It stays as it is while a tool draws or places something, so
+    /// the bar comes back to the same tools afterwards (signing two places is one tap each).
+    enum ToolMode { case none, markup, fillSign }
 
     let url: URL
     private(set) var document: PDFDocument?
@@ -57,6 +61,8 @@ final class ReaderModel {
     private(set) var canRevert = false
     var hasSelection = false
     var mode = Mode.reading
+    /// Always `.none` when a document opens: the reader starts on the reading bar.
+    var toolMode = ToolMode.none
     var placement: Placement?
     var drawing = PKDrawing()
     var selectedAnnotation: AnnotationSelection?
