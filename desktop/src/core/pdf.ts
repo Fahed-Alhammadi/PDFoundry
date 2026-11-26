@@ -206,17 +206,18 @@ export async function welcomeGuide(): Promise<Uint8Array> {
   page.drawRectangle({ x: 0, y: 692, width: 612, height: 100, color: rgb(0.07, 0.08, 0.11) });
   page.drawText('Welcome to PDFoundry', { x: 56, y: 730, size: 26, font: bold, color: rgb(1, 1, 1) });
   const lines: [string, string][] = [
-    ['Read', 'Open a PDF from the + button, or drop one onto the window. Search it with the magnifying glass.'],
-    ['Merge', 'Select two or more documents in the library, then choose Merge.'],
+    ['Read', 'Choose Open, or drop a PDF onto the window. It opens where it is: nothing is copied.'],
+    ['Merge', 'Select two or more recent files, then choose Merge and say where to save the result.'],
     ['Edit', 'Highlight, type text and draw on a page. Organize Pages reorders, rotates and deletes pages.'],
+    ['Save', 'Your file changes only when you choose Save. Save As keeps the original and makes a new file.'],
     ['Sign', 'Draw your signature once, then drag it onto the line and place it.'],
     ['Private', 'Your documents stay on this computer. PDFoundry only goes online to check for its own updates.'],
   ];
-  let y = 630;
+  let y = 640;
   for (const [title, text] of lines) {
     page.drawText(title, { x: 56, y, size: 15, font: bold, color: rgb(0.886, 0.318, 0.106) });
     page.drawText(text, { x: 56, y: y - 22, size: 11.5, font: regular, color: rgb(0.2, 0.22, 0.27), maxWidth: 500, lineHeight: 16 });
-    y -= 84;
+    y -= 72;
   }
   page.drawText('Try it: sign on the line below.', { x: 56, y: 190, size: 11.5, font: regular, color: rgb(0.2, 0.22, 0.27) });
   page.drawLine({ start: { x: 56, y: 130 }, end: { x: 300, y: 130 }, thickness: 1, color: rgb(0.2, 0.22, 0.27) });

@@ -1,15 +1,18 @@
 // PDFoundry for macOS, Windows and Linux: the main process.
-// It owns the window, the files (src/main/store.ts) and updates (src/main/updater.ts). The window (src/ui) shows and
-// edits PDFs and reaches this process only through the calls listed in `handlers` below.
+// It owns the window, file access (src/main/store.ts) and updates (src/main/updater.ts). The window (src/ui) shows
+// and edits PDFs and reaches this process only through the calls listed in `handlers` below.
+//
+// A PDF is opened where it is and saved back to the same file when the user chooses Save; nothing is copied into
+// the app. The window may read and save only files the user picked (a system dialog, a drop, or "Open with").
 //
 // The window itself can never use the network: it is served from the app:// scheme and every other request is
 // refused. The only thing that goes online is the update check in this process (GitHub releases).
-import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { BrowserWindow, Menu, app, dialog, ipcMain, nativeTheme, net, protocol, session, shell } from 'electron';
 import type { MenuItemConstructorOptions } from 'electron';
-import { Store } from './store.ts';
+import { Store, cleanName } from './store.ts';
 import type { Settings } from './store.ts';
 import { REPO, Updater } from './updater.ts';
 import { welcomeGuide } from '../core/pdf.ts';
@@ -27,7 +30,7 @@ const LINKS: Record<string, string> = {
 };
 
 // Development runs can keep their data apart from the installed app's, and drive the window for the self-test and
-// the screenshots (scripts in desktop/README.md). None of this exists in a packaged app.
+// the screenshots (desktop/README.md). None of this exists in a packaged app.
 const dev = !app.isPackaged;
 if (dev && process.env.PDFOUNDRY_DATA) app.setPath('userData', path.resolve(process.env.PDFOUNDRY_DATA));
 
@@ -37,6 +40,10 @@ let win: BrowserWindow | null = null;
 let store: Store;
 /** PDFs the system asked us to open before the window was ready. */
 const pending: string[] = [];
+/** Does the open document have changes that are not saved? Reported by the window. */
+let unsaved = false;
+/** Set once the user has answered the "save your changes?" question, so the window may really close. */
+let closing = false;
 
 const updater = new Updater((state) => send('update', state));
 
@@ -48,32 +55,41 @@ function applyAppearance(settings: Settings): void {
   nativeTheme.themeSource = settings.appearance;
 }
 
-/** Brings PDFs into the library. `added` are new documents; `existing` were already there and are not copied again. */
-function importPaths(paths: string[]): { added: string[]; existing: string[]; errors: string[] } {
-  const added: string[] = [];
-  const existing: string[] = [];
+/** Lists PDFs as recent files (which lets the window read them) and returns the ones that were accepted. */
+function openPaths(paths: string[]): { opened: string[]; errors: string[] } {
+  const opened: string[] = [];
   const errors: string[] = [];
   for (const source of paths) {
     try {
       if (typeof source !== 'string' || !path.isAbsolute(source)) throw new Error('That file could not be found.');
-      const result = store.importFile(source);
-      const list = result.existing ? existing : added;
-      if (!added.includes(result.name) && !existing.includes(result.name)) list.push(result.name);
+      const file = store.remember(source);
+      if (!opened.includes(file)) opened.push(file);
+      app.addRecentDocument(file);
     } catch (e) {
-      errors.push(e instanceof Error ? e.message : String(e));
+      const code = (e as NodeJS.ErrnoException).code;
+      errors.push(code === 'ENOENT' ? `${path.basename(source)} could not be found.` : e instanceof Error ? e.message : String(e));
     }
   }
-  return { added, existing, errors };
+  return { opened, errors };
 }
 
 function openFromSystem(paths: string[]): void {
   const pdfs = paths.filter((p) => /\.pdf$/i.test(p) && existsSync(p));
   if (!pdfs.length) return;
   if (!win) return void pending.push(...pdfs);
-  const result = importPaths(pdfs);
-  send('imported', result);
+  send('opened', openPaths(pdfs));
   if (win.isMinimized()) win.restore();
   win.focus();
+}
+
+/** Asks where to save a new file. Returns null when cancelled. */
+async function chooseSavePath(title: string, suggested: string, folder?: string): Promise<string | null> {
+  const picked = await dialog.showSaveDialog(win!, {
+    title,
+    defaultPath: path.join(folder && existsSync(folder) ? folder : app.getPath('documents'), `${cleanName(suggested)}.pdf`),
+    filters: [{ name: 'PDF documents', extensions: ['pdf'] }],
+  });
+  return picked.canceled || !picked.filePath ? null : picked.filePath;
 }
 
 type Handler = (...args: any[]) => unknown;
@@ -85,7 +101,6 @@ const handlers: Record<string, Handler> = {
     platform: process.platform,
     packaged: app.isPackaged,
     settings: store.settings,
-    documentsFolder: store.documents,
     update: updater.state,
     canUpdate: updater.canInstall,
     dark: nativeTheme.shouldUseDarkColors,
@@ -102,39 +117,34 @@ const handlers: Record<string, Handler> = {
     return settings;
   },
 
-  // Documents
-  list: () => store.list(),
-  read: (name: string) => store.read(name),
-  write: (name: string, bytes: Uint8Array) => store.write(name, bytes),
-  create: (name: string, bytes: Uint8Array) => store.create(name, bytes),
-  rename: (name: string, wanted: string) => store.rename(name, wanted),
-  duplicate: (name: string) => store.duplicate(name),
-  remove: async (name: string) => {
-    const file = store.path(name);
-    // To the system trash, so a delete can be taken back there.
-    await shell.trashItem(file).catch(() => rmSync(file, { force: true }));
-  },
-  reveal: (name: string) => shell.showItemInFolder(store.path(name)),
-  openFolder: () => void shell.openPath(store.documents),
-  importDialog: async () => {
+  // Files
+  recent: () => store.recent(),
+  openDialog: async () => {
     const picked = await dialog.showOpenDialog(win!, {
-      title: 'Import PDF',
+      title: 'Open PDF',
       properties: ['openFile', 'multiSelections'],
       filters: [{ name: 'PDF documents', extensions: ['pdf'] }],
     });
-    return picked.canceled ? { added: [], existing: [], errors: [] } : importPaths(picked.filePaths);
+    return picked.canceled ? { opened: [], errors: [] } : openPaths(picked.filePaths);
   },
-  importPaths: (paths: string[]) => importPaths(Array.isArray(paths) ? paths : []),
-  exportCopy: async (name: string) => {
-    const source = store.path(name);
-    const picked = await dialog.showSaveDialog(win!, {
-      title: 'Save a copy',
-      defaultPath: path.join(app.getPath('downloads'), name),
-      filters: [{ name: 'PDF documents', extensions: ['pdf'] }],
-    });
-    if (picked.canceled || !picked.filePath) return null;
-    copyFileSync(source, picked.filePath);
-    return picked.filePath;
+  openPaths: (paths: string[]) => openPaths(Array.isArray(paths) ? paths : []),
+  read: (file: string) => store.read(file),
+  save: (file: string, bytes: Uint8Array) => store.save(file, bytes),
+  /** Save As: asks where, writes the file there and returns its path (null when cancelled). */
+  saveAs: async (suggested: string, bytes: Uint8Array, beside?: string) => {
+    const target = await chooseSavePath('Save As', suggested, typeof beside === 'string' ? path.dirname(beside) : undefined);
+    if (!target) return null;
+    const saved = store.saveNew(target, bytes);
+    app.addRecentDocument(saved);
+    return saved;
+  },
+  forget: (file: string) => store.forget(file),
+  clearRecent: () => {
+    store.clearRecent();
+    app.clearRecentDocuments();
+  },
+  reveal: (file: string) => {
+    if (store.knows(file)) shell.showItemInFolder(path.resolve(file));
   },
   pickImages: async () => {
     const picked = await dialog.showOpenDialog(win!, {
@@ -150,6 +160,24 @@ const handlers: Record<string, Handler> = {
     }));
   },
 
+  // The open document, as the window reports it: shown in the title bar, and asked about before closing.
+  setDocument: (file: string | null, edited: boolean) => {
+    unsaved = !!file && edited === true;
+    if (!win) return;
+    const name = typeof file === 'string' ? path.basename(file) : '';
+    win.setTitle(name ? `${name}${unsaved && process.platform !== 'darwin' ? ' (edited)' : ''} - PDFoundry` : 'PDFoundry');
+    if (process.platform === 'darwin') {
+      win.setRepresentedFilename(typeof file === 'string' ? file : '');
+      win.setDocumentEdited(unsaved);
+    }
+  },
+  /** The window finished saving (or discarding) after the close question, and may go now. */
+  closeNow: () => {
+    closing = true;
+    unsaved = false;
+    win?.close();
+  },
+
   // Signatures
   signatures: () => store.listSignatures(),
   addSignature: (png: Uint8Array) => store.addSignature(png),
@@ -160,6 +188,16 @@ const handlers: Record<string, Handler> = {
   installUpdate: () => updater.install(),
 
   // Development only: the self-test and the screenshots.
+  /** Writes a file into the throwaway data folder and opens it, as if the user had picked it. */
+  devCreate: (name: string, bytes: Uint8Array) => {
+    if (!dev) return null;
+    const folder = path.join(app.getPath('userData'), 'Test files');
+    mkdirSync(folder, { recursive: true });
+    const file = path.join(folder, `${cleanName(name)}.pdf`);
+    writeFileSync(file, bytes);
+    return store.remember(file);
+  },
+  devRead: (file: string) => (dev ? readFileSync(file) : null),
   devCapture: async (name: string) => {
     if (!dev || !process.env.PDFOUNDRY_SHOTS || !/^[a-z0-9-]+$/.test(name)) return;
     mkdirSync(process.env.PDFOUNDRY_SHOTS, { recursive: true });
@@ -168,6 +206,7 @@ const handlers: Record<string, Handler> = {
   devDone: (result: unknown) => {
     if (!dev) return;
     if (process.env.PDFOUNDRY_SELFTEST) writeFileSync(process.env.PDFOUNDRY_SELFTEST, JSON.stringify(result, null, 2));
+    closing = true;
     setTimeout(() => app.quit(), 100);
   },
 };
@@ -192,13 +231,17 @@ function menu(): Menu {
     {
       label: 'File',
       submenu: [
-        { label: 'Import PDF…', accelerator: 'CmdOrCtrl+O', click: () => send('menu', 'import') },
+        { label: 'Open…', accelerator: 'CmdOrCtrl+O', click: () => send('menu', 'open') },
+        ...(mac ? [{ role: 'recentDocuments', submenu: [{ role: 'clearRecentDocuments' }] } as MenuItemConstructorOptions] : []),
         { label: 'Create from Images…', accelerator: 'CmdOrCtrl+Shift+I', click: () => send('menu', 'images') },
         { type: 'separator' },
-        { label: 'Save a Copy…', accelerator: 'CmdOrCtrl+Shift+S', click: () => send('menu', 'export') },
-        { label: 'Print…', accelerator: 'CmdOrCtrl+P', click: () => send('menu', 'print') },
+        { label: 'Save', accelerator: 'CmdOrCtrl+S', click: () => send('menu', 'save') },
+        { label: 'Save As…', accelerator: 'CmdOrCtrl+Shift+S', click: () => send('menu', 'saveAs') },
         { type: 'separator' },
-        ...(mac ? [{ role: 'close' } as MenuItemConstructorOptions] : [
+        { label: 'Close Document', accelerator: 'CmdOrCtrl+W', click: () => send('menu', 'closeDocument') },
+        { label: 'Print…', accelerator: 'CmdOrCtrl+P', click: () => send('menu', 'print') },
+        ...(mac ? [] : [
+          { type: 'separator' } as MenuItemConstructorOptions,
           { label: 'Settings', accelerator: 'Ctrl+,', click: () => send('menu', 'settings') } as MenuItemConstructorOptions,
           { type: 'separator' } as MenuItemConstructorOptions,
           { role: 'quit' } as MenuItemConstructorOptions,
@@ -262,6 +305,8 @@ function createWindow(): void {
   });
   ui.setPermissionRequestHandler((_wc, _permission, done) => done(false));
 
+  closing = false;
+  unsaved = false;
   win = new BrowserWindow({
     width: 1180,
     height: 800,
@@ -285,6 +330,22 @@ function createWindow(): void {
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('will-navigate', (e) => e.preventDefault());
   win.once('ready-to-show', () => win?.show());
+  // Closing the window (or quitting) with unsaved changes asks first, like any document app.
+  win.on('close', (e) => {
+    if (closing || !unsaved || !win) return;
+    e.preventDefault();
+    const answer = dialog.showMessageBoxSync(win, {
+      type: 'question',
+      message: 'Do you want to save the changes you made?',
+      detail: 'Your changes will be lost if you don’t save them.',
+      buttons: ['Save', 'Don’t Save', 'Cancel'],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+    });
+    if (answer === 0) send('saveAndClose'); // the window saves, then calls closeNow
+    else if (answer === 1) handlers.closeNow();
+  });
   win.on('closed', () => (win = null));
   void win.loadURL('app://ui/index.html');
 }
@@ -308,7 +369,12 @@ if (!app.requestSingleInstanceLock()) {
     store = new Store(app.getPath('userData'));
     applyAppearance(store.settings);
     if (!store.settings.welcomed) {
-      if (!store.list().length) store.create('Welcome to PDFoundry', await welcomeGuide());
+      // A first document to try things on, kept in the app's own folder.
+      if (!store.recent().length) {
+        const guide = path.join(store.ownFolder, 'Welcome to PDFoundry.pdf');
+        writeFileSync(guide, await welcomeGuide());
+        store.remember(guide);
+      }
       store.update({ welcomed: true });
     }
 
@@ -321,7 +387,7 @@ if (!app.requestSingleInstanceLock()) {
       const first = [...pending, ...process.argv.slice(1)];
       pending.length = 0;
       const pdfs = first.filter((p) => /\.pdf$/i.test(p) && existsSync(p));
-      if (pdfs.length) send('imported', importPaths(pdfs));
+      if (pdfs.length) send('opened', openPaths(pdfs));
     });
     nativeTheme.on('updated', () => send('theme', nativeTheme.shouldUseDarkColors));
 

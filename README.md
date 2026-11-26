@@ -63,16 +63,16 @@ Store links for the phone apps will be added here and on the [website](https://f
 
 | | iPhone and iPad | Android | macOS, Windows and Linux |
 |---|---|---|---|
-| **Read** | Open from Files, Mail, Safari or the share sheet. Search the text. Scroll vertically or sideways | Open from any app's share menu or file picker. Search the text. Pinch to zoom | Import, or drop a PDF onto the window. Search the text. Zoom |
+| **Read** | Open from Files, Mail, Safari or the share sheet. Search the text. Scroll vertically or sideways | Open from any app's share menu or file picker. Search the text. Pinch to zoom | Open a PDF where it is, or drop it onto the window. Search the text. Zoom |
 | **Scan and create** | Scan paper with the camera. Build a PDF from photos | Scan paper with Google's document scanner. Build a PDF from photos | Build a PDF from images. No scanning |
 | **Merge** | Select documents, drag them into order, merge | Select documents, order them with arrows, merge | Select documents, order them with arrows, merge |
 | **Highlight** | Select text, then highlight (four colours), underline or strike through | Drag a marker over the page | Drag a marker over the page, four colours |
 | **Text and drawing** | Type anywhere. Draw with a finger or Apple Pencil | Type anywhere (Arabic shapes correctly). Draw with a finger or stylus | Type anywhere (Arabic shapes correctly). Draw with the mouse or a pen |
 | **Sign** | Draw once in black or blue ink, reuse, drag and resize before placing | Same | Same |
 | **Pages** | Reorder by dragging. Rotate, duplicate, extract, delete, add blank pages | Reorder with arrows. Rotate, duplicate, extract, delete, add blank pages | Reorder by dragging or with arrows. Rotate, duplicate, extract, delete, add blank pages |
-| **Undo** | Tap any mark to remove it, or undo recent edits | Undo the last ten changes while the document is open | Undo the last ten changes while the document is open |
-| **Manage** | Rename, duplicate, share, print, delete | Rename, duplicate, share, print, delete | Rename, duplicate, save a copy, print, delete (to the system trash) |
-| **Storage** | The app's folder in Files, easy to back up | Inside the app. Share a copy to send it elsewhere | The app's own folder on the computer. Save a copy to put one elsewhere |
+| **Undo** | Tap any mark to remove it, or undo recent edits | Undo the last ten changes while the document is open | Undo the last ten changes; nothing is written until you save |
+| **Manage** | Rename, duplicate, share, print, delete | Rename, duplicate, share, print, delete | Save, Save As, print. A list of recent files |
+| **Storage** | The app's folder in Files, easy to back up | Inside the app. Share a copy to send it elsewhere | Files stay where you keep them. Changes are written when you choose Save |
 | **Protected PDFs** | Open with the password, read-only | Open with the password, read-only | Open with the password, read-only |
 | **Permissions** | Camera, asked only when you tap Scan Document | None | None. Goes online only to check for its own updates |
 
@@ -166,14 +166,15 @@ npm start
 
 | To | iPhone and iPad | Android | macOS, Windows and Linux |
 |---|---|---|---|
-| Add a document | **+** in the library: Import from Files, Scan Document, or Create from Photos | **+** in the library: Import PDF, Scan document, or Create from photos | **Add** in the library: Import PDF or Create from images. Or drop a PDF on the window |
-| Merge | **Select**, choose documents, tap the merge button | Press and hold to select, choose documents, tap the merge button | **Select**, choose documents, **Merge** |
+| Add a document | **+** in the library: Import from Files, Scan Document, or Create from Photos | **+** in the library: Import PDF, Scan document, or Create from photos | **Open**, or drop a PDF on the window. Create from images is in the **…** menu |
+| Merge | **Select**, choose documents, tap the merge button | Press and hold to select, choose documents, tap the merge button | **Select**, choose files, **Merge**, then say where to save |
 | Highlight | Press and hold text to select it, then tap the highlighter | Tap **Highlight**, then drag over the page | Click **Highlight**, then drag over the page |
 | Add text | Tap **Aa**, type, drag the text into place, tap **Place** | Tap **Text**, type, drag the text into place, tap **Place** | Click **Text**, type, drag the text into place, **Place** |
 | Draw | Tap the pencil, draw, tap **Done** | Tap **Draw**, draw, tap **Done** | Click **Draw**, draw, **Done** |
 | Sign | Tap the signature button, draw or pick a signature, position it, tap **Place** | Tap **Sign**, draw or pick a signature, position it, tap **Place** | Click **Sign**, draw or pick a signature, position it, **Place** |
 | Edit pages | **…** then **Organize Pages** | **⋮** then **Organize pages** | The grid button in the toolbar, or **View > Organize Pages** |
 | Remove an edit | Tap it, then **Delete** | Tap **Undo** | **Undo** |
+| Save | Saved automatically | Saved automatically | **Save** (Ctrl+S or ⌘S), or **Save As** for a new file |
 
 ## Tests
 

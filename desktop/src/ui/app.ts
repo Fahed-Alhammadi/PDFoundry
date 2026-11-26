@@ -1,7 +1,7 @@
 // The window: a side rail (Documents, Settings) and the view beside it. Opening a document replaces the library
 // with the reader until the user goes back.
 import { api } from './api.ts';
-import type { Imported, UpdateState } from './api.ts';
+import type { Opened, UpdateState } from './api.ts';
 import { h, icon, message, toast } from './dom.ts';
 import { Library } from './library.ts';
 import { Reader } from './reader.ts';
@@ -24,15 +24,15 @@ async function start(): Promise<void> {
     },
     opened: () => show('documents'),
   });
-  const library = new Library({ openDocument: (name) => void reader.open(name) });
+  const library = new Library({ openDocument: (file) => void reader.open(file) });
   const settings = new SettingsView(info);
 
   const nav = (target: Route, symbol: string, label: string) =>
-    h('button.nav', { type: 'button', dataset: { route: target }, onclick: () => (target === 'documents' && route === 'documents' && reader.name ? reader.close() : show(target)) }, icon(symbol, 20), label);
+    h('button.nav', { type: 'button', dataset: { route: target }, onclick: () => (target === 'documents' && route === 'documents' && reader.file ? void reader.close() : show(target)) }, icon(symbol, 20), label);
   const updatePill = h('button.update-pill', { type: 'button', hidden: true, onclick: () => void api.installUpdate() });
   const rail = h('nav.rail', { 'aria-label': 'PDFoundry' },
     h('div.rail-brand', h('img', { src: 'logo.png', alt: '', width: 30, height: 30 }), h('span', 'PDFoundry')),
-    nav('documents', 'documents', 'Documents'),
+    nav('documents', 'documents', 'Files'),
     nav('settings', 'settings', 'Settings'),
     h('span.spacer'),
     updatePill,
@@ -42,7 +42,7 @@ async function start(): Promise<void> {
 
   function show(target: Route): void {
     route = target;
-    const reading = target === 'documents' && !!reader.name;
+    const reading = target === 'documents' && !!reader.file;
     library.el.hidden = target !== 'documents' || reading;
     reader.el.hidden = !reading;
     settings.el.hidden = target !== 'settings';
@@ -66,16 +66,18 @@ async function start(): Promise<void> {
       show('settings');
       void api.checkForUpdates();
     },
-    import: () => {
+    open: () => {
       show('documents');
-      void library.importDialog();
+      void library.openDialog();
     },
     images: () => {
       show('documents');
       void library.createFromImages();
     },
-    export: () => {
-      if (reader.name) void import('./library.ts').then((m) => m.saveCopy(reader.name));
+    save: () => void reader.save(),
+    saveAs: () => void reader.saveAs(),
+    closeDocument: () => {
+      if (reader.file) void reader.close();
     },
     print: () => void reader.print(),
     undo: () => void reader.undo(),
@@ -90,9 +92,14 @@ async function start(): Promise<void> {
     if (event === 'update') setUpdate(data as UpdateState);
     else if (event === 'theme') root.dataset.theme = data ? 'dark' : 'light';
     else if (event === 'menu') menuActions[data as string]?.();
-    else if (event === 'imported') {
+    else if (event === 'opened') {
       show('documents');
-      void library.refresh().then(() => library.imported(data as Imported));
+      void library.refresh().then(() => library.opened(data as Opened));
+    } else if (event === 'saveAndClose') {
+      // The user chose Save in the "save your changes?" question on closing the window.
+      void reader.save().then((saved) => {
+        if (saved) void api.closeNow();
+      });
     }
   });
 

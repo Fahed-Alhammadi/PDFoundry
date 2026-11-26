@@ -1,4 +1,5 @@
 // Organize Pages: reorder (drag, or the arrows), rotate, duplicate, extract, add a blank page and delete.
+// Like every other edit, these change the open document in memory; the file changes when the user saves.
 import { api, title } from './api.ts';
 import { button, confirm, dialog, h, icon, message, pages, toast } from './dom.ts';
 import { renderPage } from './pdfview.ts';
@@ -77,8 +78,8 @@ export function organizer(reader: Reader): void {
 
   const extract = async (picked: number[]) => {
     try {
-      const name = await api.create(`${title(reader.name)} pages`, await pdf.extract(reader.data, picked));
-      toast(`Saved ${pages(picked.length)} as “${title(name)}”.`);
+      const saved = await api.saveAs(`${title(reader.file)} pages`, await pdf.extract(reader.data, picked), reader.file);
+      if (saved) toast(`Saved ${pages(picked.length)} as “${title(saved)}”.`);
     } catch (e) {
       toast(message(e), true);
     }
@@ -86,7 +87,7 @@ export function organizer(reader: Reader): void {
 
   const remove = async (picked: number[]) => {
     const question = picked.length === 1 ? 'Delete this page?' : `Delete ${picked.length} pages?`;
-    if (await confirm(question, 'You can bring it back with Undo while this document stays open.', 'Delete')) await run((b) => pdf.deletePages(b, picked));
+    if (await confirm(question, 'You can bring it back with Undo. The file itself changes only when you save.', 'Delete')) await run((b) => pdf.deletePages(b, picked));
   };
 
   const d = dialog('Organize pages', [tools, status, grid], [

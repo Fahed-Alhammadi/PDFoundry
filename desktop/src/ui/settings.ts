@@ -1,7 +1,7 @@
 // Settings and About. Settings follows the system layout: plain rows in unlabelled groups, About in its own last one.
 import { api } from './api.ts';
 import type { AppInfo, LinkName, UpdateState } from './api.ts';
-import { formatSize, h, icon } from './dom.ts';
+import { h, icon } from './dom.ts';
 import { signatureDialog } from './sign.ts';
 
 export class SettingsView {
@@ -30,7 +30,7 @@ export class SettingsView {
 
   async render(): Promise<void> {
     if (this.showingAbout) return this.renderAbout();
-    const [docs, signatures] = await Promise.all([api.list(), api.signatures()]);
+    const [recent, signatures] = await Promise.all([api.recent(), api.signatures()]);
     const appearance = h('div.segmented', { role: 'radiogroup', 'aria-label': 'Appearance' },
       ...(['system', 'light', 'dark'] as const).map((value) =>
         h('button', {
@@ -42,7 +42,6 @@ export class SettingsView {
         }, value === 'system' ? 'System' : value === 'light' ? 'Light' : 'Dark'),
       ),
     );
-    const folder = this.info.platform === 'darwin' ? 'Show in Finder' : this.info.platform === 'win32' ? 'Show in Explorer' : 'Show folder';
     this.el.replaceChildren(
       h('header.view-header', h('div', h('h1', 'Settings'))),
       h('div.settings-body',
@@ -50,10 +49,10 @@ export class SettingsView {
         h('div.group',
           row('sign', 'tile-ember', 'Signatures', signatures.length === 1 ? '1 saved' : `${signatures.length} saved`, null,
             () => void signatureDialog().then(() => this.render())),
-          row('folder', 'tile-grey', 'Documents', `${docs.length === 1 ? '1 document' : `${docs.length} documents`}, ${formatSize(docs.reduce((n, d) => n + d.size, 0))}`,
-            h('button.button', { type: 'button', onclick: () => void api.openFolder() }, folder)),
+          row('documents', 'tile-grey', 'Recent files', recent.length === 1 ? '1 file on the list' : `${recent.length} files on the list`,
+            h('button.button', { type: 'button', disabled: !recent.length, onclick: () => void api.clearRecent().then(() => this.render()) }, 'Clear list')),
         ),
-        h('p.group-note', 'Your documents are stored on this computer, in PDFoundry’s own folder. Save a copy to put one anywhere else.'),
+        h('p.group-note', 'PDFoundry opens your files where they are and saves changes back to the same file when you choose Save. Clearing the list does not delete any file.'),
         h('div.group', this.updateRow()),
         h('p.group-note', 'Checking for updates is the only time PDFoundry uses the internet. Your documents are never sent anywhere.'),
         h('div.group', row('info', 'tile-graphite', 'About PDFoundry', null, null, () => this.showAbout())),

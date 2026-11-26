@@ -205,6 +205,14 @@ export function confirm(title: string, message: string, action: string, danger =
   });
 }
 
+/** A question with several answers. Resolves the chosen value, or `fallback` when dismissed (Escape, backdrop). */
+export function choose<T extends string>(title: string, message: string, answers: { label: string; value: T; kind?: '' | 'primary' | 'danger' }[], fallback: T = answers[0].value): Promise<T> {
+  return new Promise((resolve) => {
+    let answer = fallback;
+    const d = dialog(title, [h('p', message)], answers.map((a) => button(a.label, () => { answer = a.value; d.close(); }, a.kind ?? '')), { onClose: () => resolve(answer) });
+  });
+}
+
 /** Asks for one line of text. Resolves null when cancelled. */
 export function prompt(title: string, label: string, value: string, action: string, type = 'text'): Promise<string | null> {
   return new Promise((resolve) => {

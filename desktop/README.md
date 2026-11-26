@@ -21,12 +21,13 @@ The self-test and the screenshots use a temporary data folder, so they never tou
 ## How it works
 
 - **`src/core/pdf.ts`** is the PDF engine: pure functions from bytes to bytes, used by the window and by the tests. Edits are drawn into the page itself, so they look the same in every other PDF reader. A position is a fraction of the page as displayed, from its top-left corner, and the engine converts it for the page's rotation and crop box.
-- **`src/main/`** is the main process. It owns the files (`store.ts`), updates (`updater.ts`, `updateSignature.ts`) and the window. The window can only ask for the operations listed in `handlers` in `main.ts`.
+- **`src/main/`** is the main process. It owns the files (`store.ts`), updates (`updater.ts`, `updateSignature.ts`) and the window. The window can only ask for the operations listed in `handlers` in `main.ts`, and can read or save only files the user opened through a system dialog, a drop, or "Open with".
 - **`src/ui/`** is the window: library, reader, page organizer, signatures, settings. PDFs are displayed with PDF.js and changed with pdf-lib.
 - **Typed text and drawings become images** before they are stamped onto the page. The browser draws the text, so Arabic and other scripts are shaped correctly.
+- **Files are opened in place.** Nothing is copied into the app. Edits are kept in memory and written back to the same file on Save; Save As writes a new file and leaves the original alone. Closing a document, or the window, with unsaved changes asks first.
+- **The start screen lists recent files** with their real locations. Removing one from the list never deletes the file.
 - **Undo** keeps the last ten versions of the open document in memory.
 - **Protected PDFs** open with their password and are read-only: saving them would remove their protection.
-- **Documents live in the app's own data folder**, so no system permission is needed. "Save a copy" puts one anywhere else, and Delete moves a document to the system trash.
 
 ## Privacy and security
 

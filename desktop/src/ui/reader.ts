@@ -1,11 +1,11 @@
 // The reader: one document, shown page by page, with the tools that change it (highlight, text, draw, sign),
-// search, zoom, printing and undo. Every change is saved to the file straight away.
-import { api, title } from './api.ts';
-import { button, confirm, dialog, h, icon, iconButton, message, prompt, showMenu, toast } from './dom.ts';
+// search, zoom, printing and undo. The file is opened where it is. Changes are kept in memory until the user
+// chooses Save (back to the same file) or Save As; leaving with unsaved changes asks first.
+import { api, revealLabel, title } from './api.ts';
+import { button, choose, dialog, h, icon, iconButton, message, prompt, showMenu, toast } from './dom.ts';
 import type { MenuItem } from './dom.ts';
 import { paintStrokes, rasterize, textImage } from './images.ts';
 import type { Placed, Stroke } from './images.ts';
-import { saveCopy } from './library.ts';
 import { organizer } from './organizer.ts';
 import { PasswordNeeded, openPdf, pageSizes, renderPage, search } from './pdfview.ts';
 import type { Match, PDFDocumentProxy, Size } from './pdfview.ts';
@@ -28,12 +28,15 @@ const PENS = [
 type Ink = { highlighter: boolean; color: string; strokes: Map<number, Stroke[]> };
 type Placement = { item: Placed; page: number; x: number; y: number; width: number; box: HTMLElement };
 
-export type ReaderHost = { back: () => void; opened: (name: string) => void };
+export type ReaderHost = { back: () => void; opened: (file: string) => void };
 
 export class Reader {
   readonly el = h('section.view.reader', { 'aria-label': 'Document' });
-  name = '';
+  /** The open file's full path; empty when nothing is open. */
+  file = '';
   private bytes: Uint8Array = new Uint8Array();
+  /** The bytes as they are on disk. The document has unsaved changes whenever `bytes` is something else. */
+  private savedBytes: Uint8Array = this.bytes;
   private doc: PDFDocumentProxy | null = null;
   private sizes: Size[] = [];
   private editable = true;
@@ -49,6 +52,8 @@ export class Reader {
   private readonly host: ReaderHost;
 
   private readonly heading = h('h1.doc-title');
+  private readonly edited = h('span.edited', { hidden: true }, 'Edited');
+  private readonly saveButton = h('button.button.save', { type: 'button', disabled: true, title: 'Save (Ctrl+S)', onclick: () => void this.save() }, 'Save');
   private readonly counter = h('span.page-counter', { role: 'status' });
   private readonly zoomLabel = h('span.zoom-label');
   private readonly notice = h('div.notice', { hidden: true });
@@ -61,8 +66,9 @@ export class Reader {
     const more = iconButton('more', 'More', () => showMenu(more, this.moreMenu()));
     this.el.append(
       h('header.reader-bar',
-        iconButton('back', 'Back to documents', () => this.close()),
+        iconButton('back', 'Close document', () => void this.close()),
         this.heading,
+        this.edited,
         this.counter,
         h('span.spacer'),
         iconButton('search', 'Search in document', () => this.toggleFind()),
@@ -70,6 +76,7 @@ export class Reader {
         this.zoomLabel,
         iconButton('zoomIn', 'Zoom in', () => this.zoomBy(1.2)),
         iconButton('pages', 'Organize pages', () => this.organize()),
+        this.saveButton,
         more,
       ),
       this.findBar,
@@ -86,23 +93,28 @@ export class Reader {
 
   // Opening and closing
 
-  async open(name: string): Promise<boolean> {
+  async open(file: string): Promise<boolean> {
+    if (file === this.file) return true;
+    if (!(await this.leave())) return false;
     try {
-      const bytes = await api.read(name);
+      const bytes = await api.read(file);
       const doc = await openPdf(bytes, (wrong) => prompt(wrong ? 'That password didn’t work' : 'This PDF is protected', 'Password', '', 'Unlock', 'password'));
       this.reset();
-      this.name = name;
+      this.file = file;
       this.bytes = bytes;
+      this.savedBytes = bytes;
       this.doc = doc;
       this.sizes = await pageSizes(doc);
       this.editable = await pdf.isEditable(bytes);
-      this.heading.textContent = title(name);
+      this.heading.textContent = title(file);
+      this.heading.title = file;
       this.notice.hidden = this.editable;
       this.notice.replaceChildren(icon('lock', 18), 'This PDF is protected, so it can be read but not changed.');
       this.zoom = 'fit';
       this.layout(false);
       this.drawDock();
-      this.host.opened(name);
+      this.report();
+      this.host.opened(file);
       return true;
     } catch (e) {
       if (!(e instanceof PasswordNeeded)) toast(message(e), true);
@@ -123,10 +135,83 @@ export class Reader {
     this.scroller.replaceChildren();
   }
 
-  close(): void {
+  /** Closes the document and goes back to the recent files. Asks first when there are unsaved changes. */
+  async close(): Promise<boolean> {
+    if (!(await this.leave())) return false;
     this.reset();
-    this.name = '';
+    this.file = '';
+    this.bytes = this.savedBytes = new Uint8Array();
+    this.report();
     this.host.back();
+    return true;
+  }
+
+  // Saving
+
+  get dirty(): boolean {
+    return !!this.file && this.bytes !== this.savedBytes;
+  }
+
+  /** Shows whether there are unsaved changes, here and in the window's title bar. */
+  private report(): void {
+    this.edited.hidden = !this.dirty;
+    this.saveButton.disabled = !this.dirty;
+    this.saveButton.classList.toggle('primary', this.dirty);
+    void api.setDocument(this.file || null, this.dirty);
+  }
+
+  /** Before closing or opening something else: with unsaved changes, asks whether to save them. False = stay. */
+  private async leave(): Promise<boolean> {
+    if (!this.dirty) return true;
+    const answer = await choose(`Save the changes to “${title(this.file)}”?`, 'Your changes will be lost if you don’t save them.', [
+      { label: 'Cancel', value: 'cancel' },
+      { label: 'Don’t Save', value: 'discard' },
+      { label: 'Save', value: 'save', kind: 'primary' },
+    ]);
+    if (answer === 'save') return this.save();
+    return answer === 'discard';
+  }
+
+  /** Writes the changes back to the file that was opened. Returns false when it could not be saved. */
+  async save(): Promise<boolean> {
+    if (!this.file || this.busy) return false;
+    if (!this.dirty) return true;
+    if (this.ink || this.placement) {
+      toast('Finish what you are placing or drawing first.', true);
+      return false;
+    }
+    const bytes = this.bytes;
+    try {
+      await api.save(this.file, bytes);
+      this.savedBytes = bytes;
+      this.report();
+      toast('Saved.');
+      return true;
+    } catch (e) {
+      toast(message(e), true);
+      return false;
+    }
+  }
+
+  /** Saves the document, changes included, as a new file and continues in that file. The original is left as it was. */
+  async saveAs(): Promise<boolean> {
+    if (!this.file || this.busy) return false;
+    const bytes = this.bytes;
+    try {
+      const saved = await api.saveAs(title(this.file), bytes, this.file);
+      if (!saved) return false;
+      this.file = saved;
+      this.savedBytes = bytes;
+      this.heading.textContent = title(saved);
+      this.heading.title = saved;
+      this.report();
+      this.host.opened(saved);
+      toast('Saved.');
+      return true;
+    } catch (e) {
+      toast(message(e), true);
+      return false;
+    }
   }
 
   // Layout and rendering
@@ -228,7 +313,7 @@ export class Reader {
 
   // Changing the document
 
-  /** Applies a change, saves it, and shows the result. The previous version is kept for Undo. */
+  /** Applies a change and shows the result. Nothing is written to the file until Save. The previous version is kept for Undo. */
   async change(action: (bytes: Uint8Array) => Promise<Uint8Array>, done?: string): Promise<boolean> {
     if (this.busy || !this.doc) return false;
     if (!this.editable) {
@@ -241,7 +326,6 @@ export class Reader {
       const before = this.bytes;
       const after = await action(before);
       if (after !== before) {
-        await api.write(this.name, after);
         this.undoStack.push(before);
         if (this.undoStack.length > UNDO_STEPS) this.undoStack.shift();
         await this.show(after);
@@ -255,6 +339,7 @@ export class Reader {
       this.busy = false;
       this.el.classList.remove('busy');
       this.drawDock();
+      this.report();
     }
   }
 
@@ -275,13 +360,13 @@ export class Reader {
     this.busy = true;
     try {
       const previous = this.undoStack.pop()!;
-      await api.write(this.name, previous);
       await this.show(previous);
     } catch (e) {
       toast(message(e), true);
     } finally {
       this.busy = false;
       this.drawDock();
+      this.report();
     }
   }
 
@@ -642,17 +727,16 @@ export class Reader {
   // Menu actions
 
   private moreMenu(): MenuItem[] {
-    const platform = document.documentElement.dataset.platform;
     return [
       { label: 'Organize pages', icon: 'pages', action: () => this.organize() },
       'separator',
-      { label: 'Rename…', icon: 'rename', action: () => void this.rename() },
-      { label: 'Duplicate', icon: 'copy', action: () => void this.duplicate() },
-      { label: 'Save a copy…', icon: 'save', action: () => void saveCopy(this.name) },
-      { label: platform === 'darwin' ? 'Show in Finder' : platform === 'win32' ? 'Show in Explorer' : 'Show in folder', icon: 'folder', action: () => void api.reveal(this.name) },
+      { label: 'Save', icon: 'save', disabled: !this.dirty, action: () => void this.save() },
+      { label: 'Save As…', icon: 'copy', action: () => void this.saveAs() },
+      'separator',
+      { label: revealLabel(), icon: 'folder', action: () => void api.reveal(this.file) },
       { label: 'Print…', icon: 'print', action: () => void this.print() },
       'separator',
-      { label: 'Delete', icon: 'trash', danger: true, action: () => void this.remove() },
+      { label: 'Close document', icon: 'close', action: () => void this.close() },
     ];
   }
 
@@ -671,36 +755,6 @@ export class Reader {
 
   get pageSizes(): Size[] {
     return this.sizes;
-  }
-
-  private async rename(): Promise<void> {
-    const wanted = await prompt('Rename document', 'Name', title(this.name), 'Rename');
-    if (wanted === null) return;
-    try {
-      this.name = await api.rename(this.name, wanted);
-      this.heading.textContent = title(this.name);
-      this.host.opened(this.name);
-    } catch (e) {
-      toast(message(e), true);
-    }
-  }
-
-  private async duplicate(): Promise<void> {
-    try {
-      toast(`Saved as “${title(await api.duplicate(this.name))}”.`);
-    } catch (e) {
-      toast(message(e), true);
-    }
-  }
-
-  private async remove(): Promise<void> {
-    if (!(await confirm(`Delete “${title(this.name)}”?`, 'It moves to the trash of this computer.', 'Delete'))) return;
-    try {
-      await api.remove(this.name);
-      this.close();
-    } catch (e) {
-      toast(message(e), true);
-    }
   }
 
   /** Prints through the system dialog: each page is drawn as an image on its own sheet. */

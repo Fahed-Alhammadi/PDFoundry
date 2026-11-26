@@ -149,6 +149,7 @@ textarea { width: 100%; resize: vertical; }
 .card-text { display: grid; gap: 1px; padding: 0 32px 2px 2px; min-width: 0; }
 .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .detail { color: var(--muted); font-size: 12.5px; }
+.detail.folder { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.8; }
 .card .more { position: absolute; right: 6px; bottom: 8px; }
 .tick {
   position: absolute; top: 14px; left: 14px; width: 22px; height: 22px; border-radius: 50%; display: none; place-items: center;
@@ -176,6 +177,8 @@ textarea { width: 100%; resize: vertical; }
 }
 .reader-bar > * { -webkit-app-region: no-drag; }
 .doc-title { font-size: 15px; font-weight: 650; margin: 0 10px 0 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 40px; }
+.edited { margin-right: 10px; padding: 1px 8px; border-radius: 999px; background: var(--ember-soft); color: var(--ember-strong); font-size: 12px; font-weight: 600; white-space: nowrap; }
+.reader-bar .save { margin: 0 4px; }
 .page-counter { color: var(--muted); font-size: 13px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .zoom-label { min-width: 44px; text-align: center; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
 .notice, .find-bar { display: flex; align-items: center; gap: 8px; padding: 8px 16px; background: var(--paper); border-bottom: 1px solid var(--line); }

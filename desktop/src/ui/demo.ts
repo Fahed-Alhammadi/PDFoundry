@@ -160,16 +160,23 @@ async function until(test: () => boolean, what: string): Promise<void> {
 async function interfaceTest(checks: { name: string; pass: boolean; detail?: string }[], app: App): Promise<void> {
   const check = (name: string, pass: boolean, detail?: string) => checks.push({ name, pass, detail });
   const isWhite = (c: number[]) => c[0] > 245 && c[1] > 245 && c[2] > 245;
-  const name = await api.create('Interface test', await blank(300, 500, 2));
+  const original = await blank(300, 500, 2);
+  const file = await api.devCreate('Interface test', original);
+  const onDisk = () => api.devRead(file);
+  const same = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((v, i) => v === b[i]);
   await app.library.refresh();
-  check('the library lists the new document', !!document.querySelector('.card[aria-label="Interface test"]'));
-  (document.querySelector('.card[aria-label="Interface test"]') as HTMLElement).click();
+  const card = () => document.querySelector('.card[aria-label="Interface test"]') as HTMLElement | null;
+  check('the opened file is listed under Recent with its folder', !!card() && /Test files$/.test(card()!.querySelector('.folder')?.textContent ?? ''), card()?.title);
+  card()!.click();
   await until(() => document.querySelectorAll('.page').length === 2, 'the reader');
   const dock = document.querySelector('.dock')!;
+  const bar = document.querySelector('.reader-bar')!;
+  const save = bar.querySelector('.save') as HTMLButtonElement;
   const page = () => document.querySelector('.page') as HTMLElement;
-  const settled = () => until(() => !document.querySelector('.reader.busy') && !!document.querySelector('.dock .tool'), 'the change to be saved');
+  const editedShown = () => !bar.querySelector('.edited')!.hasAttribute('hidden');
+  const settled = () => until(() => !document.querySelector('.reader.busy') && !!document.querySelector('.dock .tool'), 'the change to be applied');
 
-  // Highlight: drag across the middle of page 1, then Done.
+  // Highlight: drag across the middle of page 1, then Done. The file must not change until Save.
   clickButton(dock, 'Highlight');
   let box = page().getBoundingClientRect();
   pointer(page(), 'pointerdown', box.left + box.width * 0.2, box.top + box.height * 0.5);
@@ -178,11 +185,19 @@ async function interfaceTest(checks: { name: string; pass: boolean; detail?: str
   pointer(page(), 'pointerup', box.left + box.width * 0.8, box.top + box.height * 0.5);
   clickButton(dock, 'Done');
   await settled();
-  let px = await pixels(await api.read(name), 0);
+  check('an edit does not touch the file until Save', same(await onDisk(), original) && app.reader.dirty && !save.disabled && editedShown());
+  let px = await pixels(app.reader.data, 0);
   const tint = px.at(0.5, 0.5);
-  check('a dragged highlight is saved on the page', tint[0] > 200 && tint[2] < 200 && isWhite(px.at(0.5, 0.3)), JSON.stringify({ tint }));
+  check('a dragged highlight shows on the page', tint[0] > 200 && tint[2] < 200 && isWhite(px.at(0.5, 0.3)), JSON.stringify({ tint }));
 
-  // Sign: start placing an image, drag it to the lower left, resize it, then Place.
+  // Save writes it to the same file.
+  save.click();
+  await until(() => !app.reader.dirty, 'the save');
+  px = await pixels(await onDisk(), 0);
+  check('Save writes the changes back to the same file', px.at(0.5, 0.5)[2] < 200 && save.disabled && !editedShown());
+  const afterHighlight = await onDisk();
+
+  // Sign: start placing an image, drag it to the lower left, then Place.
   app.reader.beginPlacement(await placedFromPng(await solid('#0000ff', 120, 40)), 0.3);
   const placed = document.querySelector('.placement') as HTMLElement;
   box = page().getBoundingClientRect();
@@ -194,19 +209,19 @@ async function interfaceTest(checks: { name: string; pass: boolean; detail?: str
   const centre = { x: (at.left + at.width / 2 - box.left) / box.width, y: (at.top + at.height / 2 - box.top) / box.height };
   clickButton(dock, 'Place');
   await settled();
-  px = await pixels(await api.read(name), 0);
+  px = await pixels(app.reader.data, 0);
   const ink = px.at(centre.x, centre.y);
-  check('a dragged signature is saved where it was dropped', Math.abs(centre.x - 0.3) < 0.02 && Math.abs(centre.y - 0.8) < 0.02 && ink[2] > 200 && ink[0] < 60 && isWhite(px.at(0.8, 0.8)),
+  check('a dragged signature lands where it was dropped', Math.abs(centre.x - 0.3) < 0.02 && Math.abs(centre.y - 0.8) < 0.02 && ink[2] > 200 && ink[0] < 60 && isWhite(px.at(0.8, 0.8)),
     JSON.stringify({ centre, ink }));
 
-  // Undo takes the signature away again and keeps the highlight.
+  // Undo takes the signature away again, keeps the highlight, and the document is no longer "edited".
   clickButton(dock, 'Undo');
-  await until(() => true, 'undo');
-  await wait(400);
-  px = await pixels(await api.read(name), 0);
+  await wait(500);
+  px = await pixels(app.reader.data, 0);
   check('undo removes the last change only', isWhite(px.at(centre.x, centre.y)) && px.at(0.5, 0.5)[2] < 200);
+  check('undoing back to the saved state clears the unsaved mark', !app.reader.dirty && same(await onDisk(), afterHighlight));
 
-  // Organize pages: rotate page 2, then delete page 1.
+  // Organize pages: rotate page 2, then delete page 1. Still nothing on disk until Save.
   app.reader.organize();
   await until(() => document.querySelectorAll('.organizer-page').length === 2, 'the organizer');
   const organizerEl = document.querySelector('.dialog.organizer')!;
@@ -214,23 +229,31 @@ async function interfaceTest(checks: { name: string; pass: boolean; detail?: str
   clickButton(organizerEl, 'Rotate right');
   await until(() => !document.querySelector('.reader.busy') && document.querySelectorAll('.organizer-page.selected').length === 1, 'the rotation');
   await wait(300);
-  let doc = await PDFDocument.load(await api.read(name));
-  check('rotating a page in the organizer is saved', doc.getPage(1).getRotation().angle === 90 && doc.getPage(0).getRotation().angle === 0);
   (document.querySelectorAll('.organizer-page')[1] as HTMLElement).click(); // deselect page 2
   (document.querySelectorAll('.organizer-page')[0] as HTMLElement).click();
   clickButton(organizerEl, 'Delete');
   await until(() => document.querySelectorAll('.dialog').length === 2, 'the delete question');
   clickButton([...document.querySelectorAll('.dialog')].pop()!, 'Delete');
   await until(() => document.querySelectorAll('.organizer-page').length === 1, 'the page to go');
-  doc = await PDFDocument.load(await api.read(name));
-  check('deleting a page in the organizer is saved', doc.getPageCount() === 1 && doc.getPage(0).getRotation().angle === 90);
   clickButton(organizerEl, 'Done');
+  let doc = await PDFDocument.load(app.reader.data);
+  check('page changes apply to the open document', doc.getPageCount() === 1 && doc.getPage(0).getRotation().angle === 90);
+  check('page changes are not on disk before Save', same(await onDisk(), afterHighlight) && app.reader.dirty);
+
+  // Closing with unsaved changes asks. Cancel stays; Don't Save leaves the file alone.
+  const closing = app.reader.close();
+  await until(() => !!document.querySelector('.dialog'), 'the save question');
+  check('closing with unsaved changes asks first', /Save the changes to/.test(document.querySelector('.dialog h2')?.textContent ?? ''));
+  clickButton(document.querySelector('.dialog')!, 'Cancel');
+  check('Cancel keeps the document open with its changes', (await closing) === false && app.reader.dirty && document.querySelectorAll('.page').length === 1);
+  const closing2 = app.reader.close();
+  await until(() => !!document.querySelector('.dialog'), 'the save question');
+  clickButton(document.querySelector('.dialog')!, 'Don’t Save');
+  check('Don’t Save closes and leaves the file as it was', (await closing2) === true && !app.reader.file && same(await onDisk(), afterHighlight));
 
   // Search finds text and marks it.
-  await api.write(name, await pdf.welcomeGuide());
-  app.reader.close();
-  await wait(200);
-  await app.reader.open(name);
+  const guide = await api.devCreate('Search test', await pdf.welcomeGuide());
+  await app.reader.open(guide);
   app.reader.toggleFind(true);
   const find = document.querySelector('.find-bar input') as HTMLInputElement;
   find.value = 'signature';
@@ -238,22 +261,22 @@ async function interfaceTest(checks: { name: string; pass: boolean; detail?: str
   await until(() => document.querySelectorAll('.match').length > 0 || /No matches/.test(document.querySelector('.find-status')!.textContent ?? ''), 'the search');
   check('search marks the matches on the page', document.querySelectorAll('.match').length >= 2, document.querySelector('.find-status')!.textContent ?? '');
   app.reader.toggleFind(false);
+  await app.reader.close();
 
-  // Rename, duplicate and delete from the library keep the list right.
-  app.reader.close();
-  await wait(200);
-  const renamed = await api.rename(name, '../escape/attempt');
-  const copy = await api.duplicate(renamed);
-  const listed = (await api.list()).map((d) => d.name);
-  check('names are kept inside the library', !renamed.includes('/') && listed.includes(renamed) && listed.includes(copy), JSON.stringify({ renamed, copy }));
+  // The window may touch only files the user opened, and cannot reach the network.
   let refused = false;
-  await api.read('../settings.json').catch(() => (refused = true));
-  check('the window cannot read files outside the library', refused);
+  await api.read(file.replace('Interface test.pdf', '../settings.json')).catch(() => (refused = true));
+  let refusedSave = false;
+  await api.save(file.replace('Interface test.pdf', 'Never opened.pdf'), original).catch(() => (refusedSave = true));
+  check('the window cannot read or write files the user did not open', refused && refusedSave);
   let offline = false;
   await fetch('https://example.com/').catch(() => (offline = true));
   check('the window cannot reach the network', offline);
-  await api.remove(renamed);
-  await api.remove(copy);
+
+  // Removing a file from the list does not delete it.
+  await api.forget(file);
+  await app.library.refresh();
+  check('removing a file from the list leaves the file alone', !card() && same(await onDisk(), afterHighlight));
 }
 
 // Screenshots
@@ -324,11 +347,11 @@ async function screenshots(app: App): Promise<void> {
     'The landlord agrees to keep the building, its plumbing, heating and electrical systems in working order, and to return the deposit within thirty days of the end of the tenancy.',
   ];
   await api.setAppearance('light');
-  for (const doc of await api.list()) await api.remove(doc.name).catch(() => {});
-  await api.create('Invoice 2041', await sampleDocument('Invoice', [0.11, 0.42, 0.33], [['Invoice 2041', 'Design work for the spring catalogue, forty hours at the agreed rate.', 'Payment is due within thirty days of the invoice date.']]));
-  await api.create('Project Proposal', await sampleDocument('Proposal', [0.36, 0.2, 0.55], [['Project Proposal', text[0], text[1]], ['Timeline', text[2], text[0]]]));
-  await api.create('Welcome to PDFoundry', await pdf.welcomeGuide());
-  const rental = await api.create('Rental Agreement', await sampleDocument('Rental agreement', [0.13, 0.33, 0.56],
+  await api.clearRecent();
+  await api.devCreate('Invoice 2041', await sampleDocument('Invoice', [0.11, 0.42, 0.33], [['Invoice 2041', 'Design work for the spring catalogue, forty hours at the agreed rate.', 'Payment is due within thirty days of the invoice date.']]));
+  await api.devCreate('Project Proposal', await sampleDocument('Proposal', [0.36, 0.2, 0.55], [['Project Proposal', text[0], text[1]], ['Timeline', text[2], text[0]]]));
+  await api.devCreate('Welcome to PDFoundry', await pdf.welcomeGuide());
+  const rental = await api.devCreate('Rental Agreement', await sampleDocument('Rental agreement', [0.13, 0.33, 0.56],
     [['Rental Agreement', text[0], text[1], text[2]], ['Terms', text[1], text[2], text[0]], ['Signatures', 'Signed by the tenant and the landlord on the dates shown.']], true));
 
   await app.library.refresh();
@@ -342,7 +365,7 @@ async function screenshots(app: App): Promise<void> {
   bytes = await pdf.stamp(bytes, 2, signature, { x: 0.1, y: 0.61, width: 0.3, height: (0.3 * 612) / 3 / 792 });
   const mark = (await rasterize([{ points: [{ x: 0.1, y: 0.183 }, { x: 0.72, y: 0.183 }], color: '#ffe14d', width: 14 / 612 }], { width: 612, height: 792 }))!;
   bytes = await pdf.stamp(bytes, 2, mark.png, mark.rect, { multiply: true, opacity: 0.55 });
-  await api.write(rental, bytes);
+  await api.save(rental, bytes);
   await app.reader.open(rental);
   await wait(600);
   app.reader.zoomBy(0.6); // the whole page, so the highlight and the signature are both in view
@@ -360,7 +383,7 @@ async function screenshots(app: App): Promise<void> {
   await shot('04-pages');
   (document.querySelector('.dialog-actions .primary') as HTMLElement).click();
 
-  app.reader.close();
+  await app.reader.close();
   await wait(500);
   (document.querySelector('.select-toggle') as HTMLElement).click();
   const cards = [...document.querySelectorAll<HTMLElement>('.card')];
