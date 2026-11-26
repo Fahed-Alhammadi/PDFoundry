@@ -46,3 +46,14 @@ fastlane/test_output/
 *.swp
 .idea/
 .vscode/
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/keystore.properties
+android/dist/
+android/.kotlin/
+*.apk
+*.aab

@@ -38,6 +38,17 @@ Read, merge, edit and sign PDF documents on iPhone and iPad. Everything happens 
 - Rename, duplicate, share, print and delete documents
 - Documents live in the app's folder in the Files app, so they are easy to back up
 
+## Android
+
+A native Android version lives in [`android/`](android/README.md): Kotlin, Jetpack Compose and PdfBox-Android, with the same features. It is built and tested but not yet on Google Play.
+
+<p>
+  <img src="screenshots/android/phone/01-library.png" width="24%" alt="Android document library">
+  <img src="screenshots/android/phone/02-signed.png" width="24%" alt="Android signed document">
+  <img src="screenshots/android/phone/04-pages.png" width="24%" alt="Android page organizer">
+  <img src="screenshots/android/phone/06-about.png" width="24%" alt="Android About screen">
+</p>
+
 ## Tech Stack
 
 | | |
@@ -109,6 +120,7 @@ PDFoundry/
 │   │   └── Settings/           # Settings and About
 │   └── Resources/              # Asset catalog, privacy manifest
 ├── PDFoundryTests/             # Unit tests
+├── android/                    # Android app (Kotlin, Jetpack Compose)
 ├── Tools/make_icon.swift       # Renders the app icon
 ├── Website/                    # Project website (GitHub Pages)
 └── screenshots/                # Screenshots by platform
