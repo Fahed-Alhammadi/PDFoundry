@@ -47,15 +47,15 @@ Apps for iPhone, iPad, Android, macOS, Windows and Linux.
 
 PDFoundry is a small PDF app that does four jobs well: reading, merging, editing and signing. It works entirely on the device. There is no account, no server, no advertising and no analytics. The phone apps make no network requests; the desktop app goes online only to check for its own updates.
 
-The phone apps are native: Swift and SwiftUI on iPhone and iPad, Kotlin and Jetpack Compose on Android. The desktop app is built with Electron and runs on macOS, Windows and Linux.
+The phone apps are native: Swift and SwiftUI on iPhone and iPad, Kotlin and Jetpack Compose on Android. The desktop app is built with Electron and runs on macOS, Windows and Linux. It works the way desktop PDF programs do: a file opens where it is, and it changes only when you choose Save.
 
 ## Status
 
 | Platform | Version | Status |
 |---|---|---|
 | iPhone and iPad | 1.0.0 | Submitted to the App Store, waiting for review. Available to testers on TestFlight |
-| Android | 1.0.0 | In closed testing on Google Play |
-| macOS, Windows and Linux | 1.0.0 | Released. [Download](https://github.com/Fahed-Alhammadi/PDFoundry/releases/latest). The Mac app is signed and notarized |
+| Android | 1.0.1 | In closed testing on Google Play |
+| macOS, Windows and Linux | 1.1.0 | Released. [Download](https://github.com/Fahed-Alhammadi/PDFoundry/releases/latest). The Mac app is signed and notarized |
 
 Store links for the phone apps will be added here and on the [website](https://fahed-alhammadi.github.io/PDFoundry/) when the apps are public.
 
@@ -71,7 +71,7 @@ Store links for the phone apps will be added here and on the [website](https://f
 | **Sign** | Draw once in black or blue ink, reuse, drag and resize before placing | Same | Same |
 | **Pages** | Reorder by dragging. Rotate, duplicate, extract, delete, add blank pages | Reorder with arrows. Rotate, duplicate, extract, delete, add blank pages | Reorder by dragging or with arrows. Rotate, duplicate, extract, delete, add blank pages |
 | **Undo** | Tap any mark to remove it, or undo recent edits | Undo the last ten changes while the document is open | Undo the last ten changes; nothing is written until you save |
-| **Manage** | Rename, duplicate, share, print, delete | Rename, duplicate, share, print, delete | Save, Save As, print. A list of recent files |
+| **Manage** | Rename, duplicate, share, print, delete. A file opened twice is listed once | Rename, duplicate, share, print, delete. A file opened twice is listed once | Save, Save As, print. A list of recent files |
 | **Storage** | The app's folder in Files, easy to back up | Inside the app. Share a copy to send it elsewhere | Files stay where you keep them. Changes are written when you choose Save |
 | **Protected PDFs** | Open with the password, read-only | Open with the password, read-only | Open with the password, read-only |
 | **Permissions** | Camera, asked only when you tap Scan Document | None | None. Goes online only to check for its own updates |
@@ -91,10 +91,10 @@ On every platform, signatures and edits are written into the PDF itself, so they
 **macOS, Windows and Linux**
 
 <p>
-  <img src="screenshots/desktop/01-library.png" width="49%" alt="Document library on the desktop">
+  <img src="screenshots/desktop/01-library.png" width="49%" alt="Recent files on the desktop">
   <img src="screenshots/desktop/02-signed.png" width="49%" alt="A signed and highlighted document on the desktop">
   <img src="screenshots/desktop/04-pages.png" width="49%" alt="Page organizer on the desktop">
-  <img src="screenshots/desktop/08-library-dark.png" width="49%" alt="Document library in dark mode on the desktop">
+  <img src="screenshots/desktop/08-library-dark.png" width="49%" alt="Recent files in dark mode on the desktop">
 </p>
 
 **Android**
@@ -229,8 +229,8 @@ PDFoundry/
 │   └── whatsnew/               # Google Play release notes
 ├── desktop/                    # Desktop app (Electron)
 │   ├── src/core/               # PDF engine, shared by the window and the tests
-│   ├── src/main/               # Main process: files, updates, window
-│   ├── src/ui/                 # The window: library, reader, organizer, settings
+│   ├── src/main/               # Main process: file access, updates, window
+│   ├── src/ui/                 # The window: recent files, reader, organizer, settings
 │   └── test/                   # Unit tests
 ├── AppStore/                   # App Store listing text, store images, release notes
 ├── Tools/                      # Scripts that render the icons and store images
