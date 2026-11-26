@@ -6,8 +6,11 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.appearance) private var appearance = Appearance.system
     @AppStorage(SettingsKey.horizontalScroll) private var horizontalScroll = false
 
+    /// Documents kept in PDFoundry's own folder (files opened from elsewhere take no space here).
+    private var kept: [PDFItem] { store.items.filter { !$0.isExternal } }
+
     private var storageUsed: String {
-        ByteCountFormatter.string(fromByteCount: store.items.reduce(0) { $0 + $1.size }, countStyle: .file)
+        ByteCountFormatter.string(fromByteCount: kept.reduce(0) { $0 + $1.size }, countStyle: .file)
     }
 
     var body: some View {
@@ -32,12 +35,12 @@ struct SettingsView: View {
                             .badge(signatures.signatures.count)
                     }
                     LabeledContent {
-                        Text("\(store.items.count) · \(storageUsed)")
+                        Text("\(kept.count) · \(storageUsed)")
                     } label: {
                         SettingsLabel("Documents", symbol: "internaldrive.fill", color: .gray)
                     }
                 } footer: {
-                    Text("Your documents are stored on this device, in the PDFoundry folder of the Files app.")
+                    Text("Documents kept in PDFoundry are stored on this device, in the PDFoundry folder of the Files app. Files you open from elsewhere stay where they are.")
                 }
 
                 Section {

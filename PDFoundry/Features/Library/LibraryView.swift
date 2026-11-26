@@ -44,7 +44,11 @@ struct LibraryView: View {
         }
         .fileImporter(isPresented: $showImporter, allowedContentTypes: [.pdf], allowsMultipleSelection: true) { result in
             guard case .success(let urls) = result else { return }
-            perform { try await store.importFiles(urls) }
+            // Opened where they are: nothing is copied into PDFoundry.
+            perform {
+                let opened = try await store.open(urls)
+                if opened.count == 1 { path = opened }
+            }
         }
         .photosPicker(isPresented: $showPhotoPicker, selection: $photoItems, maxSelectionCount: 30, matching: .images)
         .onChange(of: photoItems) { _, items in
@@ -84,7 +88,7 @@ struct LibraryView: View {
                 }
             }
         } message: {
-            Text("This can't be undone.")
+            Text(deleteMessage)
         }
         .alert("Something Went Wrong", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
             Button("OK", role: .cancel) {}
@@ -113,9 +117,9 @@ struct LibraryView: View {
             ContentUnavailableView {
                 Label("No Documents", systemImage: "doc.viewfinder")
             } description: {
-                Text("Import a PDF from Files, scan paper with the camera, or build one from your photos.")
+                Text("Open a PDF from Files, scan paper with the camera, or build one from your photos.")
             } actions: {
-                Button("Import PDF") { showImporter = true }
+                Button("Open from Files") { showImporter = true }
                     .buttonStyle(.glassProminent)
             }
         } else if visibleItems.isEmpty {
@@ -147,23 +151,37 @@ struct LibraryView: View {
         .contextMenu {
             if !isSelecting {
                 Button("Open", systemImage: "doc.text") { path.append(item.url) }
-                Button("Rename", systemImage: "pencil") {
-                    renameText = item.name
-                    renameTarget = item
-                }
-                Button("Duplicate", systemImage: "plus.square.on.square") {
-                    perform { try await store.duplicate(item) }
+                if item.isExternal {
+                    // A file that lives elsewhere: it is renamed, shared and deleted in the Files app.
+                    Button("Save a Copy in PDFoundry", systemImage: "square.and.arrow.down") {
+                        perform { try await store.saveCopy(of: item) }
+                    }
+                } else {
+                    Button("Rename", systemImage: "pencil") {
+                        renameText = item.name
+                        renameTarget = item
+                    }
+                    Button("Duplicate", systemImage: "plus.square.on.square") {
+                        perform { try await store.duplicate(item) }
+                    }
                 }
                 Button("Merge with Others", systemImage: "arrow.triangle.merge") {
                     isSelecting = true
                     selection = [item.url]
                 }
-                ShareLink(item: item.url) { Label("Share", systemImage: "square.and.arrow.up") }
-                Divider()
-                Button("Delete", systemImage: "trash", role: .destructive) { deleteTargets = [item] }
+                if item.isExternal {
+                    Divider()
+                    Button("Remove from PDFoundry", systemImage: "minus.circle") {
+                        Task { await store.forget([item]) }
+                    }
+                } else {
+                    ShareLink(item: item.url) { Label("Share", systemImage: "square.and.arrow.up") }
+                    Divider()
+                    Button("Delete", systemImage: "trash", role: .destructive) { deleteTargets = [item] }
+                }
             }
         }
-        .accessibilityLabel("\(item.name), \(item.detail)")
+        .accessibilityLabel([item.name, item.detail, item.location].compactMap(\.self).joined(separator: ", "))
         .accessibilityAddTraits(selection.contains(item.url) ? .isSelected : [])
     }
 
@@ -184,8 +202,9 @@ struct LibraryView: View {
                 Button("Merge", systemImage: "arrow.triangle.merge") { mergeCandidates = selectedItems }
                     .disabled(selection.count < 2)
                 Spacer()
-                ShareLink(items: selectedItems.map(\.url)) { Label("Share", systemImage: "square.and.arrow.up") }
-                    .disabled(selection.isEmpty)
+                // Only documents kept in PDFoundry can be shared from here; files opened in place are shared from Files.
+                ShareLink(items: selectedItems.filter { !$0.isExternal }.map(\.url)) { Label("Share", systemImage: "square.and.arrow.up") }
+                    .disabled(selectedItems.allSatisfy(\.isExternal))
                 Spacer()
                 Button("Delete", systemImage: "trash", role: .destructive) { deleteTargets = selectedItems }
                     .disabled(selection.isEmpty)
@@ -204,7 +223,7 @@ struct LibraryView: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu("Add", systemImage: "plus") {
-                    Button("Import from Files", systemImage: "folder") { showImporter = true }
+                    Button("Open from Files", systemImage: "folder") { showImporter = true }
                     if VNDocumentCameraViewController.isSupported {
                         Button("Scan Document", systemImage: "document.viewfinder") { showScanner = true }
                     }
@@ -221,7 +240,17 @@ struct LibraryView: View {
     }
 
     private var deleteTitle: String {
-        deleteTargets.count == 1 ? "Delete “\(deleteTargets[0].name)”?" : "Delete \(deleteTargets.count) documents?"
+        if deleteTargets.allSatisfy(\.isExternal) {
+            return deleteTargets.count == 1 ? "Remove “\(deleteTargets[0].name)” from PDFoundry?" : "Remove \(deleteTargets.count) files from PDFoundry?"
+        }
+        return deleteTargets.count == 1 ? "Delete “\(deleteTargets[0].name)”?" : "Delete \(deleteTargets.count) documents?"
+    }
+
+    private var deleteMessage: String {
+        let external = deleteTargets.filter(\.isExternal).count
+        if external == deleteTargets.count { return "The files stay where they are." }
+        if external > 0 { return "Documents kept in PDFoundry are deleted and can't be brought back. Files opened from elsewhere stay where they are." }
+        return "This can't be undone."
     }
 
     private func toggle(_ item: PDFItem) {
@@ -298,6 +327,12 @@ struct DocumentCell: View {
                 Text(item.detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if let location = item.location {
+                    Label(location, systemImage: "folder")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }

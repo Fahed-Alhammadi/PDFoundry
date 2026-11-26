@@ -110,6 +110,141 @@ struct PDFOperationsTests {
         #expect(store.items.count == 2)
     }
 
+    /// A library whose own folder, list of opened files and "copy instead" rule are all inside the test folder.
+    private func makeStore() throws -> (store: DocumentStore, library: URL, elsewhere: URL) {
+        let library = folder.appending(path: "Library")
+        let elsewhere = folder.appending(path: "Elsewhere")
+        try FileManager.default.createDirectory(at: library, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        // No folder counts as a temporary hand-over here, so files in "Elsewhere" are opened in place.
+        return (DocumentStore(directory: library, linksFile: folder.appending(path: "opened.json"), copyRoots: []), library, elsewhere)
+    }
+
+    private func libraryFiles(_ library: URL) throws -> [String] {
+        try FileManager.default.contentsOfDirectory(atPath: library.path).sorted()
+    }
+
+    @Test func aFileFromElsewhereIsOpenedInPlaceAndNotCopied() async throws {
+        let (store, library, elsewhere) = try makeStore()
+        let contract = elsewhere.appending(path: "Contract.pdf")
+        try FileManager.default.moveItem(at: try makePDF(named: "Contract", pages: 2), to: contract)
+
+        let opened = try await store.open([contract])
+        try await store.open([contract]) // opening it again
+
+        #expect(opened.map(\.standardizedFileURL) == [contract.standardizedFileURL])
+        #expect(try libraryFiles(library).isEmpty, "nothing is copied into PDFoundry")
+        #expect(store.items.count == 1)
+        let item = try #require(store.items.first)
+        #expect(item.isExternal && item.pageCount == 2)
+        #expect(item.location == "Files › Elsewhere")
+
+        // The list survives a restart: a new store reads the same bookmarks.
+        let again = DocumentStore(directory: library, linksFile: folder.appending(path: "opened.json"), copyRoots: [])
+        await again.refresh()
+        #expect(again.items.map(\.name) == ["Contract"])
+    }
+
+    /// Found on the simulator: a refresh that started before a file was opened wiped that file from the list
+    /// when it finished afterwards.
+    @Test func aFileOpenedWhileTheListIsRefreshingIsNotLost() async throws {
+        let (store, _, elsewhere) = try makeStore()
+        var files: [URL] = []
+        for index in 1...4 {
+            let file = elsewhere.appending(path: "File \(index).pdf")
+            try FileManager.default.moveItem(at: try makePDF(named: "File \(index)", pages: 1), to: file)
+            files.append(file)
+        }
+        for file in files {
+            async let slowRefresh: Void = store.refresh()
+            try await store.open([file])
+            await slowRefresh
+        }
+        await store.refresh()
+        #expect(store.items.map(\.name).sorted() == ["File 1", "File 2", "File 3", "File 4"])
+    }
+
+    @Test func changesAreWrittenToTheSameFileOnlyOnSave() async throws {
+        let (store, library, elsewhere) = try makeStore()
+        let contract = elsewhere.appending(path: "Contract.pdf")
+        try FileManager.default.moveItem(at: try makePDF(named: "Contract", pages: 2), to: contract)
+        try await store.open([contract])
+        let before = try Data(contentsOf: contract)
+
+        let model = ReaderModel(url: contract)
+        #expect(!model.hasChanges)
+        try #require(model.document).page(at: 0)?.rotation = 90
+        model.pagesDidChange()
+
+        #expect(model.hasChanges)
+        #expect(try Data(contentsOf: contract) == before, "nothing is written before Done")
+
+        #expect(model.save())
+        #expect(!model.hasChanges)
+        #expect(PDFDocument(url: contract)?.page(at: 0)?.rotation == 90, "Done writes to the same file")
+        #expect(try libraryFiles(library).isEmpty)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: elsewhere.path) == ["Contract.pdf"], "no stray files beside it")
+    }
+
+    @Test func leavingWithoutSavingKeepsTheFileAsItWas() async throws {
+        let (_, _, elsewhere) = try makeStore()
+        let contract = elsewhere.appending(path: "Contract.pdf")
+        try FileManager.default.moveItem(at: try makePDF(named: "Contract", pages: 1), to: contract)
+        let before = try Data(contentsOf: contract)
+
+        do {
+            let model = ReaderModel(url: contract)
+            try #require(model.document).page(at: 0)?.rotation = 180
+            model.pagesDidChange()
+            #expect(model.hasChanges)
+        } // discarded: the reader goes away without save()
+
+        #expect(try Data(contentsOf: contract) == before)
+    }
+
+    @Test func removingAnOpenedFileNeverDeletesIt() async throws {
+        let (store, library, elsewhere) = try makeStore()
+        let contract = elsewhere.appending(path: "Contract.pdf")
+        try FileManager.default.moveItem(at: try makePDF(named: "Contract", pages: 1), to: contract)
+        let kept = try await store.importFiles([try makePDF(named: "Kept", pages: 1)])
+        try await store.open([contract])
+        #expect(store.items.count == 2)
+
+        // "Delete" on a mixed selection deletes PDFoundry's own document and only forgets the other file.
+        await store.delete(store.items)
+
+        #expect(store.items.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: contract.path), "the file opened in place is still there")
+        #expect(!FileManager.default.fileExists(atPath: kept[0].path))
+        #expect(try libraryFiles(library).isEmpty)
+    }
+
+    @Test func aFileDeletedElsewhereDropsOffTheList() async throws {
+        let (store, _, elsewhere) = try makeStore()
+        let contract = elsewhere.appending(path: "Contract.pdf")
+        try FileManager.default.moveItem(at: try makePDF(named: "Contract", pages: 1), to: contract)
+        try await store.open([contract])
+        try FileManager.default.removeItem(at: contract)
+
+        await store.refresh()
+        #expect(store.items.isEmpty)
+    }
+
+    @Test func temporaryHandOversAreStillCopiedAndCanBeSavedIntoPDFoundry() async throws {
+        let library = folder.appending(path: "Library")
+        try FileManager.default.createDirectory(at: library, withIntermediateDirectories: true)
+        // Here the whole test folder counts as temporary, like a file shared from Mail.
+        let store = DocumentStore(directory: library, linksFile: folder.appending(path: "opened.json"), copyRoots: [folder])
+        let attachment = try makePDF(named: "Attachment", pages: 1)
+
+        let opened = try await store.open([attachment])
+        #expect(opened.first?.deletingLastPathComponent().standardizedFileURL == library.standardizedFileURL)
+        #expect(store.items.count == 1 && store.items[0].isExternal == false)
+
+        #expect(DocumentStore.location(of: URL(filePath: "/private/var/mobile/Library/Mobile Documents/com~apple~CloudDocs/Contracts/Lease.pdf")) == "iCloud Drive › Contracts")
+        #expect(DocumentStore.location(of: URL(filePath: "/private/var/mobile/Library/Mobile Documents/com~apple~CloudDocs/Lease.pdf")) == "iCloud Drive")
+    }
+
     @Test func libraryNamesNeverCollideOrEscapeTheFolder() async throws {
         let store = DocumentStore(directory: folder)
         let first = try makePDF(named: "Report", pages: 1)

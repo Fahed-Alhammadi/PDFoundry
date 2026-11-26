@@ -2,6 +2,8 @@ import PDFKit
 import SwiftUI
 
 struct ReaderView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(DocumentStore.self) private var store
     @Environment(SignatureStore.self) private var signatures
     @AppStorage(SettingsKey.horizontalScroll) private var horizontalScroll = false
     @State private var model: ReaderModel
@@ -12,6 +14,8 @@ struct ReaderView: View {
     @State private var newText = ""
     @State private var password = ""
     @State private var wrongPassword = false
+    @State private var askToSave = false
+    @State private var shared: SharedFile?
 
     init(url: URL) {
         _model = State(initialValue: ReaderModel(url: url))
@@ -21,7 +25,8 @@ struct ReaderView: View {
         content
             .navigationTitle(model.title)
             .navigationBarTitleDisplayMode(.inline)
-            .navigationBarBackButtonHidden(model.mode != .reading)
+            // With unsaved changes the system Back button (and the swipe back) is replaced by Close, which asks first.
+            .navigationBarBackButtonHidden(model.mode != .reading || model.hasChanges)
             .toolbar(.hidden, for: .tabBar)
             .toolbar { toolbar }
             .sheet(isPresented: $showPages) {
@@ -48,17 +53,44 @@ struct ReaderView: View {
                 Button("Delete", role: .destructive) { model.deleteSelectedAnnotation() }
             }
             .alert("Couldn't Save", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
+                Button("Save a Copy in PDFoundry") { saveCopy() }
                 Button("OK", role: .cancel) {}
             } message: {
                 Text(model.errorMessage ?? "")
             }
+            .confirmationDialog("Save the changes to “\(model.title)”?", isPresented: $askToSave, titleVisibility: .visible) {
+                Button("Save") { finish() }
+                Button("Discard Changes", role: .destructive) { dismiss() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Your changes will be lost if you don't save them.")
+            }
+            .sheet(item: $shared) { file in
+                ActivityView(url: file.url)
+            }
+    }
+
+    /// Done: writes the changes to the file and goes back. Stays here if the file could not be written.
+    private func finish() {
+        if model.save() { dismiss() }
+    }
+
+    /// When the file can't be changed where it is, the edited document is kept as a new one inside PDFoundry.
+    private func saveCopy() {
+        guard let document = model.document else { return }
+        Task {
+            if (try? await store.save(document, named: model.title)) != nil { dismiss() }
+        }
     }
 
     // MARK: Content
 
     @ViewBuilder
     private var content: some View {
-        if model.document == nil {
+        if model.isLoading {
+            ProgressView("Downloading from iCloud…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if model.document == nil {
             ContentUnavailableView("Unable to Open", systemImage: "doc.questionmark", description: Text("This file isn't a readable PDF."))
         } else if model.isLocked {
             lockedView
@@ -174,13 +206,23 @@ struct ReaderView: View {
 
     @ToolbarContentBuilder
     private var readingToolbar: some ToolbarContent {
+        if model.hasChanges {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Close", systemImage: "xmark") { askToSave = true }
+            }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Done") { finish() }
+            }
+        }
         ToolbarItemGroup(placement: .topBarTrailing) {
             Button("Search", systemImage: "magnifyingglass") { model.showSearch() }
             Menu("More", systemImage: "ellipsis") {
                 if model.canEdit {
                     Button("Organize Pages", systemImage: "square.grid.2x2") { showPages = true }
                 }
-                ShareLink(item: model.url) { Label("Share", systemImage: "square.and.arrow.up") }
+                Button("Share", systemImage: "square.and.arrow.up") {
+                    if let url = model.temporaryCopy() { shared = SharedFile(url: url) }
+                }
                 Button("Print", systemImage: "printer") { model.printDocument() }
             }
         }
@@ -219,4 +261,21 @@ struct ReaderView: View {
             }
         }
     }
+}
+
+/// A file handed to the system share sheet.
+private struct SharedFile: Identifiable {
+    let url: URL
+    var id: URL { url }
+}
+
+/// The system share sheet.
+private struct ActivityView: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: [url], applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }

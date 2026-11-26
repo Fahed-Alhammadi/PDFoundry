@@ -1,1 +1,7 @@
-Opening a PDF that is already in your library now opens it, instead of adding a second copy.
+New in this build: files open where they are.
+
+• + > Open from Files opens a PDF from iCloud Drive or any folder without copying it into PDFoundry. It is listed with its location.
+• Changes are saved only when you tap Done. Close asks whether to save or discard them.
+• Opening the same PDF twice no longer adds it twice.
+
+Please try: open a PDF from Files, sign or add text, tap Done, then look at the file in the Files app. Also try Close > Discard Changes.

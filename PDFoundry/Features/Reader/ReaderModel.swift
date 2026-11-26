@@ -35,16 +35,23 @@ struct AnnotationSelection {
 }
 
 /// State and editing actions for one open document.
+///
+/// The file is opened where it is. Changes stay in memory until `save()` (the Done button) writes them back to the
+/// same file; leaving without saving discards them.
 @Observable
 final class ReaderModel {
     enum Mode { case reading, drawing, placing }
 
     let url: URL
     private(set) var document: PDFDocument?
+    /// A file still in iCloud is being downloaded.
+    private(set) var isLoading = false
     private(set) var isLocked = false
     private(set) var pageIndex = 0
     private(set) var pageCount = 0
     private(set) var canUndo = false
+    /// Changes that Undo cannot count: a removed annotation, or pages that were reordered, rotated or deleted.
+    private(set) var hasOtherChanges = false
     var hasSelection = false
     var mode = Mode.reading
     var placement: Placement?
@@ -56,17 +63,45 @@ final class ReaderModel {
     @ObservationIgnored weak var pdfView: PDFView?
     @ObservationIgnored private var undoStack: [[(PDFPage, PDFAnnotation)]] = []
     @ObservationIgnored private var hintTask: Task<Void, Never>?
+    /// Keeps a file from the Files app readable and writable while it is open here.
+    @ObservationIgnored private let access: FileAccess
 
     var title: String { url.deletingPathExtension().lastPathComponent }
+
+    /// Are there changes that have not been written to the file yet?
+    var hasChanges: Bool { canUndo || hasOtherChanges }
 
     /// Password-protected files open read-only, so saving never strips their protection.
     var canEdit: Bool { document.map { !$0.isEncrypted } ?? false }
 
     init(url: URL) {
         self.url = url
-        document = PDFDocument(url: url)
-        isLocked = document?.isLocked ?? false
-        pageCount = document?.pageCount ?? 0
+        access = FileAccess(url)
+        adopt(PDFDocument(url: url))
+        if document == nil {
+            // Perhaps a file in iCloud that is not on this device yet: reading it through a file coordinator
+            // downloads it first.
+            isLoading = true
+            Task {
+                let data = await Self.coordinatedData(at: url)
+                adopt(data.flatMap(PDFDocument.init(data:)))
+                isLoading = false
+            }
+        }
+    }
+
+    private func adopt(_ loaded: PDFDocument?) {
+        document = loaded
+        isLocked = loaded?.isLocked ?? false
+        pageCount = loaded?.pageCount ?? 0
+    }
+
+    @concurrent
+    private nonisolated static func coordinatedData(at url: URL) async -> Data? {
+        var data: Data?
+        var error: NSError?
+        NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &error) { data = try? Data(contentsOf: $0) }
+        return data
     }
 
     func unlock(with password: String) -> Bool {
@@ -186,26 +221,28 @@ final class ReaderModel {
     func deleteSelectedAnnotation() {
         guard let selected = selectedAnnotation else { return }
         selected.page.removeAnnotation(selected.annotation)
+        let wasAddedHere = undoStack.contains { $0.contains { $0.1 === selected.annotation } }
         undoStack = undoStack.map { $0.filter { $0.1 !== selected.annotation } }.filter { !$0.isEmpty }
         canUndo = !undoStack.isEmpty
+        // Removing something that was already in the file is a change of its own; removing what was just added is not.
+        if !wasAddedHere { hasOtherChanges = true }
         selectedAnnotation = nil
-        save()
     }
 
     func undo() {
         guard let last = undoStack.popLast() else { return }
         for (page, annotation) in last { page.removeAnnotation(annotation) }
         canUndo = !undoStack.isEmpty
-        save()
     }
 
     /// Called after the page organiser changes the document's structure.
     func pagesDidChange() {
+        // The annotations added so far stay in the document, but their pages may be gone, so they can no longer be undone one by one.
         undoStack.removeAll()
         canUndo = false
+        hasOtherChanges = true
         pageCount = document?.pageCount ?? 0
         pdfView?.layoutDocumentView()
-        save()
         syncPage()
     }
 
@@ -213,14 +250,35 @@ final class ReaderModel {
         guard !added.isEmpty else { return }
         undoStack.append(added)
         canUndo = true
-        save()
     }
 
-    func save() {
-        guard let document, canEdit else { return }
-        if !document.write(to: url) {
-            errorMessage = PDFoundryError.writeFailed.localizedDescription
+    /// Writes the changes back to the file that was opened. Returns false, with `errorMessage` set, when it could not.
+    @discardableResult
+    func save() -> Bool {
+        guard let document, canEdit, hasChanges else { return true }
+        var written = false
+        var error: NSError?
+        // Coordinated, so iCloud Drive and other apps see one complete change.
+        NSFileCoordinator().coordinate(writingItemAt: url, options: .forReplacing, error: &error) { target in
+            written = document.write(to: target)
         }
+        guard written else {
+            errorMessage = "This file can't be changed where it is. You can save a copy in PDFoundry instead."
+            return false
+        }
+        undoStack.removeAll()
+        canUndo = false
+        hasOtherChanges = false
+        return true
+    }
+
+    /// The document as it is now, unsaved changes included, in a temporary file for sharing.
+    func temporaryCopy() -> URL? {
+        guard let document else { return nil }
+        let folder = FileManager.default.temporaryDirectory.appending(path: "Share-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let copy = folder.appending(path: title + ".pdf")
+        return document.write(to: copy) ? copy : nil
     }
 
     func show(hint text: String) {
@@ -241,7 +299,8 @@ final class ReaderModel {
         info.jobName = title
         info.outputType = .general
         controller.printInfo = info
-        controller.printingItem = url
+        // Printed from memory, so unsaved changes are on the paper too.
+        controller.printingItem = document?.dataRepresentation() ?? url
         controller.present(animated: true)
     }
 
