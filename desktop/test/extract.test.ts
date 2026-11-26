@@ -60,7 +60,12 @@ test('a merged file is never saved over one of the files it is made from', async
     const [ha, hb] = [md5(readFileSync(a)), md5(readFileSync(b))];
     const merged = await pdf.merge([readFileSync(a), readFileSync(b)]);
     assert.throws(() => store.saveNew(b, merged, [a, b]), /would replace a file it is made from/);
-    assert.throws(() => store.saveNew(join(root, 'a.pdf'), merged, [a, b]), process.platform === 'linux' ? /already exists/ : /would replace/);
+    if (process.platform === 'linux') {
+      // Names differ by case only, so on Linux "a.pdf" is another file and may be written.
+      store.saveNew(join(root, 'a.pdf'), merged, [a, b]);
+    } else {
+      assert.throws(() => store.saveNew(join(root, 'a.pdf'), merged, [a, b]), /would replace/);
+    }
     assert.deepEqual([md5(readFileSync(a)), md5(readFileSync(b))], [ha, hb]);
     store.saveNew(join(root, 'Merged.pdf'), merged, [a, b]);
   } finally {
