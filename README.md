@@ -47,7 +47,7 @@ Apps for iPhone, iPad, Android, macOS, Windows and Linux.
 
 PDFoundry is a small PDF app that does four jobs well: reading, merging, editing and signing. It works entirely on the device. There is no account, no server, no advertising and no analytics. The phone apps make no network requests; the desktop app goes online only to check for its own updates.
 
-The phone apps are native: Swift and SwiftUI on iPhone and iPad, Kotlin and Jetpack Compose on Android. The desktop app is built with Electron and runs on macOS, Windows and Linux. It works the way desktop PDF programs do: a file opens where it is, and it changes only when you choose Save.
+The phone apps are native: Swift and SwiftUI on iPhone and iPad, Kotlin and Jetpack Compose on Android. The desktop app is built with Electron and runs on macOS, Windows and Linux. On every platform a PDF opens where you keep it, with no copy made. The desktop app works the way desktop PDF programs do and changes the file only when you choose Save. The phone apps save each change to the same file as you make it, and can put the file back as it was when you opened it.
 
 ## Status
 
@@ -63,16 +63,16 @@ Store links for the phone apps will be added here and on the [website](https://f
 
 | | iPhone and iPad | Android | macOS, Windows and Linux |
 |---|---|---|---|
-| **Read** | Open from Files, Mail, Safari or the share sheet. Search the text. Scroll vertically or sideways | Open from any app's share menu or file picker. Search the text. Pinch to zoom | Open a PDF where it is, or drop it onto the window. Search the text. Zoom |
+| **Read** | Open a PDF where it is in Files, or receive one from Mail, Safari or the share sheet. Search the text. Scroll vertically or sideways | Open a PDF where it is with the file picker, or receive one from any app's share menu. Search the text. Pinch to zoom | Open a PDF where it is, or drop it onto the window. Search the text. Zoom |
 | **Scan and create** | Scan paper with the camera. Build a PDF from photos | Scan paper with Google's document scanner. Build a PDF from photos | Build a PDF from images. No scanning |
 | **Merge** | Select documents, drag them into order, merge | Select documents, order them with arrows, merge | Select documents, order them with arrows, merge |
 | **Highlight** | Select text, then highlight (four colours), underline or strike through | Drag a marker over the page | Drag a marker over the page, four colours |
 | **Text and drawing** | Type anywhere. Draw with a finger or Apple Pencil | Type anywhere (Arabic shapes correctly). Draw with a finger or stylus | Type anywhere (Arabic shapes correctly). Draw with the mouse or a pen |
 | **Sign** | Draw once in black or blue ink, reuse, drag and resize before placing | Same | Same |
 | **Pages** | Reorder by dragging. Rotate, duplicate, extract, delete, add blank pages | Reorder with arrows. Rotate, duplicate, extract, delete, add blank pages | Reorder by dragging or with arrows. Rotate, duplicate, extract, delete, add blank pages |
-| **Undo** | Tap any mark to remove it, or undo recent edits | Undo the last ten changes while the document is open | Undo the last ten changes; nothing is written until you save |
-| **Manage** | Rename, duplicate, share, print, delete. A file opened twice is listed once | Rename, duplicate, share, print, delete. A file opened twice is listed once | Save, Save As, print. A list of recent files |
-| **Storage** | The app's folder in Files, easy to back up | Inside the app. Share a copy to send it elsewhere | Files stay where you keep them. Changes are written when you choose Save |
+| **Undo** | Tap any mark to remove it, or undo recent edits. Revert to Original puts the file back as it was when you opened it | Undo the last ten changes while the document is open. Revert to original puts the file back as it was when you opened it | Undo the last ten changes; nothing is written until you save |
+| **Manage** | Rename, duplicate, share, print, delete. A file opened where it is can be removed from the list or copied into the app; the file itself is not touched. A file opened twice is listed once | Same | Save, Save As, print. A list of recent files |
+| **Storage** | Files you open stay where you keep them, and changes are saved to the same file. Scans, new PDFs and received files go in the app's folder in Files | Files you open stay where you keep them, and changes are saved to the same file. Scans, new PDFs and received files are kept inside the app | Files stay where you keep them. Changes are written when you choose Save |
 | **Protected PDFs** | Open with the password, read-only | Open with the password, read-only | Open with the password, read-only |
 | **Permissions** | Camera, asked only when you tap Scan Document | None | None. Goes online only to check for its own updates |
 
@@ -166,7 +166,7 @@ npm start
 
 | To | iPhone and iPad | Android | macOS, Windows and Linux |
 |---|---|---|---|
-| Add a document | **+** in the library: Import from Files, Scan Document, or Create from Photos | **+** in the library: Open PDF (opens the file where it is and saves changes back to it), Scan document, or Create from photos | **Open**, or drop a PDF on the window. Create from images is in the **…** menu |
+| Add a document | **+** in the library: Open from Files, Scan Document, or Create from Photos | **+** in the library: Open PDF, Scan document, or Create from photos | **Open**, or drop a PDF on the window. Create from images is in the **…** menu |
 | Merge | **Select**, choose documents, tap the merge button | Press and hold to select, choose documents, tap the merge button | **Select**, choose files, **Merge**, then say where to save |
 | Highlight | Press and hold text to select it, then tap the highlighter | Tap **Highlight**, then drag over the page | Click **Highlight**, then drag over the page |
 | Add text | Tap **Aa**, type, drag the text into place, tap **Place** | Tap **Text**, type, drag the text into place, tap **Place** | Click **Text**, type, drag the text into place, **Place** |
@@ -174,7 +174,8 @@ npm start
 | Sign | Tap the signature button, draw or pick a signature, position it, tap **Place** | Tap **Sign**, draw or pick a signature, position it, tap **Place** | Click **Sign**, draw or pick a signature, position it, **Place** |
 | Edit pages | **…** then **Organize Pages** | **⋮** then **Organize pages** | The grid button in the toolbar, or **View > Organize Pages** |
 | Remove an edit | Tap it, then **Delete** | Tap **Undo** | **Undo** |
-| Save | Saved automatically | Saved automatically | **Save** (Ctrl+S or ⌘S), or **Save As** for a new file |
+| Undo everything since opening | **…** then **Revert to Original** | **⋮** then **Revert to original** | Close without saving |
+| Save | Saved automatically, to the same file | Saved automatically, to the same file | **Save** (Ctrl+S or ⌘S), or **Save As** for a new file |
 
 ## Tests
 
@@ -183,7 +184,7 @@ npm start
 xcodebuild test -project PDFoundry.xcodeproj -scheme PDFoundry \
   -destination 'platform=iOS Simulator,name=iPhone 18 Pro'
 
-# Android: PDF engine tests on a running emulator or device
+# Android: PDF engine and document list tests on a running emulator or device
 cd android && ./gradlew :app:connectedDebugAndroidTest
 
 # Desktop: unit tests, then the self-test in a real window
