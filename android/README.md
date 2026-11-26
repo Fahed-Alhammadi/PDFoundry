@@ -26,6 +26,7 @@ keyPassword=YOUR_KEY_PASSWORD
 
 - `data/PdfEngine.kt`: every change to a PDF (merge, page operations, drawing onto pages) using PdfBox-Android.
 - `data/Library.kt`: the document library, page rendering with the platform `PdfRenderer`, and thumbnails.
+- `data/OutsideFiles.kt`: reading and writing files that are opened where they live, through the system file picker's links.
 - `ui/`: Compose screens for the library, reader, page editor, page organizer, Settings and About.
 
 ## Differences from the iOS app
@@ -33,7 +34,7 @@ keyPassword=YOUR_KEY_PASSWORD
 - Highlighting uses a marker you drag across the page, not text selection.
 - Edits are drawn into the page itself. Use Undo (up to 10 steps while the document is open) to remove one.
 - Pages are reordered with arrow buttons in the page organizer.
-- Documents live in the app's private storage. Use Share to send a copy elsewhere.
+- A PDF opened with Open PDF stays where it is and is saved there; the app keeps a working copy of it in its private storage. Documents you scan, create or receive from another app live in the app's private storage: use Share to send a copy elsewhere.
 - Scanning uses Google's document scanner, so it needs Google Play services.
 
 ## Releasing
