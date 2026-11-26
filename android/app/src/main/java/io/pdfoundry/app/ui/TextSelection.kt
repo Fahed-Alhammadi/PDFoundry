@@ -18,19 +18,23 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import io.pdfoundry.app.data.Edge
 import io.pdfoundry.app.data.TextMark
 import io.pdfoundry.app.data.TextWord
-import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+
+/** Part of one line of selected text, and the side of it below the text (where an underline goes). */
+data class LineArea(val rect: RectF, val lower: Edge)
 
 /**
  * Selecting words on one page for a text mark. Drag across the text (or tap a word): the words from
  * where the finger went down to where it is now, in reading order, are tinted, and lifting the finger
- * hands their rects (one per line) to [onSelect]. Positions are page fractions, like [TextWord.rect].
+ * hands them, joined into one area per line, to [onSelect]. Positions are page fractions, like
+ * [TextWord.rect]; [aspect] is the displayed page's width divided by its height.
  */
 @Composable
-fun TextSelectionLayer(words: List<TextWord>, mark: TextMark, argb: Int, onSelect: (List<RectF>) -> Unit) {
+fun TextSelectionLayer(words: List<TextWord>, aspect: Float, mark: TextMark, argb: Int, onSelect: (List<LineArea>) -> Unit) {
     var anchor by remember(words) { mutableStateOf<Int?>(null) }
     var focus by remember(words) { mutableStateOf<Int?>(null) }
     val selected = selectedWords(words, anchor, focus)
@@ -40,32 +44,35 @@ fun TextSelectionLayer(words: List<TextWord>, mark: TextMark, argb: Int, onSelec
         Modifier.fillMaxSize()
             .pointerInput(words) {
                 detectTapGestures { point ->
-                    val index = nearestWord(words, point.x / size.width, point.y / size.height) ?: return@detectTapGestures
-                    onSelect(lineRects(listOf(words[index])))
+                    // A tap must land on a word (or right next to it): a tap in the margin marks nothing.
+                    val index = wordAt(words, point.x / size.width, point.y / size.height, aspect) ?: return@detectTapGestures
+                    onSelect(lineAreas(listOf(words[index]), aspect))
                 }
             }
             .pointerInput(words) {
                 detectDragGestures(
                     onDragStart = { start ->
-                        anchor = nearestWord(words, start.x / size.width, start.y / size.height)
+                        // A drag starts on (or beside) a word; after that it follows the finger to the nearest word.
+                        anchor = wordAt(words, start.x / size.width, start.y / size.height, aspect, slop = 1f)
                         focus = anchor
                     },
                     onDrag = { change, _ ->
                         change.consume()
-                        focus = nearestWord(words, change.position.x / size.width, change.position.y / size.height) ?: focus
+                        if (anchor != null) focus = nearestWord(words, change.position.x / size.width, change.position.y / size.height, aspect) ?: focus
                     },
                     onDragEnd = {
                         val chosen = selectedWords(words, anchor, focus)
                         anchor = null
                         focus = null
-                        if (chosen.isNotEmpty()) onSelect(lineRects(chosen))
+                        if (chosen.isNotEmpty()) onSelect(lineAreas(chosen, aspect))
                     },
                     onDragCancel = { anchor = null; focus = null }
                 )
             }
             .semantics { contentDescription = "Page text. Drag across words to select them." }
     ) {
-        for (rect in lineRects(selected)) {
+        for (area in lineAreas(selected, aspect)) {
+            val rect = area.rect
             val topLeft = Offset(rect.left * size.width, rect.top * size.height)
             val box = Size(rect.width() * size.width, rect.height() * size.height)
             when (mark) {
@@ -85,35 +92,74 @@ fun selectedWords(words: List<TextWord>, anchor: Int?, focus: Int?): List<TextWo
     return words.subList(from, to + 1)
 }
 
-/** The word under a point, or failing that the nearest one: first by line, then along the line. */
-fun nearestWord(words: List<TextWord>, x: Float, y: Float): Int? {
-    if (words.isEmpty()) return null
-    words.indexOfFirst { it.rect.contains(x, y) }.takeIf { it >= 0 }?.let { return it }
-    fun distance(rect: RectF, value: Float, low: Float, high: Float) = when {
-        value < low -> low - value
-        value > high -> value - high
-        else -> 0f
+/** Lines run across the screen unless the text's lower side is to its left or right. */
+private val TextWord.sideways: Boolean get() = lower == Edge.Left || lower == Edge.Right
+
+/** A rect's size across its line (the text's height), in units where the page is 1 tall and [aspect] wide. */
+private fun thickness(rect: RectF, sideways: Boolean, aspect: Float) = if (sideways) rect.width() * aspect else rect.height()
+
+/**
+ * The word under a point, allowing [slop] times the word's text height around it; null when the point
+ * is in a margin or between lines. For taps, and for where a drag starts.
+ */
+fun wordAt(words: List<TextWord>, x: Float, y: Float, aspect: Float, slop: Float = 0.5f): Int? {
+    var best: Int? = null
+    var bestDistance = Float.MAX_VALUE
+    words.forEachIndexed { index, word ->
+        val rect = word.rect
+        val margin = thickness(rect, word.sideways, aspect) * slop
+        // The margin is in page-height units: across the page it is divided by the aspect.
+        val dx = distance(x, rect.left, rect.right) * aspect
+        val dy = distance(y, rect.top, rect.bottom)
+        if (dx <= margin && dy <= margin) {
+            val d = dx * dx + dy * dy
+            if (d < bestDistance) {
+                bestDistance = d
+                best = index
+            }
+        }
     }
-    return words.indices.minByOrNull { index ->
-        val rect = words[index].rect
-        val dx = distance(rect, x, rect.left, rect.right)
-        val dy = distance(rect, y, rect.top, rect.bottom)
-        // Being off the line counts more than being off along it, so a drag in a margin stays on its line.
-        dx * dx + 9f * dy * dy
-    }
+    return best
 }
 
 /**
- * Joins neighbouring words on the same line into one rect, so a highlight covers the spaces between
- * them as on iOS. Works for lines running across (normal pages) and down (pages turned sideways).
+ * The nearest word to a point, however far: for following a drag. Being off a word's line counts nine
+ * times more than being off along it, so a drag through a margin stays on its line; on a sideways page
+ * lines run down the screen, so "off the line" is sideways.
  */
-fun lineRects(words: List<TextWord>): List<RectF> {
-    val lines = mutableListOf<RectF>()
-    for (word in words) {
-        val last = lines.lastOrNull()
-        if (last != null && sameLine(last, word.rect)) last.union(word.rect) else lines += RectF(word.rect)
+fun nearestWord(words: List<TextWord>, x: Float, y: Float, aspect: Float): Int? {
+    if (words.isEmpty()) return null
+    wordAt(words, x, y, aspect, slop = 0f)?.let { return it }
+    return words.indices.minByOrNull { index ->
+        val word = words[index]
+        val dx = distance(x, word.rect.left, word.rect.right) * aspect
+        val dy = distance(y, word.rect.top, word.rect.bottom)
+        if (word.sideways) 9f * dx * dx + dy * dy else dx * dx + 9f * dy * dy
     }
-    return lines
+}
+
+private fun distance(value: Float, low: Float, high: Float) = when {
+    value < low -> low - value
+    value > high -> value - high
+    else -> 0f
+}
+
+/**
+ * Joins neighbouring words on the same line into one area, so a highlight covers the spaces between
+ * them as on iOS. Words are joined only when the space between them is at most a little more than the
+ * line's height: never across a column gutter.
+ */
+fun lineAreas(words: List<TextWord>, aspect: Float): List<LineArea> {
+    val areas = mutableListOf<LineArea>()
+    for (word in words) {
+        val last = areas.lastOrNull()
+        if (last != null && last.lower == word.lower && sameLine(last.rect, word.rect, word.sideways, aspect)) {
+            last.rect.union(word.rect)
+        } else {
+            areas += LineArea(RectF(word.rect), word.lower)
+        }
+    }
+    return areas
 }
 
 private fun overlap(aLow: Float, aHigh: Float, bLow: Float, bHigh: Float): Float {
@@ -122,12 +168,13 @@ private fun overlap(aLow: Float, aHigh: Float, bLow: Float, bHigh: Float): Float
     return if (smaller <= 0f) 0f else shared / smaller
 }
 
-private fun sameLine(a: RectF, b: RectF): Boolean {
-    val vertical = overlap(a.top, a.bottom, b.top, b.bottom)
-    val horizontal = overlap(a.left, a.right, b.left, b.right)
-    // Across: they share the line's height and sit side by side, close together.
-    if (vertical > 0.5f && horizontal < 0.5f) return abs(min(abs(b.left - a.right), abs(a.left - b.right))) < a.height() * 3
-    // Down (a sideways page): they share the line's width and sit one above the other.
-    if (horizontal > 0.5f && vertical < 0.5f) return abs(min(abs(b.top - a.bottom), abs(a.top - b.bottom))) < a.width() * 3
-    return false
+private fun sameLine(a: RectF, b: RectF, sideways: Boolean, aspect: Float): Boolean {
+    val lineHeight = max(thickness(a, sideways, aspect), thickness(b, sideways, aspect))
+    return if (!sideways) {
+        val gap = max(b.left - a.right, a.left - b.right) * aspect
+        overlap(a.top, a.bottom, b.top, b.bottom) > 0.5f && gap <= lineHeight * 1.2f
+    } else {
+        val gap = max(b.top - a.bottom, a.top - b.bottom)
+        overlap(a.left, a.right, b.left, b.right) > 0.5f && gap <= lineHeight * 1.2f
+    }
 }

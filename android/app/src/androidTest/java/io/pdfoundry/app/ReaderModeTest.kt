@@ -113,6 +113,49 @@ class ReaderModeTest {
         assertNull(state.editMode)
     }
 
+    private fun pageCount() = io.pdfoundry.app.data.PdfSource(state.file).use { it.pageCount }
+
+    /** Waits until nothing is saving and [done] holds. */
+    private fun waitFor(done: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + 15_000
+        while ((state.busy || !done()) && System.currentTimeMillis() < deadline) Thread.sleep(20)
+    }
+
+    @Test
+    fun aChangeMadeWhileAnotherIsSavingIsNotLost() {
+        // The first change is slow, like a save to a file in Google Drive.
+        state.edit { Thread.sleep(600); PdfEngine.addBlankPage(it, 0) }
+        Thread.sleep(150)
+        assertTrue("the first change is still saving", state.busy)
+        state.edit { PdfEngine.addBlankPage(it, 0) }
+
+        waitFor { pageCount() == 3 }
+        assertEquals("both changes are saved, in order", 3, pageCount())
+
+        // And each can be undone.
+        state.undo()
+        waitFor { pageCount() == 2 }
+        assertEquals(2, pageCount())
+        assertTrue(state.canUndo)
+    }
+
+    @Test
+    fun twoQuickMarksAreBothApplied() {
+        state.toolMode = ToolMode.Markup
+        state.edit { Thread.sleep(600) } // something still saving
+        Thread.sleep(100)
+        state.begin(EditMode.TextMark(TextMark.Underline, Color.RED), page = 0)
+        state.markText(listOf(RectF(0.1f, 0.40f, 0.5f, 0.45f)), TextMark.Underline, Color.RED)
+        state.begin(EditMode.TextMark(TextMark.Underline, Color.RED), page = 0)
+        state.markText(listOf(RectF(0.1f, 0.60f, 0.5f, 0.65f)), TextMark.Underline, Color.RED)
+
+        waitFor { false }
+        val page = io.pdfoundry.app.data.PdfSource(state.file).use { source -> kotlinx.coroutines.runBlocking { source.render(0, 612) }!! }
+        fun redAt(y: Float) = (0 until 6).any { d -> Color.red(page.getPixel(180, (y * 792).toInt() + d - 3)) > 200 && Color.green(page.getPixel(180, (y * 792).toInt() + d - 3)) < 100 }
+        assertTrue("first mark", redAt(0.40f + 0.92f * 0.05f))
+        assertTrue("second mark", redAt(0.60f + 0.92f * 0.05f))
+    }
+
     @Test
     fun markingTextKeepsMarkup() {
         state.toolMode = ToolMode.Markup

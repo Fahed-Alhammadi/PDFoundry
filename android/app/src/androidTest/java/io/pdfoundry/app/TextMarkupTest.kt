@@ -9,6 +9,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.pdmodel.common.PDRectangle
+import io.pdfoundry.app.data.Edge
 import io.pdfoundry.app.data.PdfEngine
 import io.pdfoundry.app.data.PdfSource
 import io.pdfoundry.app.data.TextMark
@@ -229,6 +230,73 @@ class TextMarkupTest {
 
     @Test
     fun strikethroughFollowsTheTextOnATurnedPage() = assertLineFollowsTheText(90, TextMark.Strikethrough, 0.5f)
+
+    // Text drawn rotated in PDF space ----------------------------------------------------------
+
+    /** One line of Helvetica drawn with a text matrix turned [angle] degrees counter-clockwise, on a page with /Rotate [pageRotation]. */
+    private fun makeTurnedTextPdf(name: String, pageRotation: Int, angle: Double, x: Float, y: Float, text: String = "Rotated Header"): File {
+        val file = File(folder, "$name.pdf")
+        PDDocument().use { document ->
+            val page = com.tom_roush.pdfbox.pdmodel.PDPage(PDRectangle.LETTER)
+            page.rotation = pageRotation
+            document.addPage(page)
+            com.tom_roush.pdfbox.pdmodel.PDPageContentStream(document, page).use { stream ->
+                stream.beginText()
+                stream.setFont(com.tom_roush.pdfbox.pdmodel.font.PDType1Font.HELVETICA, 30f)
+                stream.setTextMatrix(com.tom_roush.pdfbox.util.Matrix.getRotateInstance(Math.toRadians(angle), x, y))
+                stream.showText(text)
+                stream.endText()
+            }
+            document.save(file)
+        }
+        return file
+    }
+
+    private fun isRed(pixel: Int) = Color.red(pixel) > 200 && Color.green(pixel) < 120 && Color.blue(pixel) < 120
+
+    private fun Bitmap.redNear(x: Float, y: Float) = (-2..2).any { dx -> (-2..2).any { dy -> isRed(getPixel((x * width).toInt() + dx, (y * height).toInt() + dy)) } }
+
+    @Test
+    fun aRotatedHeaderOnAnUprightPageIsFoundWhereItIs() {
+        // Reads bottom to top, like a rotated table header.
+        val file = makeTurnedTextPdf("Header", pageRotation = 0, angle = 90.0, x = 300f, y = 200f)
+
+        val word = word(PdfEngine.words(file, 0), "Header")
+        assertTrue("the word runs up the page: ${word.rect}", word.rect.height() * 792 > word.rect.width() * 612)
+        assertEquals("the text's lower side faces right", Edge.Right, word.lower)
+        assertHighlightLandsOn(file, "Header")
+    }
+
+    @Test
+    fun anUnderlineUnderARotatedHeaderIsOnItsLowerSide() {
+        val file = makeTurnedTextPdf("Header underline", pageRotation = 0, angle = 90.0, x = 300f, y = 200f)
+        val word = word(PdfEngine.words(file, 0), "Header")
+
+        PdfEngine.markText(file, 0, listOf(word.rect), TextMark.Underline, red, listOf(word.lower))
+
+        val page = render(file)
+        val rect = word.rect
+        assertTrue("the line runs along the text, on the right", page.redNear(rect.left + 0.92f * rect.width(), rect.centerY()))
+        assertTrue("nothing on the other side", !page.redNear(rect.left + 0.08f * rect.width(), rect.centerY()))
+    }
+
+    @Test
+    fun aScanTurnedByThePageButUprightOnScreenIsMarkedUpright() {
+        // OCR'd scans often have /Rotate 90 and content turned the other way, so the text reads normally.
+        val file = makeTurnedTextPdf("Upright scan", pageRotation = 90, angle = 90.0, x = 300f, y = 200f, text = "Alpha Beta Gamma")
+
+        val word = word(PdfEngine.words(file, 0), "Beta")
+        assertEquals(Edge.Bottom, word.lower)
+        // Displayed 792 wide and 612 tall; an upright word is wider than tall.
+        assertTrue("the word is upright on screen: ${word.rect}", word.rect.width() * 792 > word.rect.height() * 612)
+        assertHighlightLandsOn(file, "Beta")
+
+        val underlined = makeTurnedTextPdf("Upright scan underline", pageRotation = 90, angle = 90.0, x = 300f, y = 200f, text = "Alpha Beta Gamma")
+        val again = word(PdfEngine.words(underlined, 0), "Beta")
+        PdfEngine.markText(underlined, 0, listOf(again.rect), TextMark.Underline, red, listOf(again.lower))
+        val page = render(underlined)
+        assertTrue("the underline is under the word", page.redNear(again.rect.centerX(), again.rect.top + 0.92f * again.rect.height()))
+    }
 
     @Test
     fun severalRectsAreMarkedInOneChange() {

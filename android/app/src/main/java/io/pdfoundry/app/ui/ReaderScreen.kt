@@ -105,6 +105,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -216,9 +219,8 @@ class ReaderState(private val context: Context, val file: File, private val scop
      * there. A copy is kept first so the change can be undone.
      */
     fun edit(change: (File) -> Unit) {
-        if (readOnly || busy) return
-        scope.launch {
-            busy = true
+        if (readOnly) return
+        queue {
             try {
                 withContext(Dispatchers.IO) {
                     val snapshot = File(undoFolder, "${System.nanoTime()}.pdf")
@@ -240,41 +242,51 @@ class ReaderState(private val context: Context, val file: File, private val scop
             } catch (e: Exception) {
                 message = e.message ?: "The change could not be saved."
                 reopen()
-            } finally {
-                busy = false
             }
         }
     }
 
-    fun undo() {
-        if (busy) return
-        val snapshot = undoStack.removeLastOrNull() ?: return
+    // Changes are saved one after another, in the order they were asked for: one asked for while
+    // another is still saving (a slow cloud file) waits its turn instead of being dropped.
+    private val saving = Mutex()
+    private val queued = AtomicInteger(0)
+
+    private fun queue(work: suspend () -> Unit) {
+        queued.incrementAndGet()
+        busy = true
         scope.launch {
-            busy = true
             try {
-                withContext(Dispatchers.IO) {
-                    val current = File(undoFolder, "current")
-                    file.copyTo(current, overwrite = true)
-                    try {
-                        snapshot.copyTo(file, overwrite = true)
-                        store.push(file)
-                    } catch (e: Exception) {
-                        // Nothing was saved: the document stays as it was, and the step can be undone later.
-                        current.copyTo(file, overwrite = true)
-                        throw e
-                    } finally {
-                        current.delete()
-                    }
-                    snapshot.delete()
-                }
-            } catch (e: Exception) {
-                undoStack.addLast(snapshot)
-                message = e.message ?: "The change could not be saved."
+                saving.withLock { work() }
+            } finally {
+                if (queued.decrementAndGet() == 0) busy = false
             }
-            canUndo = undoStack.isNotEmpty()
-            settle()
-            busy = false
         }
+    }
+
+    fun undo() = queue {
+        val snapshot = undoStack.removeLastOrNull() ?: return@queue
+        try {
+            withContext(Dispatchers.IO) {
+                val current = File(undoFolder, "current")
+                file.copyTo(current, overwrite = true)
+                try {
+                    snapshot.copyTo(file, overwrite = true)
+                    store.push(file)
+                } catch (e: Exception) {
+                    // Nothing was saved: the document stays as it was, and the step can be undone later.
+                    current.copyTo(file, overwrite = true)
+                    throw e
+                } finally {
+                    current.delete()
+                }
+                snapshot.delete()
+            }
+        } catch (e: Exception) {
+            undoStack.addLast(snapshot)
+            message = e.message ?: "The change could not be saved."
+        }
+        canUndo = undoStack.isNotEmpty()
+        settle()
     }
 
     // Tools ---------------------------------------------------------------------------------
@@ -302,10 +314,11 @@ class ReaderState(private val context: Context, val file: File, private val scop
         edit { PdfEngine.stamp(it, page, image, rect) }
     }
 
-    fun markText(rects: List<RectF>, mark: io.pdfoundry.app.data.TextMark, argb: Int) {
+    /** `lower` is, per rect, the side below its text (see [io.pdfoundry.app.data.TextWord.lower]). */
+    fun markText(rects: List<RectF>, mark: io.pdfoundry.app.data.TextMark, argb: Int, lower: List<io.pdfoundry.app.data.Edge>? = null) {
         val page = editPage
         editMode = null
-        if (rects.isNotEmpty()) edit { PdfEngine.markText(it, page, rects, mark, argb) }
+        if (rects.isNotEmpty()) edit { PdfEngine.markText(it, page, rects, mark, argb, lower) }
     }
 
     /** Puts the file back exactly as it was when it was opened. Undo brings the changes back. */
@@ -386,7 +399,7 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
             onCancel = { state.cancelEdit() },
             onInk = { strokes: List<InkStroke> -> state.finishInk(strokes) },
             onPlace = { image: Bitmap, rect: RectF -> state.place(image, rect) },
-            onMarkText = { rects -> if (editing is EditMode.TextMark) state.markText(rects, editing.mark, editing.argb) }
+            onMarkText = { areas -> if (editing is EditMode.TextMark) state.markText(areas.map { it.rect }, editing.mark, editing.argb, areas.map { it.lower }) }
         )
         return
     }

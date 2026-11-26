@@ -110,7 +110,7 @@ fun PageEditor(
     onCancel: () -> Unit,
     onInk: (List<InkStroke>) -> Unit,
     onPlace: (Bitmap, RectF) -> Unit,
-    onMarkText: (List<RectF>) -> Unit = {}
+    onMarkText: (List<LineArea>) -> Unit = {}
 ) {
     val source = state.source ?: return
     val pageSize = state.sizes.getOrNull(pageIndex) ?: Size(612, 792)
@@ -216,7 +216,7 @@ fun PageEditor(
 
                 when (mode) {
                     is EditMode.TextMark -> words?.takeIf { it.isNotEmpty() }?.let { found ->
-                        TextSelectionLayer(found, mode.mark, mode.argb, onSelect = onMarkText)
+                        TextSelectionLayer(found, aspect, mode.mark, mode.argb, onSelect = onMarkText)
                     }
                     is EditMode.Ink -> {
                         val strokeWidth = if (pen.highlighter) widthPx * 0.028f else widthPx * 0.006f
