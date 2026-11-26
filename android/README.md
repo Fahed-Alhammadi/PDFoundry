@@ -38,4 +38,4 @@ keyPassword=YOUR_KEY_PASSWORD
 
 ## Releasing
 
-Pushing a tag `android-X.Y.Z` (matching `versionName`), or running the Android workflow by hand with "upload" ticked, builds the signed bundle and uploads it to Google Play internal testing. Edit `whatsnew/whatsnew-en-US` first; promote the build to production in Play Console.
+Pushing a tag `android-X.Y.Z` (matching `versionName`), or running the Android workflow by hand with "upload" ticked, builds the signed bundle and uploads it to Google Play closed testing. Edit `whatsnew/whatsnew-en-US` first; promote the build to production in Play Console.

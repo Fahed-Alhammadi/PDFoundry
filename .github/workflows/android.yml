@@ -1,12 +1,12 @@
 # - Push to main / pull request touching android/: builds the debug app and runs the PDF engine
 #   tests on an emulator.
 # - Tag android-X.Y.Z (must match versionName), or a manual run with "upload" ticked: builds the
-#   signed bundle and uploads it to Google Play internal testing. Promote it to production by hand
+#   signed bundle and uploads it to Google Play closed testing. Promote it to production by hand
 #   in Play Console. Version code = 1 + this workflow's run number (code 1 was uploaded by hand).
 # Release notes: android/whatsnew/whatsnew-en-US (max 500 characters; edit before each release).
 # Secrets: ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS,
 #   ANDROID_KEY_PASSWORD, PLAY_SERVICE_ACCOUNT_JSON.
-# Variable (optional): PLAY_TRACK (default "internal"; "alpha" = closed testing, "production").
+# Variable (optional): PLAY_TRACK (default "alpha" = closed testing; "internal", "production").
 name: Android
 
 on:
@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       upload:
-        description: Upload this build to Google Play (internal testing)
+        description: Upload this build to Google Play (closed testing)
         type: boolean
         default: false
 
@@ -108,5 +108,5 @@ jobs:
           releaseName: ${{ steps.v.outputs.version }} (${{ steps.v.outputs.code }})
           mappingFile: android/app/build/outputs/mapping/release/mapping.txt
           whatsNewDirectory: android/whatsnew
-          track: ${{ vars.PLAY_TRACK || 'internal' }}
+          track: ${{ vars.PLAY_TRACK || 'alpha' }}
           status: completed
