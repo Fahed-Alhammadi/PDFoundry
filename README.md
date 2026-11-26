@@ -54,8 +54,8 @@ The phone apps are native: Swift and SwiftUI on iPhone and iPad, Kotlin and Jetp
 | Platform | Version | Status |
 |---|---|---|
 | iPhone and iPad | 1.0.0 | Submitted to the App Store, waiting for review. Available to testers on TestFlight |
-| Android | 1.0.3 | In closed testing on Google Play |
-| macOS, Windows and Linux | 1.1.1 | Released. [Download](https://github.com/Fahed-Alhammadi/PDFoundry/releases/latest). The Mac app is signed and notarized |
+| Android | 1.0.4 | In closed testing on Google Play |
+| macOS, Windows and Linux | 1.2.0 | Released. [Download](https://github.com/Fahed-Alhammadi/PDFoundry/releases/latest). The Mac app is signed and notarized |
 
 Store links for the phone apps will be added here and on the [website](https://fahed-alhammadi.github.io/PDFoundry/) when the apps are public.
 
@@ -66,8 +66,10 @@ Store links for the phone apps will be added here and on the [website](https://f
 | **Read** | Open a PDF where it is in Files, or receive one from Mail, Safari or the share sheet. Search the text. Scroll vertically or sideways | Open a PDF where it is with the file picker, or receive one from any app's share menu. Search the text. Pinch to zoom | Open a PDF where it is, or drop it onto the window. Search the text. Zoom |
 | **Scan and create** | Scan paper with the camera. Build a PDF from photos | Scan paper with Google's document scanner. Build a PDF from photos | Build a PDF from images. No scanning |
 | **Merge** | Select documents, drag them into order, merge | Select documents, order them with arrows, merge | Select documents, order them with arrows, merge |
-| **Highlight** | Select text, then highlight (four colours), underline or strike through | Drag a marker over the page | Drag a marker over the page, four colours |
-| **Text and drawing** | Type anywhere. Draw with a finger or Apple Pencil | Type anywhere (Arabic shapes correctly). Draw with a finger or stylus | Type anywhere (Arabic shapes correctly). Draw with the mouse or a pen |
+| **Tools** | A Tools tab: Scan Document, Create from Photos, Merge PDFs, Extract Pages | Same | A Tools page in the sidebar: Create from Images, Merge PDFs, Extract Pages |
+| **Reader** | A bar with three labelled groups: Markup, Fill & Sign and Pages, plus Undo | Same | Same |
+| **Markup** | Select text, then highlight (four colours), underline or strike through | Same | Same |
+| **Text and drawing** | Type anywhere. Draw with a finger or Apple Pencil | Type anywhere (Arabic shapes correctly). Draw with a finger or stylus, or with a highlighter pen | Type anywhere (Arabic shapes correctly). Draw with the mouse or a pen, or with a highlighter pen |
 | **Sign** | Draw once in black or blue ink, reuse, drag and resize before placing | Same | Same |
 | **Pages** | Reorder by dragging. Rotate, duplicate, extract, delete, add blank pages | Reorder with arrows. Rotate, duplicate, extract, delete, add blank pages | Reorder by dragging or with arrows. Rotate, duplicate, extract, delete, add blank pages |
 | **Undo** | Tap any mark to remove it, or undo recent edits. Revert to Original puts the file back as it was when you opened it | Undo the last ten changes while the document is open. Revert to original puts the file back as it was when you opened it | Undo the last ten changes; nothing is written until you save |
@@ -93,8 +95,8 @@ On every platform, signatures and edits are written into the PDF itself, so they
 <p>
   <img src="screenshots/desktop/01-library.png" width="49%" alt="Recent files on the desktop">
   <img src="screenshots/desktop/02-signed.png" width="49%" alt="A signed and highlighted document on the desktop">
-  <img src="screenshots/desktop/04-pages.png" width="49%" alt="Page organizer on the desktop">
-  <img src="screenshots/desktop/08-library-dark.png" width="49%" alt="Recent files in dark mode on the desktop">
+  <img src="screenshots/desktop/09-markup.png" width="49%" alt="Markup tools and a text highlight on the desktop">
+  <img src="screenshots/desktop/11-tools.png" width="49%" alt="The Tools page on the desktop">
 </p>
 
 **Android**
@@ -167,12 +169,13 @@ npm start
 | To | iPhone and iPad | Android | macOS, Windows and Linux |
 |---|---|---|---|
 | Add a document | **+** in the library: Open from Files, Scan Document, or Create from Photos | **+** in the library: Open PDF, Scan document, or Create from photos | **Open**, or drop a PDF on the window. Create from images is in the **…** menu |
-| Merge | **Select**, choose documents, tap the merge button | Press and hold to select, choose documents, tap the merge button | **Select**, choose files, **Merge**, then say where to save |
-| Highlight | Press and hold text to select it, then tap the highlighter | Tap **Highlight**, then drag over the page | Click **Highlight**, then drag over the page |
-| Add text | Tap **Aa**, type, drag the text into place, tap **Place** | Tap **Text**, type, drag the text into place, tap **Place** | Click **Text**, type, drag the text into place, **Place** |
-| Draw | Tap the pencil, draw, tap **Done** | Tap **Draw**, draw, tap **Done** | Click **Draw**, draw, **Done** |
-| Sign | Tap the signature button, draw or pick a signature, position it, tap **Place** | Tap **Sign**, draw or pick a signature, position it, tap **Place** | Click **Sign**, draw or pick a signature, position it, **Place** |
-| Edit pages | **…** then **Organize Pages** | **⋮** then **Organize pages** | The grid button in the toolbar, or **View > Organize Pages** |
+| Merge | **Tools > Merge PDFs**, or **Select** in the library, choose documents, tap the merge button | **Tools > Merge PDFs**, or press and hold to select, choose documents, tap the merge button | **Tools > Merge PDFs**, or **Select**, choose files, **Merge**, then say where to save |
+| Extract pages | **Tools > Extract Pages**, pick a document, tick pages, **Extract**. The original is not changed | Same | Same, then say where to save |
+| Highlight, underline, strike through | **Markup**, then the tool, then select the words | **Markup**, then the tool, then drag across the words | **Markup**, then the tool, then select the words |
+| Add text | **Markup** or **Fill & Sign**, then **Text**, type, drag the text into place, tap **Place** | Same | Same |
+| Draw | **Markup**, then **Draw**, draw, tap **Done** | Same | Same |
+| Sign | **Fill & Sign**, then **Signature**, draw or pick a signature, position it, tap **Place**. The bar stays in Fill & Sign for the next one | Same | Same |
+| Edit pages | **Pages** in the reader's bar | **Pages** in the reader's bar | **Pages** in the bar, the grid button in the toolbar, or **View > Organize Pages** |
 | Remove an edit | Tap it, then **Delete** | Tap **Undo** | **Undo** |
 | Undo everything since opening | **…** then **Revert to Original** | **⋮** then **Revert to original** | Close without saving |
 | Save | Saved automatically, to the same file | Saved automatically, to the same file | **Save** (Ctrl+S or ⌘S), or **Save As** for a new file |

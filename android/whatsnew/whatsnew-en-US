@@ -1,1 +1,1 @@
-Fixes for files opened where they are: a save that is interrupted no longer risks the file, Undo and Revert to original survive rotating the phone, and clearer messages when a file can't be opened.
+New Tools tab (scan, photos, merge, extract pages) and a clearer reader: Markup, Fill & Sign and Pages. Highlight, underline or strike through the words you select. Extract Pages never changes the original.
