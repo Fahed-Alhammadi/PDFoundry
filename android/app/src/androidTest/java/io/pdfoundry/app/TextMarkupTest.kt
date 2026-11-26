@@ -201,6 +201,35 @@ class TextMarkupTest {
         }
     }
 
+    /** On a turned page the text runs down or up the screen: the line must follow it, on the text's lower side. */
+    private fun assertLineFollowsTheText(rotation: Int, mark: TextMark, along: Float) {
+        val file = makePdf("Turned $rotation $mark")
+        PdfEngine.rotate(file, listOf(0), rotation)
+        val rect = word(PdfEngine.words(file, 0), "Beta").rect
+        PdfEngine.markText(file, 0, listOf(rect), mark, red)
+
+        val page = render(file)
+        fun isRed(pixel: Int) = Color.red(pixel) > 200 && Color.green(pixel) < 120 && Color.blue(pixel) < 120
+        // Unrotated, the line sits 92% down the rect (50% for strikethrough). Map that across the turn.
+        val (x, y) = when (rotation) {
+            90 -> (rect.right - along * rect.width()) to rect.centerY()
+            180 -> rect.centerX() to (rect.bottom - along * rect.height())
+            270 -> (rect.left + along * rect.width()) to rect.centerY()
+            else -> rect.centerX() to (rect.top + along * rect.height())
+        }
+        // Look a few pixels around the expected spot: a line is about 7% of the text height thick.
+        val hit = (-2..2).any { dx -> (-2..2).any { dy -> isRed(page.getPixel((x * page.width).toInt() + dx, (y * page.height).toInt() + dy)) } }
+        assertTrue("the $mark line should run along the text on a page turned $rotation degrees (looked at $x, $y in $rect)", hit)
+    }
+
+    @Test
+    fun underlineFollowsTheTextOnTurnedPages() {
+        listOf(90, 180, 270).forEach { assertLineFollowsTheText(it, TextMark.Underline, 0.92f) }
+    }
+
+    @Test
+    fun strikethroughFollowsTheTextOnATurnedPage() = assertLineFollowsTheText(90, TextMark.Strikethrough, 0.5f)
+
     @Test
     fun severalRectsAreMarkedInOneChange() {
         val file = makePdf("Several")

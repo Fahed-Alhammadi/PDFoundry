@@ -330,6 +330,9 @@ object PdfEngine {
      */
     fun markText(file: File, pageIndex: Int, rects: List<RectF>, mark: TextMark, argb: Int) = edit(file) { document ->
         if (rects.isEmpty()) return@edit
+        // On a turned page the text runs down (90°), upside down (180°) or up (270°) the display:
+        // lines follow the text, on its lower side for an underline.
+        val rotation = ((document.getPage(pageIndex).rotation % 360) + 360) % 360
         document.overlay(pageIndex) { stream, width, height ->
             stream.saveGraphicsState()
             val alpha = Color.alpha(argb) / 255f
@@ -356,12 +359,38 @@ object PdfEngine {
                         stream.fill()
                     }
                     TextMark.Underline, TextMark.Strikethrough -> {
-                        val y = top - rectHeight * (if (mark == TextMark.Underline) 0.92f else 0.5f)
+                        val along = if (mark == TextMark.Underline) 0.92f else 0.5f
+                        val bottom = top - rectHeight
+                        val rectWidth = right - left
                         stream.setStrokingColor(red, green, blue)
-                        stream.setLineWidth((rectHeight * 0.07f).coerceAtLeast(0.5f))
                         stream.setLineCapStyle(0)
-                        stream.moveTo(left, y)
-                        stream.lineTo(right, y)
+                        // In display points from the bottom-left: across for 0/180°, up and down for 90/270°.
+                        when (rotation) {
+                            90 -> {
+                                val x = right - rectWidth * along
+                                stream.setLineWidth((rectWidth * 0.07f).coerceAtLeast(0.5f))
+                                stream.moveTo(x, bottom)
+                                stream.lineTo(x, top)
+                            }
+                            270 -> {
+                                val x = left + rectWidth * along
+                                stream.setLineWidth((rectWidth * 0.07f).coerceAtLeast(0.5f))
+                                stream.moveTo(x, bottom)
+                                stream.lineTo(x, top)
+                            }
+                            180 -> {
+                                val y = bottom + rectHeight * along
+                                stream.setLineWidth((rectHeight * 0.07f).coerceAtLeast(0.5f))
+                                stream.moveTo(left, y)
+                                stream.lineTo(right, y)
+                            }
+                            else -> {
+                                val y = top - rectHeight * along
+                                stream.setLineWidth((rectHeight * 0.07f).coerceAtLeast(0.5f))
+                                stream.moveTo(left, y)
+                                stream.lineTo(right, y)
+                            }
+                        }
                         stream.stroke()
                     }
                 }
@@ -426,8 +455,8 @@ object PdfEngine {
             listOf(
                 "Read" to "Open any PDF from Files, scan paper with the camera, or build a PDF from your photos. Search the text and jump between pages.",
                 "Merge" to "Press and hold a document in the library, choose two or more, then tap Merge. Put the files into the order you want.",
-                "Edit" to "Highlight with the marker, add typed text, draw with your finger, and reorder, rotate, duplicate or delete pages.",
-                "Sign" to "Draw your signature once and reuse it. Drag it into place, resize it, and tap Place.",
+                "Edit" to "In Markup, highlight, underline or strike through text, add typed text and draw. Pages reorders, rotates, duplicates or deletes pages.",
+                "Sign" to "In Fill & Sign, draw your signature once and reuse it. Drag it into place, resize it, and tap Place.",
                 "Private" to "Everything stays on this device. PDFoundry has no account, no ads and no tracking."
             ).forEach { (title, body) ->
                 drawText(title, 56f, y, paint(19f, ember, bold = true))
@@ -439,9 +468,9 @@ object PdfEngine {
         val second = document.startPage(PdfDocument.PageInfo.Builder(612, 792, 2).create())
         second.canvas.apply {
             drawText("Try it on this page", 56f, 100f, paint(30f, ink, bold = true))
-            var y = paragraph("Tap the marker in the toolbar and drag across this sentence to highlight it.", 56f, 156f, 500f, paint(16f, ink)) + 24f
-            y = paragraph("Tap the pencil to draw anywhere on the page. Tap the text tool to type a note.", 56f, y, 500f, paint(16f, ink)) + 24f
-            paragraph("Tap the signature tool and place your signature on the line below.", 56f, y, 500f, paint(16f, ink))
+            var y = paragraph("Tap Markup, then Highlight, and drag across this sentence to highlight it.", 56f, 156f, 500f, paint(16f, ink)) + 24f
+            y = paragraph("In Markup, tap Draw to draw anywhere on the page, or Text to type a note.", 56f, y, 500f, paint(16f, ink)) + 24f
+            paragraph("Tap Fill & Sign, then Signature, and place your signature on the line below.", 56f, y, 500f, paint(16f, ink))
             val rule = Paint().apply { color = Color.rgb(140, 140, 140) }
             drawRect(56f, 560f, 356f, 561f, rule)
             drawText("Signature", 56f, 580f, paint(12f, Color.rgb(115, 115, 115)))
