@@ -365,6 +365,12 @@ struct MergeSheet: View {
 
     private var totalPages: Int { items.reduce(0) { $0 + $1.pageCount } }
 
+    /// Deleting originals only applies to documents kept in PDFoundry. Files that live elsewhere (opened in place or
+    /// picked in Files) are never deleted, so the switch isn't offered when there are only those.
+    static func offersDeletingOriginals(_ items: [PDFItem]) -> Bool {
+        items.contains { !$0.isExternal && !$0.isPicked }
+    }
+
     var body: some View {
         NavigationStack {
             List {
@@ -390,8 +396,10 @@ struct MergeSheet: View {
                 } footer: {
                     Text("Drag to rearrange. The merged document will have \(totalPages) pages.")
                 }
-                Section {
-                    Toggle("Delete Originals After Merging", isOn: $deleteOriginals)
+                if Self.offersDeletingOriginals(items) {
+                    Section {
+                        Toggle("Delete Originals After Merging", isOn: $deleteOriginals)
+                    }
                 }
             }
             .environment(\.editMode, .constant(.active))
@@ -403,7 +411,7 @@ struct MergeSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Merge") {
-                        onMerge(items, name, deleteOriginals)
+                        onMerge(items, name, deleteOriginals && Self.offersDeletingOriginals(items))
                         dismiss()
                     }
                     .disabled(DocumentStore.sanitized(name).isEmpty)

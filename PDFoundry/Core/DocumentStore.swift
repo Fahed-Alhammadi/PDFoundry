@@ -18,6 +18,9 @@ nonisolated struct PDFItem: Identifiable, Hashable, Sendable {
 
     var id: URL { url }
 
+    /// Picked in the Files app for one job on the Tools tab: not opened here, not listed, never deleted or forgotten.
+    var isPicked = false
+
     /// Opened in place from the Files app, not copied into PDFoundry.
     var isExternal: Bool { location != nil }
 
@@ -189,22 +192,23 @@ final class DocumentStore {
     }
 
     /// Describes a file picked in the Files app for a single job (a tool), without opening it here or adding it
-    /// to the list. It carries its location, so it counts as a file that lives elsewhere and is never deleted.
-    nonisolated static func pickedItem(_ url: URL) -> PDFItem? {
-        FileAccess.with(url) {
-            guard isPDF(url) else { return nil }
-            let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-            let document = PDFDocument(url: url)
-            return PDFItem(
-                url: url,
-                name: url.deletingPathExtension().lastPathComponent,
-                pageCount: document?.pageCount ?? 0,
-                size: Int64(values?.fileSize ?? 0),
-                modified: values?.contentModificationDate ?? .now,
-                isLocked: document?.isLocked ?? false,
-                location: location(of: url)
-            )
-        }
+    /// to the list. It is read through a file coordinator, so a file still in iCloud is downloaded first and its
+    /// page count is right. It carries its location and `isPicked`, so it is never deleted or taken off the list.
+    nonisolated static func pickedItem(_ url: URL) async -> PDFItem? {
+        guard let data = await readCoordinated(url), data.prefix(1024).range(of: Data("%PDF-".utf8)) != nil else { return nil }
+        let document = PDFDocument(data: data)
+        guard let document else { return nil }
+        let modified = FileAccess.with(url) { try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate }
+        return PDFItem(
+            url: url,
+            name: url.deletingPathExtension().lastPathComponent,
+            pageCount: document.pageCount,
+            size: Int64(data.count),
+            modified: modified ?? .now,
+            isLocked: document.isLocked,
+            location: location(of: url),
+            isPicked: true
+        )
     }
 
     private nonisolated static func isPDF(_ url: URL) -> Bool {
@@ -311,17 +315,21 @@ final class DocumentStore {
 
     @discardableResult
     func merge(_ sources: [PDFItem], named name: String, deleteOriginals: Bool) async throws -> URL {
-        let access = sources.map { FileAccess($0.url) }
-        let destination = uniqueURL(named: name)
-        // PDFKit reads page contents from the source files while it writes, so access lasts until the write is done.
-        try withExtendedLifetime(access) {
-            let merged = try PDFOperations.merge(sources.map(\.url))
-            guard merged.write(to: destination) else { throw PDFoundryError.writeFailed }
+        // Read through a file coordinator into memory, so files in iCloud are downloaded first and the sources are
+        // not needed while the merged document is written.
+        var contents: [(name: String, data: Data?)] = []
+        for source in sources {
+            contents.append((source.name, await Self.readCoordinated(source.url)))
         }
+        let merged = try PDFOperations.merge(contents)
+        let destination = uniqueURL(named: name)
+        guard merged.write(to: destination) else { throw PDFoundryError.writeFailed }
         if deleteOriginals {
             // Only documents kept in PDFoundry are deleted. Files opened in place are just taken off the list.
-            for source in sources where !source.isExternal { try? FileManager.default.removeItem(at: source.url) }
-            await forget(sources)
+            // Files picked in Files for this merge are left alone, even when the same file is also on the list.
+            let kept = sources.filter { !$0.isPicked }
+            for source in kept where !source.isExternal { try? FileManager.default.removeItem(at: source.url) }
+            await forget(kept)
         }
         await refresh()
         return destination

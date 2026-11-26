@@ -14,13 +14,14 @@ struct ExtractPagesView: View {
     @Environment(DocumentStore.self) private var store
     @Environment(\.horizontalSizeClass) private var sizeClass
 
-    @State private var document: PDFDocument?
+    /// Renders the pages away from the main thread; nil until the file is read, or if it can't be.
+    @State private var renderer: PageRenderer?
+    @State private var pageCount = 0
     @State private var isLoading = true
     @State private var selection: Set<Int> = []
     @State private var isWorking = false
     @State private var errorMessage: String?
 
-    private var pageCount: Int { document?.pageCount ?? 0 }
     private var isWide: Bool { sizeClass == .regular }
     private var columns: [GridItem] {
         [GridItem(.adaptive(minimum: isWide ? 170 : 100, maximum: isWide ? 240 : 150), spacing: isWide ? 22 : 14)]
@@ -44,7 +45,7 @@ struct ExtractPagesView: View {
                     }
                 }
                 .safeAreaInset(edge: .bottom) {
-                    if document != nil {
+                    if renderer != nil {
                         Button(action: extract) {
                             Text(selection.count == 1 ? "Extract 1 Page" : selection.isEmpty ? "Extract" : "Extract \(selection.count) Pages")
                                 .frame(maxWidth: .infinity)
@@ -69,7 +70,7 @@ struct ExtractPagesView: View {
     private var content: some View {
         if isLoading {
             ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if let document {
+        } else if let renderer {
             ScrollView {
                 Text("Tap the pages to copy into a new document. “\(item.name)” stays as it is.")
                     .font(.footnote)
@@ -79,10 +80,8 @@ struct ExtractPagesView: View {
                     .padding(.horizontal)
                     .padding(.top, 6)
                 LazyVGrid(columns: columns, spacing: 18) {
-                    ForEach(0..<document.pageCount, id: \.self) { index in
-                        if let page = document.page(at: index) {
-                            cell(page, index: index)
-                        }
+                    ForEach(0..<pageCount, id: \.self) { index in
+                        cell(renderer, index: index)
                     }
                 }
                 .padding(16)
@@ -92,13 +91,13 @@ struct ExtractPagesView: View {
         }
     }
 
-    private func cell(_ page: PDFPage, index: Int) -> some View {
+    private func cell(_ renderer: PageRenderer, index: Int) -> some View {
         let isSelected = selection.contains(index)
         return Button {
             if isSelected { selection.remove(index) } else { selection.insert(index) }
         } label: {
             VStack(spacing: 6) {
-                ExtractThumbnail(page: page)
+                ExtractThumbnail(renderer: renderer, index: index)
                     .overlay {
                         Rectangle().strokeBorder(isSelected ? Color.accentColor : Color.primary.opacity(0.1), lineWidth: isSelected ? 3 : 1)
                     }
@@ -123,9 +122,16 @@ struct ExtractPagesView: View {
     }
 
     private func load() async {
-        guard document == nil else { return }
+        guard renderer == nil else { return }
         // A copy in memory: the file itself is never opened for writing here.
-        document = await DocumentStore.readCoordinated(item.url).flatMap(PDFDocument.init(data:))
+        if let data = await DocumentStore.readCoordinated(item.url) {
+            let candidate = PageRenderer(data: data)
+            // Parsed inside the renderer, off the main thread.
+            if let count = await candidate.pageCount(), count > 0 {
+                renderer = candidate
+                pageCount = count
+            }
+        }
         isLoading = false
     }
 
@@ -145,8 +151,38 @@ struct ExtractPagesView: View {
     }
 }
 
+/// Reads a PDF from bytes and draws page thumbnails, one at a time, away from the main thread.
+private actor PageRenderer {
+    private let data: Data
+    private var document: PDFDocument?
+    private var didParse = false
+
+    init(data: Data) {
+        self.data = data
+    }
+
+    private func parsed() -> PDFDocument? {
+        if !didParse {
+            didParse = true
+            document = PDFDocument(data: data)
+        }
+        return document
+    }
+
+    /// The number of pages, or nil if the bytes aren't a readable PDF.
+    func pageCount() -> Int? {
+        guard let document = parsed(), !document.isLocked else { return nil }
+        return document.pageCount
+    }
+
+    func thumbnail(at index: Int) -> UIImage? {
+        parsed()?.page(at: index)?.thumbnail(of: CGSize(width: 420, height: 560), for: .cropBox)
+    }
+}
+
 private struct ExtractThumbnail: View {
-    let page: PDFPage
+    let renderer: PageRenderer
+    let index: Int
     @State private var image: UIImage?
 
     var body: some View {
@@ -157,8 +193,8 @@ private struct ExtractThumbnail: View {
                 Color.white.aspectRatio(0.77, contentMode: .fit)
             }
         }
-        .onAppear {
-            if image == nil { image = page.thumbnail(of: CGSize(width: 420, height: 560), for: .cropBox) }
+        .task(id: index) {
+            if image == nil { image = await renderer.thumbnail(at: index) }
         }
     }
 }
