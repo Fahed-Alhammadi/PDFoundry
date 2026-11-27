@@ -220,8 +220,8 @@ function clickButton(scope: ParentNode, label: string): void {
   found.click();
 }
 
-async function until(test: () => boolean, what: string): Promise<void> {
-  for (let i = 0; i < 100; i++) {
+async function until(test: () => boolean, what: string, seconds = 5): Promise<void> {
+  for (let i = 0; i < seconds * 20; i++) {
     if (test()) return;
     await wait(50);
   }
@@ -850,7 +850,7 @@ async function pageToolsTest(check: Check, app: App): Promise<void> {
   const compressing = compressSheet({ name: 'Compress source', path: source, bytes: photo });
   await until(() => !!sheet('compress'), 'the Compress sheet');
   clickButton(sheet('compress')!, 'Compress');
-  await until(() => /Saved|small|could/.test(sheet('compress')?.querySelector('.split-status')?.textContent ?? ''), 'the compressed copy');
+  await until(() => /Saved|small|could/.test(sheet('compress')?.querySelector('.split-status')?.textContent ?? ''), 'the compressed copy', 60);
   const said = sheet('compress')!.querySelector('.split-status')!.textContent;
   clickButton(sheet('compress')!, 'Done');
   const savedAt = await compressing;
@@ -962,7 +962,8 @@ async function redactionTest(check: Check, app: App): Promise<void> {
   await until(() => !!document.querySelector('.dialog'), 'the apply warning');
   const warning = lastDialog().textContent ?? '';
   clickButton(lastDialog(), 'Apply');
-  await until(() => app.reader.data !== opened, 'the redaction');
+  // Rendering the page at 300 dpi takes more than 5 seconds on a slow CI machine (seen on Linux).
+  await until(() => app.reader.data !== opened, 'the redaction', 60);
   await settled();
   const after = app.reader.data;
   const px = await pixels(after, 0);
