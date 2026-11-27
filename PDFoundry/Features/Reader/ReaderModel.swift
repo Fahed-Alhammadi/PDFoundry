@@ -70,7 +70,19 @@ final class ReaderModel {
     var errorMessage: String?
 
     @ObservationIgnored weak var pdfView: PDFView?
-    @ObservationIgnored private var undoStack: [[(PDFPage, PDFAnnotation)]] = []
+    /// One step Undo takes back: annotations that were added, or form fields that were changed (with their
+    /// values from before).
+    private enum UndoStep {
+        case added([(PDFPage, PDFAnnotation)])
+        case fields([(PDFAnnotation, FieldValue)])
+    }
+
+    @ObservationIgnored private var undoStack: [UndoStep] = []
+    /// Every form field's value as last saved, to find the fields the user has changed.
+    @ObservationIgnored private var fieldValues: [ObjectIdentifier: (widget: PDFAnnotation, value: FieldValue)] = [:]
+    @ObservationIgnored private var fieldSyncTask: Task<Void, Never>?
+    /// A signature field the user tapped: the reader asks which signature to put in it.
+    var signingField: PDFAnnotation?
     @ObservationIgnored private var hintTask: Task<Void, Never>?
     /// Keeps a file from the Files app readable and writable while it is open here.
     @ObservationIgnored private var access: FileAccess?
@@ -131,6 +143,7 @@ final class ReaderModel {
         document = loaded
         isLocked = loaded?.isLocked ?? false
         pageCount = loaded?.pageCount ?? 0
+        if !isLocked { prepareFields() }
     }
 
     @concurrent
@@ -149,6 +162,7 @@ final class ReaderModel {
             setPassword(password)
             openedPassword = password
         }
+        prepareFields()
         return true
     }
 
@@ -165,6 +179,7 @@ final class ReaderModel {
     @discardableResult
     func protect(with newPassword: String) -> Bool {
         guard canEdit, password == nil, !newPassword.isEmpty else { return false }
+        syncFields()
         setPassword(newPassword)
         guard save() else {
             setPassword(nil)
@@ -179,7 +194,9 @@ final class ReaderModel {
     /// the document. The steps so far can't be undone one by one after that (their pages are gone).
     @discardableResult
     func removePassword() -> Bool {
-        guard canEdit, let old = password, let document else { return false }
+        guard canEdit, let old = password else { return false }
+        syncFields()
+        guard let document else { return false }
         let plain = document.isEncrypted ? PDFOperations.unencrypted(document) : document
         let index = pageIndex
         let previous = self.document
@@ -321,9 +338,15 @@ final class ReaderModel {
     // MARK: Annotations
 
     func handleTap(at point: CGPoint) {
+        // PDFView edits a form field on its own (ticks a box, picks a radio button); look for the change once it has.
+        scheduleFieldSync()
         guard mode == .reading, canEdit, let pdfView,
               let page = pdfView.page(for: point, nearest: false),
               let annotation = page.annotation(at: pdfView.convert(point, to: page)) else { return }
+        if FormFields.isSignatureField(annotation), !annotation.isReadOnly {
+            signingField = annotation
+            return
+        }
         let type = annotation.type ?? ""
         guard type != "Link", type != "Widget", type != "Popup" else { return }
         selectedAnnotation = AnnotationSelection(annotation: annotation, page: page)
@@ -332,23 +355,102 @@ final class ReaderModel {
     func deleteSelectedAnnotation() {
         guard let selected = selectedAnnotation else { return }
         selected.page.removeAnnotation(selected.annotation)
-        undoStack = undoStack.map { $0.filter { $0.1 !== selected.annotation } }.filter { !$0.isEmpty }
+        undoStack = undoStack.compactMap { step in
+            guard case .added(let added) = step else { return step }
+            let left = added.filter { $0.1 !== selected.annotation }
+            return left.isEmpty ? nil : .added(left)
+        }
         canUndo = !undoStack.isEmpty
         selectedAnnotation = nil
         save()
     }
 
     func undo() {
+        syncFields()
         guard let last = undoStack.popLast() else { return }
-        for (page, annotation) in last { page.removeAnnotation(annotation) }
+        switch last {
+        case .added(let added):
+            for (page, annotation) in added { page.removeAnnotation(annotation) }
+        case .fields(let changed):
+            // Back to front, so a radio group ends as it was.
+            for (widget, old) in changed.reversed() {
+                widget.isReadOnly = false
+                FormFields.set(widget, value: old)
+            }
+            for (widget, _) in changed {
+                if let value = FormFields.value(of: widget) { fieldValues[ObjectIdentifier(widget)] = (widget, value) }
+            }
+        }
         canUndo = !undoStack.isEmpty
         save()
+    }
+
+    // MARK: Form fields
+
+    /// Reads the fields of a document that has just been shown. In a document that can't be changed, every field
+    /// is made read-only on screen (never saved), so nothing can be typed that would be lost.
+    private func prepareFields() {
+        guard let document, !document.isLocked else {
+            fieldValues = [:]
+            return
+        }
+        FormFields.repair(document)
+        let widgets = FormFields.widgets(in: document)
+        if !canEdit {
+            for widget in widgets { widget.isReadOnly = true }
+            for index in 0..<document.pageCount {
+                for annotation in document.page(at: index)?.annotations ?? [] where FormFields.isSignatureField(annotation) {
+                    annotation.isReadOnly = true
+                }
+            }
+        }
+        fieldValues = Dictionary(uniqueKeysWithValues: widgets.compactMap { widget in
+            FormFields.value(of: widget).map { (ObjectIdentifier(widget), (widget, $0)) }
+        })
+    }
+
+    /// Looks for field changes a moment after a tap, once PDFView has applied it.
+    func scheduleFieldSync() {
+        fieldSyncTask?.cancel()
+        fieldSyncTask = Task {
+            try? await Task.sleep(for: .milliseconds(300))
+            if !Task.isCancelled { syncFields() }
+        }
+    }
+
+    /// Finds the fields the user has changed since the last save and saves them as one undo step. Called when a
+    /// text field stops editing, after taps, and before anything else is saved.
+    func syncFields() {
+        guard canEdit, !fieldValues.isEmpty else { return }
+        var changed: [(PDFAnnotation, FieldValue)] = []
+        for (key, entry) in fieldValues {
+            guard let now = FormFields.value(of: entry.widget), now != entry.value else { continue }
+            changed.append((entry.widget, entry.value))
+            fieldValues[key] = (entry.widget, now)
+        }
+        guard !changed.isEmpty else { return }
+        undoStack.append(.fields(changed))
+        canUndo = true
+        save()
+    }
+
+    /// Puts a signature into a signature field: as large as fits, its shape kept, centred. The field itself stays
+    /// an (unsigned) field; the signature is a stamp on top of it, like any placed signature.
+    func sign(_ field: PDFAnnotation, with image: UIImage) {
+        signingField = nil
+        guard canEdit, let page = field.page, image.size.height > 0 else { return }
+        let bounds = FormFields.fit(aspect: image.size.width / image.size.height, in: field.bounds, rotation: page.rotation)
+        if let annotation = PDFOperations.stamp(image, on: page, bounds: bounds) {
+            commit([(page, annotation)])
+        }
     }
 
     /// Called after the page organiser changes the document's structure.
     func pagesDidChange() {
         // The annotations added so far stay in the document, but their pages may be gone, so they can no longer be undone one by one.
+        syncFields()
         undoStack.removeAll()
+        prepareFields()
         canUndo = false
         pageCount = document?.pageCount ?? 0
         pdfView?.layoutDocumentView()
@@ -358,7 +460,8 @@ final class ReaderModel {
 
     private func commit(_ added: [(PDFPage, PDFAnnotation)]) {
         guard !added.isEmpty else { return }
-        undoStack.append(added)
+        syncFields()
+        undoStack.append(.added(added))
         canUndo = true
         save()
     }

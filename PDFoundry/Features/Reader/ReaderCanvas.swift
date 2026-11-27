@@ -22,6 +22,11 @@ struct PDFKitView: UIViewRepresentable {
         center.addObserver(context.coordinator, selector: #selector(Coordinator.pageChanged), name: .PDFViewPageChanged, object: view)
         center.addObserver(context.coordinator, selector: #selector(Coordinator.selectionChanged), name: .PDFViewSelectionChanged, object: view)
 
+        // A form field's text is final once its editor closes.
+        center.addObserver(context.coordinator, selector: #selector(Coordinator.fieldEditingEnded), name: UITextField.textDidEndEditingNotification, object: nil)
+        center.addObserver(context.coordinator, selector: #selector(Coordinator.fieldEditingEnded), name: UITextView.textDidEndEditingNotification, object: nil)
+        center.addObserver(context.coordinator, selector: #selector(Coordinator.annotationHit), name: .PDFViewAnnotationHit, object: view)
+
         let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.tapped(_:)))
         tap.delegate = context.coordinator
         view.addGestureRecognizer(tap)
@@ -50,6 +55,16 @@ struct PDFKitView: UIViewRepresentable {
 
         @objc func pageChanged() {
             model.syncPage()
+        }
+
+        @objc func fieldEditingEnded(_ notification: Notification) {
+            // Only editors inside this page view (the find bar and alerts have text fields too).
+            guard let editor = notification.object as? UIView, let view = model.pdfView, editor.isDescendant(of: view) else { return }
+            model.syncFields()
+        }
+
+        @objc func annotationHit() {
+            model.scheduleFieldSync()
         }
 
         @objc func selectionChanged() {

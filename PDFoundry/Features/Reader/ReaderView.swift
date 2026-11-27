@@ -40,6 +40,11 @@ struct ReaderView: View {
                     model.beginPlacing(signature: image)
                 }
             }
+            .sheet(isPresented: Binding(get: { model.signingField != nil }, set: { if !$0 { model.signingField = nil } })) {
+                SignatureSheet { image in
+                    if let field = model.signingField { model.sign(field, with: image) }
+                }
+            }
             .sheet(isPresented: $showInitials) {
                 SignatureSheet(kind: .initials) { image in
                     model.beginPlacing(signature: image)
@@ -75,6 +80,7 @@ struct ReaderView: View {
                 ActivityView(url: file.url)
             }
             .task { await model.load() }
+            .onDisappear { model.syncFields() }
     }
 
     /// When the file can't be changed where it is, the edited document is kept as a new one inside PDFoundry.
