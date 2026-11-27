@@ -10,9 +10,12 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        // Tesseract4Android (OCR, Apache 2.0) is published on JitPack only; nothing else is taken from there.
-        maven("https://jitpack.io") {
-            content { includeGroup("cz.adaptech.tesseract4android") }
+        // Tesseract4Android (OCR, Apache 2.0) is published on JitPack only. Exclusive: that group comes
+        // only from JitPack, and nothing else is ever taken from there. Its files are also pinned by
+        // SHA-256 in gradle/verification-metadata.xml.
+        exclusiveContent {
+            forRepository { maven("https://jitpack.io") }
+            filter { includeGroup("cz.adaptech.tesseract4android") }
         }
     }
 }
