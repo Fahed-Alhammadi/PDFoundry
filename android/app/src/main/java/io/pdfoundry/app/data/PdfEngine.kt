@@ -644,6 +644,157 @@ object PdfEngine {
     // endregion
     // region Marks (annotations)
 
+    /** The stroke of shapes, in points. */
+    const val SHAPE_WIDTH = 2f
+    private const val ARROW_HEAD = 10f
+
+    /**
+     * Draws a shape from [from] to [to] (page fractions) in [argb] (its alpha is ignored), 2 pt wide, no
+     * fill: a `Square` or `Circle` filling the rect between the points, or a `Line` between them (an
+     * arrow has an open arrowhead at [to]). Nothing is added when the points are (almost) the same.
+     */
+    fun shape(file: File, pageIndex: Int, kind: ShapeKind, from: PagePoint, to: PagePoint, argb: Int) = edit(file) { document ->
+        val frame = PageFrame(document.getPage(pageIndex))
+        val a = frame.point(from)
+        val b = frame.point(to)
+        if (kotlin.math.hypot(b[0] - a[0], b[1] - a[1]) < 3f) return@edit
+        val red = Color.red(argb) / 255f
+        val green = Color.green(argb) / 255f
+        val blue = Color.blue(argb) / 255f
+        val border = COSDictionary().apply { setFloat(COSName.W, SHAPE_WIDTH); setName(COSName.S, "S") }
+        when (kind) {
+            ShapeKind.Rectangle, ShapeKind.Ellipse -> {
+                val left = minOf(a[0], b[0]); val right = maxOf(a[0], b[0])
+                val bottom = minOf(a[1], b[1]); val top = maxOf(a[1], b[1])
+                val w = maxOf(right - left, SHAPE_WIDTH * 2)
+                val h = maxOf(top - bottom, SHAPE_WIDTH * 2)
+                AnnotationWriter.add(document, pageIndex, if (kind == ShapeKind.Rectangle) "Square" else "Circle", left, bottom, w, h, configure = { dict, _ ->
+                    dict.setItem(COSName.C, rgb(argb).toCOSArray())
+                    dict.setItem(COSName.BS, border)
+                }) { stream ->
+                    stream.setStrokingColor(red, green, blue)
+                    stream.setLineWidth(SHAPE_WIDTH)
+                    val inset = SHAPE_WIDTH / 2
+                    if (kind == ShapeKind.Rectangle) {
+                        stream.addRect(inset, inset, w - SHAPE_WIDTH, h - SHAPE_WIDTH)
+                    } else {
+                        ellipse(stream, w / 2, h / 2, w / 2 - inset, h / 2 - inset)
+                    }
+                    stream.stroke()
+                }
+            }
+            ShapeKind.Line, ShapeKind.Arrow -> {
+                val pad = SHAPE_WIDTH + if (kind == ShapeKind.Arrow) ARROW_HEAD else 0f
+                val left = minOf(a[0], b[0]) - pad
+                val bottom = minOf(a[1], b[1]) - pad
+                val right = maxOf(a[0], b[0]) + pad
+                val top = maxOf(a[1], b[1]) + pad
+                AnnotationWriter.add(document, pageIndex, "Line", left, bottom, right - left, top - bottom, configure = { dict, f ->
+                    val start = f.user(a[0], a[1])
+                    val end = f.user(b[0], b[1])
+                    dict.setItem(COSName.L, floats(start[0], start[1], end[0], end[1]))
+                    dict.setItem(COSName.LE, COSArray().apply { add(COSName.getPDFName("None")); add(COSName.getPDFName(if (kind == ShapeKind.Arrow) "OpenArrow" else "None")) })
+                    dict.setItem(COSName.C, rgb(argb).toCOSArray())
+                    dict.setItem(COSName.BS, border)
+                }) { stream ->
+                    stream.setStrokingColor(red, green, blue)
+                    stream.setLineWidth(SHAPE_WIDTH)
+                    stream.setLineCapStyle(1)
+                    stream.setLineJoinStyle(1)
+                    val x1 = a[0] - left; val y1 = a[1] - bottom
+                    val x2 = b[0] - left; val y2 = b[1] - bottom
+                    stream.moveTo(x1, y1)
+                    stream.lineTo(x2, y2)
+                    stream.stroke()
+                    if (kind == ShapeKind.Arrow) {
+                        val angle = kotlin.math.atan2(y2 - y1, x2 - x1)
+                        val spread = Math.toRadians(30.0).toFloat()
+                        stream.moveTo(x2 - ARROW_HEAD * kotlin.math.cos(angle - spread), y2 - ARROW_HEAD * kotlin.math.sin(angle - spread))
+                        stream.lineTo(x2, y2)
+                        stream.lineTo(x2 - ARROW_HEAD * kotlin.math.cos(angle + spread), y2 - ARROW_HEAD * kotlin.math.sin(angle + spread))
+                        stream.stroke()
+                    }
+                }
+            }
+        }
+    }
+
+    /** An ellipse centred at ([cx], [cy]) from four Bézier curves. */
+    private fun ellipse(stream: PDPageContentStream, cx: Float, cy: Float, rx: Float, ry: Float) {
+        val k = 0.5523f
+        stream.moveTo(cx + rx, cy)
+        stream.curveTo(cx + rx, cy + ry * k, cx + rx * k, cy + ry, cx, cy + ry)
+        stream.curveTo(cx - rx * k, cy + ry, cx - rx, cy + ry * k, cx - rx, cy)
+        stream.curveTo(cx - rx, cy - ry * k, cx - rx * k, cy - ry, cx, cy - ry)
+        stream.curveTo(cx + rx * k, cy - ry, cx + rx, cy - ry * k, cx + rx, cy)
+        stream.closePath()
+    }
+
+    /** The side of a comment's note icon, in points. */
+    private const val NOTE = 22f
+
+    /**
+     * Places a comment (a `Text` annotation, the sticky note other apps show with its text in a popup)
+     * centred at [at] (page fractions). Returns its id; an empty [text] creates nothing and returns null.
+     */
+    fun comment(file: File, pageIndex: Int, at: PagePoint, text: String): String? {
+        val words = text.trim()
+        if (words.isEmpty()) return null
+        var id: String? = null
+        edit(file) { document ->
+            val frame = PageFrame(document.getPage(pageIndex))
+            val p = frame.point(at)
+            val left = (p[0] - NOTE / 2).coerceIn(0f, frame.width - NOTE)
+            val bottom = (p[1] - NOTE / 2).coerceIn(0f, frame.height - NOTE)
+            id = AnnotationWriter.add(document, pageIndex, "Text", left, bottom, NOTE, NOTE, configure = { dict, _ ->
+                dict.setString(COSName.CONTENTS, words)
+                dict.setName(COSName.NAME, "Comment")
+                dict.setItem(COSName.C, floats(1f, 0.8f, 0.2f))
+                dict.setBoolean(COSName.getPDFName("Open"), false)
+            }) { stream -> noteIcon(stream) }.annotationName
+        }
+        return id
+    }
+
+    /** A yellow speech bubble with three lines of "text", 22 pt square. */
+    private fun noteIcon(stream: PDPageContentStream) {
+        stream.setNonStrokingColor(1f, 0.8f, 0.2f)
+        stream.setStrokingColor(0.42f, 0.32f, 0.05f)
+        stream.setLineWidth(1f)
+        stream.setLineJoinStyle(1)
+        stream.moveTo(2.5f, 19.5f)
+        stream.lineTo(19.5f, 19.5f)
+        stream.lineTo(19.5f, 6.5f)
+        stream.lineTo(10f, 6.5f)
+        stream.lineTo(5f, 2f)
+        stream.lineTo(6f, 6.5f)
+        stream.lineTo(2.5f, 6.5f)
+        stream.closePath()
+        stream.fillAndStroke()
+        stream.setLineWidth(1.2f)
+        for (y in listOf(15.5f, 12.5f, 9.5f)) {
+            stream.moveTo(5.5f, y)
+            stream.lineTo(16.5f, y)
+        }
+        stream.stroke()
+    }
+
+    /** Changes a comment's text; empty text deletes the comment. */
+    fun updateComment(file: File, pageIndex: Int, id: String, text: String) {
+        val words = text.trim()
+        if (words.isEmpty()) return deleteMark(file, pageIndex, id)
+        edit(file) { document ->
+            val annotation = document.getPage(pageIndex).annotation(id) ?: throw PdfException("This comment is no longer in the document.")
+            if (Annotations.kind(annotation) != MarkKind.Comment) throw PdfException("This is not a comment.")
+            annotation.contents = words
+            annotation.setModifiedDate(java.util.Calendar.getInstance())
+        }
+    }
+
+    fun commentText(file: File, pageIndex: Int, id: String): String = PDDocument.load(file, memory()).use { document ->
+        document.getPage(pageIndex).annotation(id)?.contents.orEmpty()
+    }
+
     /** The marks on a page that PDFoundry can select: every annotation of a kind it makes, its own or not. */
     fun marks(file: File, pageIndex: Int): List<MarkInfo> = PDDocument.load(file, memory()).use { document ->
         if (pageIndex !in 0 until document.numberOfPages) return@use emptyList()

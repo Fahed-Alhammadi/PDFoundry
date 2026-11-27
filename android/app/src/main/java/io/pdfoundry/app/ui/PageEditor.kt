@@ -80,6 +80,10 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import io.pdfoundry.app.app
 import io.pdfoundry.app.data.InkStroke
+import io.pdfoundry.app.data.PdfEngine
+import io.pdfoundry.app.data.ShapeKind
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import io.pdfoundry.app.data.PagePoint
 import io.pdfoundry.app.data.TextMark
 import io.pdfoundry.app.data.TextWord
@@ -110,7 +114,9 @@ fun PageEditor(
     onCancel: () -> Unit,
     onInk: (List<InkStroke>) -> Unit,
     onPlace: (Bitmap, RectF) -> Unit,
-    onMarkText: (List<LineArea>) -> Unit = {}
+    onMarkText: (List<LineArea>) -> Unit = {},
+    onShape: (ShapeKind, PagePoint, PagePoint, Int) -> Unit = { _, _, _, _ -> },
+    onComment: (PagePoint, String) -> Unit = { _, _ -> }
 ) {
     val source = state.source ?: return
     val pageSize = state.sizes.getOrNull(pageIndex) ?: Size(612, 792)
@@ -128,6 +134,10 @@ fun PageEditor(
     var centerY by remember { mutableFloatStateOf(0.5f) }
     var widthFraction by remember { mutableFloatStateOf((mode as? EditMode.Place)?.width ?: 0.45f) }
     var boxSize by remember { mutableStateOf(Offset(1f, 1f)) }
+    // A shape being dragged out, in pixels on the page; a comment's spot waiting for its text.
+    var shapeStart by remember { mutableStateOf<Offset?>(null) }
+    var shapeEnd by remember { mutableStateOf<Offset?>(null) }
+    var commentAt by remember { mutableStateOf<Offset?>(null) }
 
     val title = when (mode) {
         is EditMode.Ink -> "Draw"
@@ -137,6 +147,8 @@ fun PageEditor(
             TextMark.Underline -> "Underline"
             TextMark.Strikethrough -> "Strikethrough"
         }
+        is EditMode.Shape -> mode.kind.label
+        EditMode.Comment -> "Comment"
     }
 
     Scaffold(
@@ -171,6 +183,9 @@ fun PageEditor(
                         }) { Text("Place") }
                         // Lifting the finger applies the mark: nothing to confirm.
                         is EditMode.TextMark -> Unit
+                        // Each shape is added when the finger lifts; Done leaves.
+                        is EditMode.Shape -> TextButton(onClick = onCancel) { Text("Done") }
+                        EditMode.Comment -> Unit
                     }
                 }
             )
@@ -195,6 +210,8 @@ fun PageEditor(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = androidx.compose.ui.text.style.TextAlign.Center
                         )
+                        is EditMode.Shape -> Text("Drag on the page to draw. Draw as many as you like, then tap Done.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                        EditMode.Comment -> Text("Tap where the comment goes.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
@@ -245,6 +262,59 @@ fun PageEditor(
                             }
                         }
                     }
+                    is EditMode.Shape -> {
+                        val color = Color(mode.argb).copy(alpha = 1f)
+                        val strokePx = PdfEngine.SHAPE_WIDTH * widthPx / pageSize.width
+                        Canvas(
+                            Modifier.fillMaxSize().pointerInput(mode) {
+                                detectDragGestures(
+                                    onDragStart = { shapeStart = it; shapeEnd = it },
+                                    onDragEnd = {
+                                        val start = shapeStart
+                                        val end = shapeEnd
+                                        shapeStart = null
+                                        shapeEnd = null
+                                        if (start != null && end != null) {
+                                            onShape(mode.kind, PagePoint(start.x / boxSize.x, start.y / boxSize.y), PagePoint(end.x / boxSize.x, end.y / boxSize.y), mode.argb)
+                                        }
+                                    },
+                                    onDragCancel = { shapeStart = null; shapeEnd = null },
+                                    onDrag = { change, _ -> shapeEnd = Offset(change.position.x.coerceIn(0f, widthPx), change.position.y.coerceIn(0f, heightPx)) }
+                                )
+                            }.semantics { contentDescription = "Page. Drag to draw a ${mode.kind.label.lowercase()}." }
+                        ) {
+                            val start = shapeStart ?: return@Canvas
+                            val end = shapeEnd ?: return@Canvas
+                            val topLeft = Offset(minOf(start.x, end.x), minOf(start.y, end.y))
+                            val size = androidx.compose.ui.geometry.Size(kotlin.math.abs(end.x - start.x), kotlin.math.abs(end.y - start.y))
+                            val stroke = Stroke(strokePx, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                            when (mode.kind) {
+                                ShapeKind.Rectangle -> drawRect(color, topLeft, size, style = stroke)
+                                ShapeKind.Ellipse -> drawOval(color, topLeft, size, style = stroke)
+                                ShapeKind.Line, ShapeKind.Arrow -> {
+                                    drawLine(color, start, end, strokePx, cap = StrokeCap.Round)
+                                    if (mode.kind == ShapeKind.Arrow) {
+                                        val head = 10f * widthPx / pageSize.width
+                                        val angle = kotlin.math.atan2(end.y - start.y, end.x - start.x)
+                                        for (side in listOf(-1, 1)) {
+                                            val a = angle + side * Math.toRadians(30.0).toFloat()
+                                            drawLine(color, end, Offset(end.x - head * kotlin.math.cos(a), end.y - head * kotlin.math.sin(a)), strokePx, cap = StrokeCap.Round)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    EditMode.Comment -> Box(
+                        Modifier.fillMaxSize()
+                            .pointerInput(Unit) { detectTapGestures { commentAt = it } }
+                            .semantics { contentDescription = "Page. Tap where the comment goes." }
+                    ) {
+                        commentAt?.let { at ->
+                            val density = LocalDensity.current
+                            Icon(Icons.Outlined.ChatBubbleOutline, null, tint = Color(0xFF8A6A00), modifier = Modifier.offset { IntOffset((at.x - 12 * density.density).roundToInt(), (at.y - 12 * density.density).roundToInt()) }.size(24.dp))
+                        }
+                    }
                     is EditMode.Place -> {
                         val imageAspect = mode.image.width.toFloat() / mode.image.height
                         val itemWidth = widthFraction * widthPx
@@ -286,6 +356,39 @@ fun PageEditor(
             }
         }
     }
+
+    commentAt?.let { at ->
+        var text by remember(at) { mutableStateOf("") }
+        CommentDialog(title = "Add comment", text = text, onText = { text = it }, onDismiss = { commentAt = null }, onDone = {
+            commentAt = null
+            onComment(PagePoint(at.x / boxSize.x, at.y / boxSize.y), text)
+        })
+    }
+}
+
+/** Typing a comment: Done saves it (disabled while empty), Cancel leaves it. [onDelete] adds a Delete button. */
+@Composable
+fun CommentDialog(title: String, text: String, onText: (String) -> Unit, onDismiss: () -> Unit, onDone: () -> Unit, onDelete: (() -> Unit)? = null) {
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            androidx.compose.material3.OutlinedTextField(
+                value = text,
+                onValueChange = onText,
+                label = { Text("Comment") },
+                minLines = 3,
+                modifier = Modifier.fillMaxWidth()
+            )
+        },
+        confirmButton = { TextButton(enabled = text.isNotBlank(), onClick = onDone) { Text("Done") } },
+        dismissButton = {
+            Row {
+                if (onDelete != null) TextButton(onClick = onDelete) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+            }
+        }
+    )
 }
 
 @Composable

@@ -380,4 +380,95 @@ class AnnotationTest {
         PdfEngine.deleteMark(file, 0, mark.id)
         assertEquals(0, PDDocument.load(file).use { it.getPage(0).annotations.size })
     }
+
+    // Shapes and comments ------------------------------------------------------------------------
+
+    @Test
+    fun shapesAreRealAnnotations() {
+        val file = makePdf("Shapes", text = "")
+        val ember = Color.rgb(226, 81, 27)
+        PdfEngine.shape(file, 0, io.pdfoundry.app.data.ShapeKind.Rectangle, PagePoint(0.1f, 0.1f), PagePoint(0.4f, 0.3f), Color.RED)
+        PdfEngine.shape(file, 0, io.pdfoundry.app.data.ShapeKind.Ellipse, PagePoint(0.5f, 0.1f), PagePoint(0.9f, 0.3f), ember)
+        PdfEngine.shape(file, 0, io.pdfoundry.app.data.ShapeKind.Line, PagePoint(0.1f, 0.5f), PagePoint(0.9f, 0.5f), Color.RED)
+        PdfEngine.shape(file, 0, io.pdfoundry.app.data.ShapeKind.Arrow, PagePoint(0.1f, 0.7f), PagePoint(0.9f, 0.8f), Color.RED)
+        // A tap is not a shape.
+        PdfEngine.shape(file, 0, io.pdfoundry.app.data.ShapeKind.Rectangle, PagePoint(0.5f, 0.5f), PagePoint(0.5f, 0.5f), Color.RED)
+
+        PDDocument.load(file).use { document ->
+            val annotations = document.getPage(0).annotations
+            assertEquals(listOf("Square", "Circle", "Line", "Line"), annotations.map { it.subtype })
+            for (a in annotations) {
+                assertTrue(Annotations.isOurs(a))
+                assertNotNull(a.normalAppearanceStream)
+                val border = a.cosObject.getDictionaryObject(COSName.BS) as com.tom_roush.pdfbox.cos.COSDictionary
+                assertEquals(2f, border.getFloat(COSName.W), 0.001f)
+                assertEquals(null, a.cosObject.getDictionaryObject(COSName.IC))
+            }
+            val ellipseColor = annotations[1].color.components
+            assertEquals(226 / 255f, ellipseColor[0], 0.01f); assertEquals(81 / 255f, ellipseColor[1], 0.01f)
+            fun ends(i: Int) = (annotations[i].cosObject.getDictionaryObject(COSName.LE) as com.tom_roush.pdfbox.cos.COSArray).map { (it as COSName).name }
+            assertEquals(listOf("None", "None"), ends(2))
+            assertEquals(listOf("None", "OpenArrow"), ends(3))
+            val line = (annotations[2].cosObject.getDictionaryObject(COSName.L) as com.tom_roush.pdfbox.cos.COSArray).toFloatArray()
+            assertEquals(0.1f * 612, line[0], 0.5f); assertEquals(0.5f * 792, line[1], 0.5f)
+            assertEquals(0.9f * 612, line[2], 0.5f)
+        }
+        assertEquals(listOf(MarkKind.Rectangle, MarkKind.Ellipse, MarkKind.Line, MarkKind.Arrow), PdfEngine.marks(file, 0).map { it.kind })
+        assertTrue(PdfEngine.marks(file, 0).all { it.movable })
+        // Drawn by the reader: the rectangle's outline, not its middle.
+        val page = render(file)
+        assertTrue("the rectangle's edge is drawn", isRed(page.getPixel((0.25f * page.width).toInt(), (0.1f * page.height).toInt() + 0)) ||
+            isRed(page.getPixel((0.25f * page.width).toInt(), (0.1f * page.height).toInt() + 1)))
+        assertEquals("no fill", Color.WHITE, page.getPixel((0.25f * page.width).toInt(), (0.2f * page.height).toInt()))
+        assertNear(0.5f to 0.5f, run {
+            // Only the line's band of the page.
+            val band = Bitmap.createBitmap(page, 0, (0.45f * page.height).toInt(), page.width, (0.1f * page.height).toInt())
+            band.centre(::isRed)?.let { it.first to 0.45f + it.second * 0.1f }
+        }, "the line")
+    }
+
+    @Test
+    fun shapesOnRotatedCroppedPage() {
+        val file = makeTurnedCropped("Turned shapes")
+        PdfEngine.shape(file, 0, io.pdfoundry.app.data.ShapeKind.Ellipse, PagePoint(0.6f, 0.2f), PagePoint(0.9f, 0.5f), Color.RED)
+        assertNear(0.75f to 0.35f, render(file).centre(::isRed), "the ellipse")
+        val rect = PdfEngine.marks(file, 0).single().rect
+        assertEquals(0.6f, rect.left, 0.002f); assertEquals(0.5f, rect.bottom, 0.002f)
+    }
+
+    @Test
+    fun commentRoundTripIncludingArabic() {
+        val file = makePdf("Comments", text = "")
+        val arabic = "مرحبا بالعالم"
+        val id = PdfEngine.comment(file, 0, PagePoint(0.5f, 0.5f), arabic)
+        assertNotNull(id)
+
+        PDDocument.load(file).use { document ->
+            val note = document.getPage(0).annotations.single()
+            assertEquals("Text", note.subtype)
+            assertEquals(arabic, note.contents)
+            assertEquals("Comment", note.cosObject.getNameAsString(COSName.NAME))
+            assertNotNull(note.normalAppearanceStream)
+            assertTrue(Annotations.isOurs(note))
+        }
+        assertEquals(arabic, PdfEngine.commentText(file, 0, id!!))
+        val mark = PdfEngine.marks(file, 0).single()
+        assertEquals(MarkKind.Comment, mark.kind)
+        assertEquals(0.5f, mark.rect.centerX(), 0.01f)
+        assertNotNull("the note icon is drawn", render(file).centre { Color.red(it) > 200 && Color.green(it) in 150..230 && Color.blue(it) < 120 })
+
+        PdfEngine.updateComment(file, 0, id, "Second thoughts")
+        assertEquals("Second thoughts", PdfEngine.commentText(file, 0, id))
+        // Emptying a comment deletes it.
+        PdfEngine.updateComment(file, 0, id, "  ")
+        assertEquals(emptyList<Any>(), PdfEngine.marks(file, 0))
+    }
+
+    @Test
+    fun emptyCommentIsNotCreated() {
+        val file = makePdf("No comment", text = "")
+        val before = file.readBytes()
+        assertEquals(null, PdfEngine.comment(file, 0, PagePoint(0.5f, 0.5f), "   "))
+        assertTrue("the file is not touched", before.contentEquals(file.readBytes()))
+    }
 }

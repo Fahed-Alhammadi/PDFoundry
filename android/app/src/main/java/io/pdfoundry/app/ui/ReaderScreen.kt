@@ -101,6 +101,9 @@ import io.pdfoundry.app.data.FieldKind
 import io.pdfoundry.app.data.FormField
 import io.pdfoundry.app.data.InkStroke
 import io.pdfoundry.app.data.MarkInfo
+import io.pdfoundry.app.data.MarkKind
+import io.pdfoundry.app.data.PagePoint
+import io.pdfoundry.app.data.ShapeKind
 import io.pdfoundry.app.data.bitmap
 import io.pdfoundry.app.data.todayText
 import io.pdfoundry.app.data.PdfEngine
@@ -129,6 +132,10 @@ sealed interface EditMode {
     data class Place(val image: Bitmap, val label: String, val width: Float = 0.45f) : EditMode
     /** Words are being selected for a highlight, underline or strikethrough. */
     data class TextMark(val mark: io.pdfoundry.app.data.TextMark, val argb: Int) : EditMode
+    /** Shapes are dragged out one after another until Done. */
+    data class Shape(val kind: ShapeKind, val argb: Int) : EditMode
+    /** A tap places a comment, then its text is typed. */
+    data object Comment : EditMode
 }
 
 /** A selected mark and the page it is on. */
@@ -534,6 +541,29 @@ class ReaderState(
         edit { PdfEngine.deleteMark(it, current.page, current.mark.id) }
     }
 
+    /** Adds a shape on the page being edited; the shape tool stays in use (one Undo step per shape). */
+    fun addShape(kind: ShapeKind, from: PagePoint, to: PagePoint, argb: Int) {
+        val page = editPage
+        edit { PdfEngine.shape(it, page, kind, from, to, argb) }
+    }
+
+    /** Places a comment with [text] at [at] on the page being edited; an empty comment is not created. */
+    fun addComment(at: PagePoint, text: String) {
+        val page = editPage
+        editMode = null
+        if (text.isNotBlank()) edit { PdfEngine.comment(it, page, at, text) }
+    }
+
+    /** Changes a comment's text; empty text deletes it. */
+    fun updateComment(page: Int, id: String, text: String) {
+        if (text.isBlank()) selected = null
+        edit { PdfEngine.updateComment(it, page, id, text) }
+    }
+
+    suspend fun commentText(page: Int, id: String): String = withContext(Dispatchers.IO) {
+        runCatching { PdfEngine.commentText(viewFile, page, id) }.getOrDefault("")
+    }
+
     /**
      * Fills in a form field (one Undo step), saved as the field's value. Nothing happens when the value
      * is unchanged or the field can't be changed.
@@ -663,6 +693,8 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
     // The text dialog: null when closed, otherwise what it starts with ("" for Text, today's date for Date).
     var textDraft by remember { mutableStateOf<TextDraft?>(null) }
     var showSearch by remember { mutableStateOf(false) }
+    // The comment open for reading or editing: its page and mark.
+    var openComment by remember { mutableStateOf<Pair<Int, MarkInfo>?>(null) }
     var menu by remember { mutableStateOf(false) }
     var confirmRevert by remember { mutableStateOf(false) }
     var askPassword by remember { mutableStateOf(false) }
@@ -702,7 +734,9 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
             onCancel = { state.cancelEdit() },
             onInk = { strokes: List<InkStroke> -> state.finishInk(strokes) },
             onPlace = { image: Bitmap, rect: RectF -> state.place(image, rect) },
-            onMarkText = { areas -> if (editing is EditMode.TextMark) state.markText(areas.map { it.rect }, editing.mark, editing.argb, areas.map { it.lower }) }
+            onMarkText = { areas -> if (editing is EditMode.TextMark) state.markText(areas.map { it.rect }, editing.mark, editing.argb, areas.map { it.lower }) },
+            onShape = { kind, from, to, argb -> state.addShape(kind, from, to, argb) },
+            onComment = { at, text -> state.addComment(at, text) }
         )
         return
     }
@@ -779,6 +813,8 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
                         onTextMark = { mark, argb -> begin(EditMode.TextMark(mark, argb)) },
                         onText = { textDraft = TextDraft("Add text", "") },
                         onDraw = { begin(EditMode.Ink(highlighter = false)) },
+                        onShape = { kind, argb -> begin(EditMode.Shape(kind, argb)) },
+                        onComment = { begin(EditMode.Comment) },
                         onSignature = { picking = SignatureKind.Signature },
                         onInitials = { picking = SignatureKind.Initials },
                         onDate = { textDraft = TextDraft("Add date", todayText()) },
@@ -800,7 +836,7 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
                 }
                 source == null -> CircularProgressIndicator(Modifier.align(Alignment.Center))
                 else -> {
-                    PageList(state, source, listState, onFieldText = { typingField = it }, onFieldSign = { signingField = it })
+                    PageList(state, source, listState, onFieldText = { typingField = it }, onFieldSign = { signingField = it }, onOpenComment = { page, mark -> openComment = page to mark })
                     Surface(shape = RoundedCornerShape(50), tonalElevation = 6.dp, shadowElevation = 2.dp, modifier = Modifier.align(Alignment.BottomStart).padding(12.dp)) {
                         Text("${currentPage + 1} of ${state.pageCount}", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
                     }
@@ -892,6 +928,25 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
                 if (kind == SignatureKind.Initials) begin(EditMode.Place(image, "initials", width = 0.18f)) else begin(EditMode.Place(image, "signature"))
             })
         }
+    }
+
+    openComment?.let { (page, mark) ->
+        var text by remember(mark.id) { mutableStateOf("") }
+        LaunchedEffect(mark.id) { text = state.commentText(page, mark.id) }
+        CommentDialog(
+            title = "Comment",
+            text = text,
+            onText = { text = it },
+            onDismiss = { openComment = null },
+            onDone = {
+                openComment = null
+                state.updateComment(page, mark.id, text)
+            },
+            onDelete = {
+                openComment = null
+                state.updateComment(page, mark.id, "")
+            }
+        )
     }
 
     if (showSearch) {
