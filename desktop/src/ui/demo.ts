@@ -1013,6 +1013,32 @@ async function redactionTest(check: Check, app: App): Promise<void> {
   await closing;
 }
 
+/**
+ * The share of what the reader shows inside `rect` (page fractions) of a page that passes `test`: the page picture
+ * and the marks' own canvases laid over it, composited as on screen.
+ */
+function onScreen(pageEl: HTMLElement, rect: Box, test: (r: number, g: number, b: number) => boolean): number {
+  const box = pageEl.getBoundingClientRect();
+  const probe = document.createElement('canvas');
+  probe.width = Math.max(1, Math.round(rect.width * box.width));
+  probe.height = Math.max(1, Math.round(rect.height * box.height));
+  const ctx = probe.getContext('2d')!;
+  for (const c of pageEl.querySelectorAll<HTMLCanvasElement>('canvas.sheet, canvas.mark-canvas')) {
+    const r = c.getBoundingClientRect();
+    if (!r.width || !r.height) continue;
+    ctx.drawImage(c, 0, 0, c.width, c.height, r.left - box.left - rect.x * box.width, r.top - box.top - rect.y * box.height, r.width, r.height);
+  }
+  const { data } = ctx.getImageData(0, 0, probe.width, probe.height);
+  let hit = 0;
+  for (let i = 0; i < data.length; i += 4) if (data[i + 3] > 200 && test(data[i], data[i + 1], data[i + 2])) hit++;
+  return hit / (probe.width * probe.height);
+}
+
+/** Is a comment's yellow note drawn on the reader's page inside `rect`? */
+function noteOnScreen(pageEl: HTMLElement, rect: Box): boolean {
+  return onScreen(pageEl, rect, (r, g, b) => r > 200 && g > 170 && b < 140) > 0.2;
+}
+
 /** Selecting a mark (move, resize, Delete, Undo), Shapes and Comment, driven with pointer events and keys. */
 async function selectionTest(check: Check, app: App): Promise<void> {
   const reader = document.querySelector('.reader') as HTMLElement;
@@ -1134,6 +1160,32 @@ async function selectionTest(check: Check, app: App): Promise<void> {
   await settled();
   const note = (await marks()).find((m) => m.kind === 'comment');
   const saved = note ? await pdf.commentText(app.reader.data, 0, note.id) : '';
+  // The note shows on the page in the reader itself (not only in the saved file): its yellow icon is on screen.
+  await until(() => !!page().querySelector('canvas.mark-canvas'), 'the comment on the page').catch(() => undefined);
+  check('a placed comment shows on the page in the reader', !!note && noteOnScreen(page(), note.rect), JSON.stringify({ rect: note?.rect, canvases: page().querySelectorAll('canvas.mark-canvas').length, sections: [...page().querySelectorAll('.annotationLayer section')].map((s) => s.className), layers: page().querySelectorAll('.annotationLayer').length }));
+  // Every other kind shows on the reader's page too.
+  {
+    const before = app.reader.data;
+    await app.reader.change(async (b) => {
+      let out = await pdf.stamp(b, 0, await solid('#0000ff', 80, 40), { x: 0.05, y: 0.05, width: 0.15, height: 0.06 });
+      out = await pdf.ink(out, 0, [{ points: [{ x: 0.05, y: 0.9 }, { x: 0.3, y: 0.9 }], color: '#1a3fb0', width: 6 / 612 }]);
+      out = await pdf.shape(out, 0, 'ellipse', { x: 0.6, y: 0.85 }, { x: 0.8, y: 0.95 }, [0, 0, 0, 1]);
+      return pdf.markText(out, 0, [{ x: 0.5, y: 0.05, width: 0.3, height: 0.04 }], 'highlight', [1, 0.8, 0, 0.5]);
+    });
+    await until(() => app.reader.data !== before && !reader.classList.contains('busy'), 'the marks');
+    await wait(600);
+    const dark = (r: number, g: number, b: number) => r < 200 || g < 200 || b < 200;
+    const shown = {
+      stamp: onScreen(page(), { x: 0.07, y: 0.06, width: 0.1, height: 0.04 }, (r, g, b) => b > 180 && r < 80),
+      ink: onScreen(page(), { x: 0.1, y: 0.897, width: 0.15, height: 0.006 }, dark),
+      ellipse: onScreen(page(), { x: 0.6, y: 0.85, width: 0.2, height: 0.1 }, dark),
+      highlight: onScreen(page(), { x: 0.52, y: 0.06, width: 0.26, height: 0.02 }, (r, g, b) => r > 200 && b < 190),
+    };
+    check('stamps, drawings, shapes and highlights show on the page in the reader', shown.stamp > 0.8 && shown.ink > 0.5 && shown.ellipse > 0.02 && shown.highlight > 0.8, JSON.stringify(shown));
+    clickButton(dock, 'Undo');
+    await until(() => app.reader.data === before, 'the undo');
+    await settled();
+  }
   clickButton(dock, 'Close Markup');
   window.getSelection()?.removeAllRanges();
   if (note) clickAt(note.rect.x + note.rect.width / 2, note.rect.y + note.rect.height / 2);
