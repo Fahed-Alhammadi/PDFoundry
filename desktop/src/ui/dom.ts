@@ -85,6 +85,11 @@ const ICONS: Record<string, string> = {
   line: 'M5 19L19 5',
   arrow: 'M5 19L19 5 M11 5h8v8',
   redact: 'M3 6h18v5H3z M3 15h8 M14 15h7 M3 19h12',
+  numbers: 'M6 3h12v18H6z M10 17h4 M11 15.5l1-1v4',
+  watermark: 'M6 3h12v18H6z M8.5 15.5l7-7',
+  compress: 'M7 3h7l5 5v13H7z M10 10l2 2 2-2 M10 16l2-2 2 2',
+  exportImages: 'M4 5h11v10H4z M4 12l3-3 3 3 2-2 3 3 M18 9v10H8',
+  searchable: 'M5 4h9l5 5v11H5z M9 13h6 M9 16h4 M17.5 17.5l3 3 M15.5 18.5a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
 };
 
 export function icon(name: string, size = 20): SVGSVGElement {

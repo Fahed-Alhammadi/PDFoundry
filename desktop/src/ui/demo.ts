@@ -5,6 +5,8 @@ import { PDFDocument, StandardFonts, degrees, rgb } from '@cantoo/pdf-lib';
 import { api } from './api.ts';
 import type { AppInfo } from './api.ts';
 import { placedFromPng, rasterize, textImage, toPng } from './images.ts';
+import { exportImages } from './export.ts';
+import { compressSheet } from './pagetools.ts';
 import type { Library } from './library.ts';
 import { openPdf, renderPage, search } from './pdfview.ts';
 import type { Reader } from './reader.ts';
@@ -340,6 +342,7 @@ async function interfaceTest(checks: { name: string; pass: boolean; detail?: str
   await modesTest(check, app);
   await selectionTest(check, app);
   await redactionTest(check, app);
+  await pageToolsTest(check, app);
   await toolsTest(check, app);
   await fillSignTest(check, app);
   await splitTest(check, app);
@@ -636,6 +639,110 @@ async function toolsTest(check: (name: string, pass: boolean, detail?: string) =
 }
 
 type Check = (name: string, pass: boolean, detail?: string) => void;
+
+/** Page Numbers and Watermark on the open document, Compress and Export as Images on a file. */
+async function pageToolsTest(check: Check, app: App): Promise<void> {
+  const reader = document.querySelector('.reader') as HTMLElement;
+  const dock = reader.querySelector('.dock')!;
+  const settled = () => until(() => !reader.classList.contains('busy') && !!dock.querySelector('.tool'), 'the change to be applied');
+  const sheet = (name: string) => document.querySelector<HTMLElement>(`.dialog.${name}`);
+  const made = await PDFDocument.create();
+  made.addPage([612, 792]);
+  made.addPage([612, 792]).setRotation(degrees(90));
+  const file = await api.devCreate('Page tools test', await made.save());
+  await app.reader.open(file);
+  await until(() => reader.querySelectorAll('.page').length === 2, 'the page tools sample');
+  const opened = app.reader.data;
+
+  // Page Numbers: "Page 1 of 2" format, bottom centre, also on the turned page.
+  void app.reader.pageNumbers();
+  await until(() => !!sheet('page-numbers')?.querySelector('.preview-number'), 'the Page Numbers sheet');
+  const format = sheet('page-numbers')!.querySelector('select[aria-label="Format"]') as HTMLSelectElement;
+  format.value = 'page-n-of-total';
+  format.dispatchEvent(new Event('input', { bubbles: true }));
+  const previewed = sheet('page-numbers')!.querySelector('.preview-number')!.textContent;
+  clickButton(sheet('page-numbers')!, 'Add');
+  await until(() => app.reader.data !== opened, 'the page numbers');
+  await settled();
+  const numbered = app.reader.data;
+  let doc = await openPdf(numbered);
+  const second = (await search(doc, 'Page 2 of 2')).find((m) => m.page === 1)?.rects[0];
+  void doc.loadingTask.destroy();
+  check('Page Numbers previews and numbers every page at the foot of the page as shown', previewed === 'Page 1 of 2' && !!second && second.y > 0.9 && Math.abs(second.x + second.width / 2 - 0.5) < 0.03 && app.reader.dirty,
+    JSON.stringify({ previewed, second }));
+
+  // Watermark in Arabic: drawn by the window (shaped), see-through, in the middle of the page.
+  void app.reader.watermark();
+  await until(() => !!sheet('watermark'), 'the Watermark sheet');
+  typeInto(sheet('watermark')!.querySelector('input[aria-label="Watermark text"]') as HTMLInputElement, 'سري للغاية');
+  clickButton(sheet('watermark')!, 'Add');
+  await until(() => app.reader.data !== numbered, 'the watermark');
+  await settled();
+  const px = await pixels(app.reader.data, 0);
+  let inked = 0;
+  for (let x = 0.2; x < 0.8; x += 0.01) for (let y = 0.3; y < 0.7; y += 0.01) if (px.at(x, y)[0] < 235) inked++;
+  const corner = px.at(0.05, 0.05);
+  check('an Arabic watermark is drawn across the middle, see-through', inked > 40 && corner[0] > 245 && px.at(0.5, 0.5)[0] > 60, JSON.stringify({ inked }));
+  clickButton(dock, 'Undo');
+  await until(() => app.reader.data === numbered, 'the undo');
+  await settled();
+  clickButton(dock, 'Undo');
+  await until(() => app.reader.data === opened, 'the second undo');
+  await settled();
+  check('Undo takes the watermark and the numbers off again', !app.reader.dirty);
+  await app.reader.close();
+
+  // Compress: a file with a photo-like picture; the copy is smaller, the source is not changed.
+  const canvas = document.createElement('canvas');
+  canvas.width = 1200;
+  canvas.height = 900;
+  const ctx = canvas.getContext('2d')!;
+  const noise = ctx.createImageData(1200, 900);
+  for (let i = 0; i < noise.data.length; i++) noise.data[i] = i % 4 === 3 ? 255 : (Math.random() * 255) | 0;
+  ctx.putImageData(noise, 0, 0);
+  const photo = await pdf.imagesToPdf([{ bytes: await toPng(canvas), type: 'png' }]);
+  const source = await api.devCreate('Compress source', photo);
+  const folder = source.replace(/[\\/][^\\/]+$/, '');
+  const target = `${folder}/Compress source (compressed).pdf`;
+  await api.devAnswer({ save: target });
+  const compressing = compressSheet({ name: 'Compress source', path: source, bytes: photo });
+  await until(() => !!sheet('compress'), 'the Compress sheet');
+  clickButton(sheet('compress')!, 'Compress');
+  await until(() => /Saved|small|could/.test(sheet('compress')?.querySelector('.split-status')?.textContent ?? ''), 'the compressed copy');
+  const said = sheet('compress')!.querySelector('.split-status')!.textContent;
+  clickButton(sheet('compress')!, 'Done');
+  const savedAt = await compressing;
+  const small = savedAt ? await api.devRead(savedAt) : new Uint8Array();
+  doc = await openPdf(small);
+  const pagesThere = doc.numPages;
+  void doc.loadingTask.destroy();
+  check('Compress saves a smaller copy and leaves the source alone', savedAt === target && small.length < photo.length * 0.6 && pagesThere === 1
+    && sameBytes(await api.devRead(source), photo), JSON.stringify({ said, from: photo.length, to: small.length }));
+  const plain = await api.devCreate('Compress plain', await pdf.welcomeGuide());
+  void compressSheet({ name: 'Compress plain', path: plain, bytes: await api.devRead(plain) });
+  await until(() => !!sheet('compress'), 'the Compress sheet');
+  clickButton(sheet('compress')!, 'Compress');
+  await until(() => /small as it can be/.test(sheet('compress')?.querySelector('.split-status')?.textContent ?? ''), 'the no-gain message');
+  check('Compress says when a file is already as small as it can be', sheet('compress')!.querySelector('.split-status')!.textContent === 'This file is already as small as it can be.');
+  clickButton(sheet('compress')!, 'Cancel');
+
+  // Export as Images: three Letter pages at 300 dpi, as PNGs named so they sort.
+  const three = await blank(612, 792, 3);
+  const exportSource = await api.devCreate('Export source', three);
+  await api.devAnswer({ folder });
+  const exporting = exportImages({ name: 'Export source', path: exportSource, bytes: three });
+  await until(() => !!sheet('export'), 'the Export sheet');
+  const print = sheet('export')!.querySelector('input[value="300"]') as HTMLInputElement;
+  print.checked = true;
+  print.dispatchEvent(new Event('change', { bubbles: true }));
+  clickButton(sheet('export')!, 'Export');
+  const written = (await exporting) ?? [];
+  const first = written[0] ? await api.devRead(written[0]) : new Uint8Array(24);
+  const view = new DataView(first.buffer, first.byteOffset, first.byteLength);
+  const size = [view.getUint32(16), view.getUint32(20)];
+  check('Export as Images saves each page as a picture, named in order, at 300 dpi', written.map((f) => f.replace(/^.*[\\/]/, '')).join('|') === 'Export source page 1.png|Export source page 2.png|Export source page 3.png'
+    && size[0] === 2550 && size[1] === 3300 && sameBytes(await api.devRead(exportSource), three), JSON.stringify({ written, size }));
+}
 
 /** Markup › Redact: areas by dragging and by selecting text, the questions, Apply, and what is left in the file. */
 async function redactionTest(check: Check, app: App): Promise<void> {
@@ -974,8 +1081,13 @@ async function fillSignTest(check: Check, app: App): Promise<void> {
   // Undo takes back the field change, as one step.
   clickButton(dock, 'Undo');
   await until(() => !reader.classList.contains('busy'), 'the undo');
-  await wait(300);
-  const undone = (await pdf.fields(app.reader.data)).find((f) => f.name === 'arabic')?.value;
+  // Undo first waits for field changes still being written, so give it time (up to 5 s) before reading the result.
+  let undone: unknown;
+  for (let i = 0; i < 50; i++) {
+    await wait(100);
+    undone = (await pdf.fields(app.reader.data)).find((f) => f.name === 'arabic')?.value;
+    if (undone === '' && !reader.classList.contains('busy')) break;
+  }
   // The page's fields are redrawn after Undo; on a slow machine the old inputs are still there for a moment, so wait
   // for the redrawn (emptied) field. If it never empties, the check below fails with the details.
   await until(() => input('arabic')?.value === '', 'the redrawn fields').catch(() => undefined);

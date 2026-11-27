@@ -32,7 +32,7 @@ child.on('exit', () => {
     const { checks, error } = JSON.parse(readFileSync(result, 'utf8'));
     for (const c of checks) console.log(`${c.pass ? 'ok  ' : 'FAIL'} ${c.name}${c.pass || !c.detail ? '' : `\n     ${c.detail}`}`);
     if (error) console.error(error);
-    failed = !!error || checks.some((c) => !c.pass) || (!shots && !reopen && checks.length < 77);
+    failed = !!error || checks.some((c) => !c.pass) || (!shots && !reopen && checks.length < 83);
     console.log(failed ? 'Self-test failed.' : `${checks.length} checks passed.`);
   } else console.error('The app closed without a result.');
   rmSync(work, { recursive: true, force: true });

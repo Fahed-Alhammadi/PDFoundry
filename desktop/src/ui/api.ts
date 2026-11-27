@@ -1,5 +1,5 @@
 // The window's typed view of the main process (handlers in src/main/main.ts).
-import type { InkKind, RecentFile, Settings } from '../main/store.ts';
+import type { InkKind, PartExtension, RecentFile, Settings } from '../main/store.ts';
 import type { UpdateState } from '../main/updater.ts';
 
 export type { InkKind, RecentFile, Settings, UpdateState };
@@ -49,9 +49,9 @@ export const api = {
   },
   /** Split PDF: asks for a folder for the parts. Only a folder picked here can be written to. Null when cancelled. */
   pickFolder: (): Promise<string | null> => bridge.call('pickFolder'),
-  partsExisting: (folder: string, names: string[]): Promise<string[]> => bridge.call('partsExisting', folder, names),
-  saveParts: (folder: string, parts: { name: string; bytes: Uint8Array }[], keepBoth: boolean, keep: string[] = []): Promise<string[]> =>
-    bridge.call('saveParts', folder, parts, keepBoth, keep),
+  partsExisting: (folder: string, names: string[], extension: PartExtension = 'pdf'): Promise<string[]> => bridge.call('partsExisting', folder, names, extension),
+  saveParts: (folder: string, parts: { name: string; bytes: Uint8Array }[], keepBoth: boolean, keep: string[] = [], extension: PartExtension = 'pdf'): Promise<string[]> =>
+    bridge.call('saveParts', folder, parts, keepBoth, keep, extension),
   forget: (file: string): Promise<void> => bridge.call('forget', file),
   clearRecent: (): Promise<void> => bridge.call('clearRecent'),
   reveal: (file: string): Promise<void> => bridge.call('reveal', file),

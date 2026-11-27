@@ -16,7 +16,7 @@ import { pathToFileURL } from 'node:url';
 import { BrowserWindow, Menu, app, dialog, ipcMain, nativeTheme, net, protocol, session, shell } from 'electron';
 import type { MenuItemConstructorOptions } from 'electron';
 import { Store, cleanName } from './store.ts';
-import type { InkKind, Settings } from './store.ts';
+import type { InkKind, PartExtension, Settings } from './store.ts';
 import { REPO, Updater } from './updater.ts';
 import { welcomeGuide } from '../core/pdf.ts';
 
@@ -203,14 +203,15 @@ const handlers: Record<string, Handler> = {
     return path.resolve(folder);
   },
   /** Which of Split's part names are taken in the picked folder. */
-  partsExisting: (folder: string, names: string[]) => store.existing(pickedFolder(folder), Array.isArray(names) ? names.filter((n) => typeof n === 'string') : []),
+  partsExisting: (folder: string, names: string[], extension?: unknown) =>
+    store.existing(pickedFolder(folder), Array.isArray(names) ? names.filter((n) => typeof n === 'string') : [], (extension ?? 'pdf') as PartExtension),
   /**
    * Writes Split's parts into the picked folder; `keepBoth` numbers names that are taken. The store itself refuses to
    * write over `keep` (the source), the open document and every recent file. The parts are not listed.
    */
-  saveParts: (folder: string, parts: { name: string; bytes: Uint8Array }[], keepBoth: boolean, keep?: string[]) => {
+  saveParts: (folder: string, parts: { name: string; bytes: Uint8Array }[], keepBoth: boolean, keep?: string[], extension?: unknown) => {
     if (!Array.isArray(parts) || !parts.every((p) => p && typeof p.name === 'string' && p.bytes instanceof Uint8Array)) throw new Error('There is nothing to save.');
-    return store.saveParts(pickedFolder(folder), parts, keepBoth === true, Array.isArray(keep) ? keep.filter((k) => typeof k === 'string') : []);
+    return store.saveParts(pickedFolder(folder), parts, keepBoth === true, Array.isArray(keep) ? keep.filter((k) => typeof k === 'string') : [], (extension ?? 'pdf') as PartExtension);
   },
   forget: (file: string) => store.forget(file),
   clearRecent: () => {

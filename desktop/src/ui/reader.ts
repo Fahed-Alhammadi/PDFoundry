@@ -24,6 +24,8 @@ import * as pdf from '../core/pdf.ts';
 import type { FieldInfo, FieldValue, MarkInfo, PagePoint, PageRect, Rgba, ShapeKind, TextMark } from '../core/pdf.ts';
 import { joinBoxes } from '../core/rects.ts';
 import { redact } from '../core/redaction.ts';
+import { addPageNumbers, addWatermark } from '../core/pagestamps.ts';
+import { pageNumbersSheet, watermarkPng, watermarkSheet } from './pagetools.ts';
 import type { TextDirection } from '../core/rects.ts';
 
 const UNDO_STEPS = 10;
@@ -1689,6 +1691,10 @@ export class Reader {
   private moreMenu(): MenuItem[] {
     return [
       { label: 'Organize pages', icon: 'pages', action: () => this.organize() },
+      ...(this.editable ? [
+        { label: 'Page Numbers…', icon: 'numbers', action: () => void this.pageNumbers() },
+        { label: 'Watermark…', icon: 'watermark', action: () => void this.watermark() },
+      ] : []),
       'separator',
       { label: 'Save', icon: 'save', disabled: !this.dirty, action: () => void this.save() },
       { label: 'Save As…', icon: 'copy', action: () => void this.saveAs() },
@@ -1702,6 +1708,39 @@ export class Reader {
       'separator',
       { label: 'Close document', icon: 'close', action: () => void this.close() },
     ];
+  }
+
+  /** Page Numbers (More menu, Tools › Enhance): the sheet, then one change to the open document. */
+  async pageNumbers(): Promise<boolean> {
+    if (!(await this.readyForPageTool())) return false;
+    const style = await pageNumbersSheet(this.bytes, this.sizes.length);
+    if (!style) return false;
+    return this.change((bytes) => addPageNumbers(bytes, style), 'Page numbers were added.');
+  }
+
+  /** Watermark (More menu, Tools › Enhance): the sheet, then one change. Text the PDF font can't write is drawn here. */
+  async watermark(): Promise<boolean> {
+    if (!(await this.readyForPageTool())) return false;
+    const style = await watermarkSheet(this.bytes);
+    if (!style) return false;
+    const image = pdf.canEncode(style.text) ? undefined : await watermarkPng(style);
+    return this.change((bytes) => addWatermark(bytes, style, image), 'The watermark was added.');
+  }
+
+  /** Before a tool that changes every page: an editable document, nothing half placed, field changes written. */
+  private async readyForPageTool(): Promise<boolean> {
+    if (!this.doc || this.busy) return false;
+    if (!this.editable) {
+      toast('This PDF is protected, so it can only be read.', true);
+      return false;
+    }
+    if (this.ink || this.placement) {
+      toast('Finish what you are placing or drawing first.', true);
+      return false;
+    }
+    await this.commitFields();
+    await this.fresh();
+    return true;
   }
 
   async organize(): Promise<void> {
