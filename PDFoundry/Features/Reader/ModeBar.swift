@@ -12,6 +12,8 @@ struct ModeBar: View {
     let onPages: () -> Void
     let onText: () -> Void
     let onSignature: () -> Void
+    let onInitials: () -> Void
+    let onDate: () -> Void
 
     @Environment(\.dynamicTypeSize) private var typeSize
     @Namespace private var glass
@@ -52,27 +54,30 @@ struct ModeBar: View {
         model.toolMode == .markup ? "Close Markup" : "Close Fill & Sign"
     }
 
-    /// The first layout that fits: titles at their size, smaller titles, then icons only.
+    /// The first layout that fits: titles at their size, smaller titles, Check and Cross folded into one Mark
+    /// menu, then icons only.
     @ViewBuilder
     private var toolRow: some View {
         if typeSize.isAccessibilitySize {
-            row(titleSize: nil)
+            row(titleSize: nil, foldMarks: true)
         } else {
             ViewThatFits(in: .horizontal) {
-                row(titleSize: 11)
-                row(titleSize: 10)
-                row(titleSize: 9)
-                row(titleSize: nil)
+                row(titleSize: 11, foldMarks: false)
+                row(titleSize: 10, foldMarks: false)
+                row(titleSize: 9, foldMarks: false)
+                row(titleSize: 10, foldMarks: true)
+                row(titleSize: 9, foldMarks: true)
+                row(titleSize: nil, foldMarks: true)
             }
         }
     }
 
     /// One row of tools. `titleSize` nil shows icons only.
-    private func row(titleSize: CGFloat?) -> some View {
+    private func row(titleSize: CGFloat?, foldMarks: Bool) -> some View {
         // Evenly spread: equal gaps between the tools and at both ends.
         HStack(spacing: 0) {
             Spacer(minLength: 0)
-            ForEach(Array(items.enumerated()), id: \.element.title) { index, item in
+            ForEach(Array(items(foldMarks: foldMarks).enumerated()), id: \.element.title) { index, item in
                 if index > 0 { Spacer(minLength: 4) }
                 item.view(titleSize: titleSize)
             }
@@ -82,7 +87,7 @@ struct ModeBar: View {
         .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
     }
 
-    private var items: [BarItem] {
+    private func items(foldMarks: Bool) -> [BarItem] {
         switch model.toolMode {
         case .none:
             [
@@ -92,8 +97,8 @@ struct ModeBar: View {
             ]
         case .markup:
             [
-                BarItem("Highlight", symbol: "highlighter", menu: Self.highlights.map { highlight in
-                    (highlight.name, { model.markup(.highlight, color: highlight.color) })
+                BarItem("Highlight", symbol: "highlighter", hint: "Shows the colours", menu: Self.highlights.map { highlight in
+                    BarChoice(title: highlight.name) { model.markup(.highlight, color: highlight.color) }
                 }),
                 BarItem("Underline", symbol: "underline") { model.markup(.underline, color: .systemRed) },
                 BarItem("Strikethrough", symbol: "strikethrough") { model.markup(.strikeOut, color: .systemRed) },
@@ -103,18 +108,39 @@ struct ModeBar: View {
         case .fillSign:
             [
                 BarItem("Signature", symbol: "signature", action: onSignature),
+                BarItem("Initials", symbol: "characters.uppercase", action: onInitials),
                 BarItem("Text", symbol: "textformat", action: onText),
-            ]
+                BarItem("Date", symbol: "calendar", action: onDate),
+            ] + markItems(folded: foldMarks)
         }
+    }
+
+    /// Check and Cross: two buttons, or one Mark menu when the bar is short of room.
+    private func markItems(folded: Bool) -> [BarItem] {
+        let marks = Mark.allCases.map { mark in
+            BarItem(mark.title, symbol: mark.symbol) { model.beginPlacing(mark: mark) }
+        }
+        guard folded else { return marks }
+        return [BarItem("Mark", symbol: "checkmark.square", hint: "Shows Check and Cross", menu: Mark.allCases.map { mark in
+            BarChoice(title: mark.title, symbol: mark.symbol) { model.beginPlacing(mark: mark) }
+        })]
     }
 }
 
-/// One tool in the bar: a button, or a menu of choices (Highlight's colours).
+/// One choice in a bar item's menu.
+private struct BarChoice {
+    let title: String
+    var symbol: String?
+    let action: () -> Void
+}
+
+/// One tool in the bar: a button, or a menu of choices (Highlight's colours, Check and Cross).
 private struct BarItem {
     let title: String
     let symbol: String
     var action: () -> Void = {}
-    var menu: [(String, () -> Void)]?
+    var menu: [BarChoice]?
+    var hint = ""
 
     init(_ title: String, symbol: String, action: @escaping () -> Void) {
         self.title = title
@@ -122,9 +148,10 @@ private struct BarItem {
         self.action = action
     }
 
-    init(_ title: String, symbol: String, menu: [(String, () -> Void)]) {
+    init(_ title: String, symbol: String, hint: String, menu: [BarChoice]) {
         self.title = title
         self.symbol = symbol
+        self.hint = hint
         self.menu = menu
     }
 
@@ -134,13 +161,17 @@ private struct BarItem {
         Group {
             if let menu {
                 Menu {
-                    ForEach(menu, id: \.0) { choice in
-                        Button(choice.0, action: choice.1)
+                    ForEach(menu, id: \.title) { choice in
+                        if let symbol = choice.symbol {
+                            Button(choice.title, systemImage: symbol, action: choice.action)
+                        } else {
+                            Button(choice.title, action: choice.action)
+                        }
                     }
                 } label: {
                     label
                 }
-                .accessibilityHint("Shows the colours")
+                .accessibilityHint(hint)
             } else {
                 Button(action: action) { label }
                     .buttonStyle(.plain)

@@ -22,6 +22,11 @@ struct PDFKitView: UIViewRepresentable {
         center.addObserver(context.coordinator, selector: #selector(Coordinator.pageChanged), name: .PDFViewPageChanged, object: view)
         center.addObserver(context.coordinator, selector: #selector(Coordinator.selectionChanged), name: .PDFViewSelectionChanged, object: view)
 
+        // A form field's text is final once its editor closes.
+        center.addObserver(context.coordinator, selector: #selector(Coordinator.fieldEditingEnded), name: UITextField.textDidEndEditingNotification, object: nil)
+        center.addObserver(context.coordinator, selector: #selector(Coordinator.fieldEditingEnded), name: UITextView.textDidEndEditingNotification, object: nil)
+        center.addObserver(context.coordinator, selector: #selector(Coordinator.annotationHit), name: .PDFViewAnnotationHit, object: view)
+
         let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.tapped(_:)))
         tap.delegate = context.coordinator
         view.addGestureRecognizer(tap)
@@ -50,6 +55,16 @@ struct PDFKitView: UIViewRepresentable {
 
         @objc func pageChanged() {
             model.syncPage()
+        }
+
+        @objc func fieldEditingEnded(_ notification: Notification) {
+            // Only editors inside this page view (the find bar and alerts have text fields too).
+            guard let editor = notification.object as? UIView, let view = model.pdfView, editor.isDescendant(of: view) else { return }
+            model.syncFields()
+        }
+
+        @objc func annotationHit() {
+            model.scheduleFieldSync()
         }
 
         @objc func selectionChanged() {
@@ -123,6 +138,23 @@ struct DrawingCanvas: UIViewRepresentable {
 /// Lets the user drag and resize a signature or text box before it is placed on the page.
 struct PlacementOverlay: View {
     @Binding var placement: Placement
+    /// Where the last item was placed, so the next one starts beside it instead of on top of it.
+    var avoiding: CGRect?
+
+    /// Where a new item starts: centred, or, if that covers the last item placed, just below it (or above it when
+    /// there's no room below).
+    static func startRect(aspect: CGFloat, in size: CGSize, avoiding last: CGRect?) -> CGRect {
+        let width = min(size.width * 0.5, 240)
+        let height = width / max(aspect, 0.01)
+        var rect = CGRect(x: (size.width - width) / 2, y: (size.height - height) / 2, width: width, height: height)
+        guard let last, rect.intersects(last) else { return rect }
+        if last.maxY + 12 + height <= size.height {
+            rect.origin.y = last.maxY + 12
+        } else if last.minY - 12 - height >= 0 {
+            rect.origin.y = last.minY - 12 - height
+        }
+        return rect
+    }
 
     @State private var dragStart: CGRect?
     @State private var resizeStart: CGRect?
@@ -165,9 +197,7 @@ struct PlacementOverlay: View {
             }
             .onAppear {
                 guard placement.rect.isEmpty else { return }
-                let width = min(proxy.size.width * 0.5, 240)
-                let height = width / placement.aspect
-                placement.rect = CGRect(x: (proxy.size.width - width) / 2, y: (proxy.size.height - height) / 2, width: width, height: height)
+                placement.rect = Self.startRect(aspect: placement.aspect, in: proxy.size, avoiding: avoiding)
             }
         }
     }

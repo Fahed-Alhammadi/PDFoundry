@@ -14,6 +14,8 @@ struct ExtractPagesView: View {
     @Environment(DocumentStore.self) private var store
     @Environment(\.horizontalSizeClass) private var sizeClass
 
+    /// The file read into memory, unlocked with its password if it has one.
+    @State private var source = ToolSource()
     /// Renders the pages away from the main thread; nil until the file is read, or if it can't be.
     @State private var renderer: PageRenderer?
     @State private var pageCount = 0
@@ -86,6 +88,10 @@ struct ExtractPagesView: View {
                 }
                 .padding(16)
             }
+        } else if source.needsPassword || source.problem != nil {
+            source.placeholder(for: item) {
+                Task { await makeRenderer() }
+            }
         } else {
             ContentUnavailableView("Unable to Open", systemImage: "doc.questionmark", description: Text("“\(item.name)” isn't a readable PDF."))
         }
@@ -124,15 +130,20 @@ struct ExtractPagesView: View {
     private func load() async {
         guard renderer == nil else { return }
         // A copy in memory: the file itself is never opened for writing here.
-        if let data = await DocumentStore.readCoordinated(item.url) {
-            let candidate = PageRenderer(data: data)
-            // Parsed inside the renderer, off the main thread.
-            if let count = await candidate.pageCount(), count > 0 {
-                renderer = candidate
-                pageCount = count
-            }
-        }
+        await source.load(item)
+        await makeRenderer()
         isLoading = false
+    }
+
+    /// Once the file is read (and unlocked, if it has a password), its pages are drawn.
+    private func makeRenderer() async {
+        guard renderer == nil, let data = source.data, source.pageCount != nil else { return }
+        let candidate = PageRenderer(data: data, password: source.password)
+        // Parsed inside the renderer, off the main thread.
+        if let count = await candidate.pageCount(), count > 0 {
+            renderer = candidate
+            pageCount = count
+        }
     }
 
     private func extract() {
@@ -141,7 +152,7 @@ struct ExtractPagesView: View {
         Task {
             defer { isWorking = false }
             do {
-                let created = try await store.extractPages(from: item.url, pages: pages)
+                let created = try await store.extractPages(from: item.url, pages: pages, password: source.password)
                 onExtracted(created)
                 dismiss()
             } catch {
@@ -154,17 +165,20 @@ struct ExtractPagesView: View {
 /// Reads a PDF from bytes and draws page thumbnails, one at a time, away from the main thread.
 private actor PageRenderer {
     private let data: Data
+    private let password: String?
     private var document: PDFDocument?
     private var didParse = false
 
-    init(data: Data) {
+    init(data: Data, password: String?) {
         self.data = data
+        self.password = password
     }
 
     private func parsed() -> PDFDocument? {
         if !didParse {
             didParse = true
             document = PDFDocument(data: data)
+            if let password, document?.isLocked == true { _ = document?.unlock(withPassword: password) }
         }
         return document
     }

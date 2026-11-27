@@ -10,11 +10,15 @@ struct ReaderView: View {
 
     @State private var showPages = false
     @State private var showSignatures = false
+    @State private var showInitials = false
     @State private var showTextPrompt = false
+    @State private var textPromptTitle = "Add Text"
     @State private var newText = ""
     @State private var password = ""
     @State private var wrongPassword = false
     @State private var askToRevert = false
+    @State private var showProtect = false
+    @State private var askToRemovePassword = false
     @State private var shared: SharedFile?
 
     init(url: URL) {
@@ -38,7 +42,18 @@ struct ReaderView: View {
                     model.beginPlacing(signature: image)
                 }
             }
-            .alert("Add Text", isPresented: $showTextPrompt) {
+            .sheet(isPresented: Binding(get: { model.signingField != nil }, set: { if !$0 { model.signingField = nil } })) {
+                // The field is taken now: the sheet clears `signingField` as it closes, before the pick arrives.
+                if let field = model.signingField {
+                    SignatureSheet { image in model.sign(field, with: image) }
+                }
+            }
+            .sheet(isPresented: $showInitials) {
+                SignatureSheet(kind: .initials) { image in
+                    model.beginPlacing(signature: image)
+                }
+            }
+            .alert(textPromptTitle, isPresented: $showTextPrompt) {
                 TextField("Text", text: $newText)
                 Button("Cancel", role: .cancel) {}
                 Button("Add") { model.beginPlacing(text: newText) }
@@ -64,17 +79,38 @@ struct ReaderView: View {
             } message: {
                 Text("Everything you changed since opening this document will be removed.")
             }
+            .sheet(isPresented: $showProtect) {
+                ProtectSheet(name: model.title) { password in
+                    guard !model.protect(with: password) else { return nil }
+                    // Shown in this sheet, not again in the reader's own alert.
+                    let message = model.errorMessage
+                    model.errorMessage = nil
+                    return message ?? "The file couldn't be protected."
+                }
+            }
+            .confirmationDialog("Remove the password from “\(model.title)”?", isPresented: $askToRemovePassword, titleVisibility: .visible) {
+                Button("Remove Password", role: .destructive) { model.removePassword() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Anyone who has the file will be able to open it.")
+            }
             .sheet(item: $shared) { file in
                 ActivityView(url: file.url)
             }
-            .task { await model.load() }
+            .task {
+                // So Protect on the Tools tab can hand this reader the password (it may still be alive in its tab).
+                store.attach(model)
+                await model.load()
+            }
+            .onDisappear { model.syncFields() }
     }
 
     /// When the file can't be changed where it is, the edited document is kept as a new one inside PDFoundry.
     private func saveCopy() {
         guard let document = model.document else { return }
         Task {
-            if (try? await store.save(document, named: model.title)) != nil { dismiss() }
+            // A protected document's copy keeps its password.
+            if (try? await store.save(document, named: model.title, password: model.password)) != nil { dismiss() }
         }
     }
 
@@ -99,7 +135,8 @@ struct ReaderView: View {
                 }
                 if model.mode == .placing, let current = model.placement {
                     // The binding can be read once more after the placement is cleared, so it falls back to the last value.
-                    PlacementOverlay(placement: Binding(get: { model.placement ?? current }, set: { model.placement = $0 }))
+                    PlacementOverlay(placement: Binding(get: { model.placement ?? current }, set: { model.placement = $0 }),
+                                     avoiding: model.lastPlacedRect)
                 }
             }
             .ignoresSafeArea()
@@ -185,12 +222,20 @@ struct ReaderView: View {
                     showPages = true
                 } onText: {
                     newText = ""
+                    textPromptTitle = "Add Text"
                     showTextPrompt = true
                 } onSignature: {
                     showSignatures = true
+                } onInitials: {
+                    showInitials = true
+                } onDate: {
+                    // Today's date, which can be changed before it is placed.
+                    newText = ReaderModel.todayText()
+                    textPromptTitle = "Add Date"
+                    showTextPrompt = true
                 }
             } else {
-                Label("Password-protected documents are read-only.", systemImage: "lock.fill")
+                Label("This document's owner doesn't allow changes, so it's read-only.", systemImage: "lock.fill")
                     .labelStyle(.titleAndIcon)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -238,6 +283,12 @@ struct ReaderView: View {
                 }
                 Button("Print", systemImage: "printer") { model.printDocument() }
                 if model.canEdit {
+                    Divider()
+                    if model.isProtected {
+                        Button("Remove Password", systemImage: "lock.open") { askToRemovePassword = true }
+                    } else {
+                        Button("Protect with Password", systemImage: "lock") { showProtect = true }
+                    }
                     Divider()
                     Button("Revert to Original", systemImage: "arrow.uturn.backward.circle", role: .destructive) { askToRevert = true }
                         .disabled(!model.canRevert)

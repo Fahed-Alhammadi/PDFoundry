@@ -40,7 +40,9 @@ struct PickSelection {
 
 /// Chooses the documents a tool works on: the library, with "Open from Files" at the top.
 ///
-/// A file picked in Files is used for this job only: it is not opened in place or added to the library.
+/// A file picked in Files is used for this job only: it is not opened in place or added to the library. With
+/// `opensInPlace` (Password-protect, which changes the real file) it is opened in place and listed instead, as
+/// "+ › Open from Files" does.
 /// With `multiple`, documents are ticked and confirmed with the button at the top; otherwise a tap picks one.
 struct DocumentPicker: View {
     let title: String
@@ -48,6 +50,9 @@ struct DocumentPicker: View {
     /// The fewest documents the tool needs (Merge needs two).
     var minimum = 1
     var confirmTitle = "Next"
+    /// Password-protected files can be picked (the tool asks for the password). Merge can't use them.
+    var allowsLocked = false
+    var opensInPlace = false
     let onPick: ([PDFItem]) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -60,11 +65,14 @@ struct DocumentPicker: View {
     @State private var pendingPick: PDFItem?
     @State private var notice: String?
 
-    init(title: String, multiple: Bool, minimum: Int = 1, confirmTitle: String = "Next", onPick: @escaping ([PDFItem]) -> Void) {
+    init(title: String, multiple: Bool, minimum: Int = 1, confirmTitle: String = "Next", allowsLocked: Bool = false,
+         opensInPlace: Bool = false, onPick: @escaping ([PDFItem]) -> Void) {
         self.title = title
         self.multiple = multiple
         self.minimum = minimum
         self.confirmTitle = confirmTitle
+        self.allowsLocked = allowsLocked
+        self.opensInPlace = opensInPlace
         self.onPick = onPick
     }
 
@@ -135,14 +143,29 @@ struct DocumentPicker: View {
     private func take(_ urls: [URL]) async {
         isReading = true
         var items: [PDFItem] = []
-        for url in urls {
-            if let item = await DocumentStore.pickedItem(url) { items.append(item) }
+        if opensInPlace {
+            // Opened where it is and listed, so the tool changes the real file.
+            let opened = (try? await store.open(urls)) ?? []
+            items = opened.compactMap { url in store.items.first { $0.url.standardizedFileURL == url.standardizedFileURL } }
+            if items.count < urls.count {
+                isReading = false
+                notice = urls.count == 1
+                    ? "“\(urls[0].deletingPathExtension().lastPathComponent)” couldn't be opened where it is, so it can't be protected."
+                    : "Some files couldn't be opened where they are, so they can't be protected."
+                if items.isEmpty { return }
+            }
+        } else {
+            for url in urls {
+                if let item = await DocumentStore.pickedItem(url) { items.append(item) }
+            }
         }
         isReading = false
-        let locked = items.filter(\.isLocked)
-        let usable = items.filter { !$0.isLocked }
-        if let first = locked.first {
-            notice = locked.count == 1 ? lockedNotice(first) : "\(locked.count) files are password protected, so they can't be used here."
+        let locked = allowsLocked ? [] : items.filter(\.isLocked)
+        let usable = items.filter { allowsLocked || !$0.isLocked }
+        if opensInPlace, notice != nil {
+            // Already says which files couldn't be opened.
+        } else if let first = locked.first {
+            notice = locked.count == 1 ? lockedNotice(first) : "\(locked.count) files are password protected, so they can't be merged. Use More › Remove Password first."
         } else {
             notice = items.count < urls.count ? "Some files couldn't be read as PDFs." : nil
         }
@@ -172,8 +195,9 @@ struct DocumentPicker: View {
 
     private func row(for item: PDFItem) -> some View {
         let isPicked = selection.contains(item)
+        let refused = item.isLocked && !allowsLocked
         return Button {
-            if item.isLocked {
+            if refused {
                 notice = lockedNotice(item)
             } else if multiple {
                 selection.toggle(item.url)
@@ -203,12 +227,12 @@ struct DocumentPicker: View {
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
-        .opacity(item.isLocked ? 0.5 : 1)
+        .opacity(refused ? 0.5 : 1)
         .accessibilityAddTraits(isPicked ? .isSelected : [])
     }
 
     private func lockedNotice(_ item: PDFItem) -> String {
-        "“\(item.name)” is password protected, so it can't be used here."
+        PDFoundryError.protectedSource(item.name).localizedDescription
     }
 
     private func finish(_ items: [PDFItem]) {
