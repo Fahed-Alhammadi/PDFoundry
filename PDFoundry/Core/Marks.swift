@@ -37,6 +37,13 @@ enum ShapeKind: CaseIterable {
     }
 
     static let lineWidth: CGFloat = 2
+
+    /// The banner while the shape tool is on.
+    var drawHint: String {
+        let name = title.lowercased()
+        let article = name.first.map { "aeiou".contains($0) } == true ? "an" : "a"
+        return "Drag on the page to draw \(article) \(name). Scroll with two fingers."
+    }
 }
 
 /// The Check (✓) and Cross (✗) marks of Fill & Sign.

@@ -48,6 +48,11 @@ struct PDFKitView: UIViewRepresentable {
             view.document = model.document
         }
         context.coordinator.setDragsBoxes(model.dragsBoxes, in: view)
+        let toolOn = model.mode != .reading || model.toolMode == .redact || model.pendingRedactionCount > 0
+        // After this update, when the view is in the navigation controller's hierarchy.
+        DispatchQueue.main.async { [coordinator = context.coordinator] in
+            coordinator.setSwipeBack(enabled: !toolOn, from: view)
+        }
         let direction: PDFDisplayDirection = horizontal ? .horizontal : .vertical
         if view.displayDirection != direction {
             view.displayDirection = direction
@@ -56,6 +61,10 @@ struct PDFKitView: UIViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(model: model) }
+
+    static func dismantleUIView(_ view: PDFView, coordinator: Coordinator) {
+        coordinator.setSwipeBack(enabled: true, from: view)
+    }
 
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         private let model: ReaderModel
@@ -101,9 +110,8 @@ struct PDFKitView: UIViewRepresentable {
             let point = recognizer.location(in: view)
             switch recognizer.state {
             case .began:
-                // The pan begins after the finger has moved a little: start where it went down.
-                let moved = recognizer.translation(in: view)
-                let start = CGPoint(x: point.x - moved.x, y: point.y - moved.y)
+                // The pan is recognised only after the finger has moved: start where it went down.
+                let start = touchDown ?? point
                 dragStart = start
                 model.boxDraft = (start, point)
             case .changed:
@@ -119,6 +127,24 @@ struct PDFKitView: UIViewRepresentable {
 
         func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
             recognizer === boxPan ? model.dragsBoxes : true
+        }
+
+        /// Where the finger went down, before the pan was recognised.
+        private var touchDown: CGPoint?
+
+        func gestureRecognizer(_ recognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            if recognizer === boxPan { touchDown = touch.location(in: recognizer.view) }
+            return true
+        }
+
+        /// The navigation controller's swipe-back gestures (edge and, since iOS 26, anywhere on the content) are off
+        /// while a tool draws or places on the page, so a sideways drag never leaves the reader.
+        func setSwipeBack(enabled: Bool, from view: UIView) {
+            var responder: UIResponder? = view
+            while let current = responder, !(current is UIViewController) { responder = current.next }
+            guard let navigation = (responder as? UIViewController)?.navigationController else { return }
+            navigation.interactivePopGestureRecognizer?.isEnabled = enabled
+            navigation.interactiveContentPopGestureRecognizer?.isEnabled = enabled
         }
 
         @objc func pageChanged() {
