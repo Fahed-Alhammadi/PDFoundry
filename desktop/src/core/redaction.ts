@@ -21,6 +21,14 @@ export async function redact(bytes: Uint8Array, pages: Map<number, Uint8Array>):
   const doc = await open(bytes);
   check(doc, [...pages.keys()]);
   for (const [index, png] of pages) await flatten(doc, doc.getPage(index), png);
+  // What else can still name a redacted page's content: the tagged structure (an element's /ActualText or /Alt, or an
+  // OBJR that keeps a removed widget, its value and its appearance alive), the form's XFA data (every field value
+  // again) and its calculation order. The structure is dropped whole: rebuilding it safely is not possible here, and
+  // a document without tags still reads and prints the same.
+  doc.catalog.delete(PDFName.of('StructTreeRoot'));
+  doc.catalog.delete(PDFName.of('MarkInfo'));
+  for (const page of doc.getPages()) page.node.delete(PDFName.of('StructParents'));
+  cleanForm(doc);
   prune(doc);
   return save(doc);
 }
@@ -61,6 +69,28 @@ function dropWidgets(doc: PDFDocument, annots: PDFArray | undefined): void {
     return list.size() > 0;
   };
   keep(fields);
+}
+
+/** Drops the form's XFA (it repeats every field's value) and keeps in /CO only fields that are still in the form. */
+function cleanForm(doc: PDFDocument): void {
+  const form = doc.catalog.lookupMaybe(PDFName.of('AcroForm'), PDFDict);
+  if (!form) return;
+  form.delete(PDFName.of('XFA'));
+  const order = form.lookupMaybe(PDFName.of('CO'), PDFArray);
+  if (!order) return;
+  const still = new Set<string>();
+  const walk = (list: PDFArray | undefined) => {
+    for (const entry of list?.asArray() ?? []) {
+      if (entry instanceof PDFRef) still.add(entry.toString());
+      const node = doc.context.lookup(entry);
+      if (node instanceof PDFDict) walk(node.lookupMaybe(PDFName.of('Kids'), PDFArray));
+    }
+  };
+  walk(form.lookupMaybe(PDFName.of('Fields'), PDFArray));
+  for (let i = order.size() - 1; i >= 0; i--) {
+    const entry = order.get(i);
+    if (!(entry instanceof PDFRef) || !still.has(entry.toString())) order.remove(i);
+  }
 }
 
 /** Deletes every object that the document no longer refers to (from its catalog and its information dictionary). */

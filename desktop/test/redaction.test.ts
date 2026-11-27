@@ -3,7 +3,7 @@
 // old content stream, an annotation, a form field or an object nothing refers to any more.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PDFDocument, StandardFonts, degrees } from '@cantoo/pdf-lib';
+import { PDFArray, PDFDict, PDFDocument, PDFName, PDFString, StandardFonts, degrees } from '@cantoo/pdf-lib';
 import * as pdf from '../src/core/pdf.ts';
 import { redact } from '../src/core/redaction.ts';
 import { annotations, pageTexts, png, traces } from './helpers.ts';
@@ -79,6 +79,34 @@ test('a protected document is redacted and saved with its password', async () =>
   assert.ok(again.full);
   assert.equal((await pageTexts(again.bytes))[1], '');
   assert.deepEqual(await traces(again.bytes, WORD), []);
+});
+
+test('a tagged form with XFA keeps nothing of the redacted page: no struct text, no XFA data, no calculation order', async () => {
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([300, 300]);
+  doc.addPage([300, 300]);
+  const form = doc.getForm();
+  const field = form.createTextField('secret');
+  field.setText('SECRETVALUE123');
+  field.addToPage(page, { x: 10, y: 10, width: 100, height: 20 });
+  const ctx = doc.context;
+  const widget = page.node.lookup(PDFName.of('Annots'), PDFArray).get(0);
+  // Tagged: an element pointing at the widget, and one on the page with its own text.
+  const pointing = ctx.register(ctx.obj({ Type: 'StructElem', S: 'Form', Pg: page.ref, K: [ctx.obj({ Type: 'OBJR', Obj: widget, Pg: page.ref })] }));
+  const spoken = ctx.register(ctx.obj({ Type: 'StructElem', S: 'P', Pg: page.ref, ActualText: PDFString.of('SECRETACTUAL'), Alt: PDFString.of('SECRETALT'), K: 0 }));
+  doc.catalog.set(PDFName.of('StructTreeRoot'), ctx.register(ctx.obj({ Type: 'StructTreeRoot', K: [pointing, spoken] })));
+  doc.catalog.set(PDFName.of('MarkInfo'), ctx.obj({ Marked: true }));
+  form.acroForm.dict.set(PDFName.of('XFA'), ctx.register(ctx.flateStream('<xfa:datasets><secret>SECRETXFA</secret></xfa:datasets>')));
+  form.acroForm.dict.set(PDFName.of('CO'), ctx.obj([widget]));
+  const out = await redact(await doc.save({ useObjectStreams: false, updateFieldAppearances: false }), new Map([[0, picture()]]));
+  for (const word of ['SECRETVALUE123', 'SECRETACTUAL', 'SECRETALT', 'SECRETXFA']) assert.deepEqual(await traces(out, word), [], word);
+  // Every object as written, not only streams.
+  const back = await PDFDocument.load(out);
+  const objects = back.context.enumerateIndirectObjects().map(([, o]) => o.toString()).join('\n');
+  for (const word of ['SECRETVALUE123', 'SECRETACTUAL', 'SECRETALT', 'SECRETXFA']) assert.ok(!objects.includes(word), `${word} in an object`);
+  const acro = back.catalog.lookup(PDFName.of('AcroForm'), PDFDict);
+  assert.equal(acro.get(PDFName.of('XFA')), undefined);
+  assert.equal(acro.lookupMaybe(PDFName.of('CO'), PDFArray)?.size() ?? 0, 0);
 });
 
 test('nothing to redact, or a page that is not there, is refused', async () => {

@@ -82,6 +82,20 @@ test('a mark made by another app can be deleted, not moved', async () => {
   await assert.rejects(pdf.deleteMark(bytes, 0, 'pdfoundry-nothing'), /no longer there/);
 });
 
+test('marks written inline with no /NM get ids of their own, and Delete takes the right one', async () => {
+  const doc = await PDFDocument.create();
+  const p = doc.addPage([300, 400]);
+  const stamp = (x: number) => doc.context.obj({ Type: 'Annot', Subtype: 'Stamp', Rect: [x, 10, x + 40, 40] });
+  p.node.set(PDFName.of('Annots'), doc.context.obj([stamp(10), stamp(100)])); // dictionaries in the array, not references
+  const bytes = await doc.save();
+  const marks = await pdf.marks(bytes, 0);
+  assert.equal(new Set(marks.map((m) => m.id)).size, 2, JSON.stringify(marks.map((m) => m.id)));
+  assert.ok(marks.every((m) => m.id));
+  const left = await pdf.marks(await pdf.deleteMark(bytes, 0, marks[1].id), 0);
+  assert.equal(left.length, 1);
+  assert.ok(Math.abs(left[0].rect.x - 10 / 300) < 1e-6, 'the first stamp is the one left');
+});
+
 test('shapes are real annotations with their colour and a 2 pt border', async () => {
   const graphite: pdf.Rgba = [0.07, 0.08, 0.11, 1];
   let bytes = await page();

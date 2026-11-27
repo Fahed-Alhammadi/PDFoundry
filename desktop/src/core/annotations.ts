@@ -73,9 +73,12 @@ export function isMovable(dict: PDFDict): boolean {
   return !!kind && isOurs(dict) && !TEXT_MARKUP.includes(kind);
 }
 
-/** The id the reader uses for a mark: its /NM, or (an annotation without one) its object number. */
-export function markId(dict: PDFDict, ref: PDFRef | undefined): string {
-  return text(dict.lookup(NM)) ?? (ref ? `ref-${ref.objectNumber}-${ref.generationNumber}` : '');
+/**
+ * The id the reader uses for a mark: its /NM, or (an annotation without one) its object number, or (one written
+ * inline in /Annots, with no object of its own) its place in /Annots.
+ */
+export function markId(dict: PDFDict, ref: PDFRef | undefined, at: number): string {
+  return text(dict.lookup(NM)) ?? (ref ? `ref-${ref.objectNumber}-${ref.generationNumber}` : `annot-${at}`);
 }
 
 export function rectOf(dict: PDFDict): UserBox {
@@ -85,21 +88,21 @@ export function rectOf(dict: PDFDict): UserBox {
 }
 
 /** The page's annotations that are marks, with their references, in page order. */
-export function pageMarks(doc: PDFDocument, page: PDFPage): { ref: PDFRef | undefined; dict: PDFDict; kind: MarkKind }[] {
-  const out: { ref: PDFRef | undefined; dict: PDFDict; kind: MarkKind }[] = [];
-  for (const entry of page.node.Annots()?.asArray() ?? []) {
+export function pageMarks(doc: PDFDocument, page: PDFPage): { ref: PDFRef | undefined; dict: PDFDict; kind: MarkKind; at: number }[] {
+  const out: { ref: PDFRef | undefined; dict: PDFDict; kind: MarkKind; at: number }[] = [];
+  for (const [at, entry] of (page.node.Annots()?.asArray() ?? []).entries()) {
     const dict = entry instanceof PDFRef ? doc.context.lookup(entry) : entry;
     if (!(dict instanceof PDFDict)) continue;
     const kind = kindOf(dict);
-    if (kind) out.push({ ref: entry instanceof PDFRef ? entry : undefined, dict, kind });
+    if (kind) out.push({ ref: entry instanceof PDFRef ? entry : undefined, dict, kind, at });
   }
   return out;
 }
 
 /** The marks on a page, for the reader. */
 export function marksOf(doc: PDFDocument, page: PDFPage): MarkInfo[] {
-  return pageMarks(doc, page).map(({ ref, dict, kind }) => ({
-    id: markId(dict, ref),
+  return pageMarks(doc, page).map(({ ref, dict, kind, at }) => ({
+    id: markId(dict, ref, at),
     kind,
     rect: displayedRect(page, rectOf(dict)),
     movable: isMovable(dict),
@@ -138,8 +141,8 @@ export function addAnnotation(doc: PDFDocument, page: PDFPage, a: NewAnnotation)
 }
 
 /** The mark with this id on the page, or null. */
-export function findMark(doc: PDFDocument, page: PDFPage, id: string): { ref: PDFRef | undefined; dict: PDFDict; kind: MarkKind } | null {
-  return pageMarks(doc, page).find(({ ref, dict }) => markId(dict, ref) === id) ?? null;
+export function findMark(doc: PDFDocument, page: PDFPage, id: string): { ref: PDFRef | undefined; dict: PDFDict; kind: MarkKind; at: number } | null {
+  return pageMarks(doc, page).find(({ ref, dict, at }) => markId(dict, ref, at) === id) ?? null;
 }
 
 function setNumbers(doc: PDFDocument, dict: PDFDict, key: string, values: number[]): void {
