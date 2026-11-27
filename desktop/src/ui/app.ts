@@ -29,6 +29,7 @@ async function start(): Promise<void> {
     openDocument: (file) => void reader.open(file),
     openFile: () => reader.file,
     contents: async (file) => {
+      if (file === reader.file && !(await reader.settleRedactions())) throw new Error('The redactions were neither applied nor discarded.');
       // The open document's unsaved edits of a protected file are decrypted: refuse them as merge refuses the file.
       if (reader.passwordFor(file)) throw new Error('A PDF protected with a password can’t be merged. Use More › Remove Password first.');
       return reader.unsaved(file) ?? (await api.read(file));
@@ -49,6 +50,7 @@ async function start(): Promise<void> {
     unsaved: (file) => reader.unsaved(file),
     passwordFor: (file) => reader.passwordFor(file),
     protectOpen: () => reader.protectWithPassword(),
+    settleRedactions: () => reader.settleRedactions(),
   });
 
   const nav = (target: Route, symbol: string, label: string) =>

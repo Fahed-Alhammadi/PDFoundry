@@ -974,7 +974,41 @@ async function redactionTest(check: Check, app: App): Promise<void> {
   await settled();
   check('Undo brings the redacted page back', (await found(app.reader.data, 'Kilo')).length === 1);
 
-  check('back to the file as it was, nothing to save', !app.reader.dirty && (await app.reader.close()) === true);
+  check('back to the file as it was, nothing to save', !app.reader.dirty);
+
+  // Undo with areas waiting asks first (an older version may have other pages): Discard drops them, then undoes.
+  const red = await solid('#ff0000');
+  await app.reader.change((b) => pdf.stamp(b, 1, red, { x: 0.1, y: 0.1, width: 0.2, height: 0.1 }));
+  const stamped = app.reader.data;
+  app.reader.addRedaction(0, { x: 0.1, y: 0.1, width: 0.3, height: 0.1 });
+  clickButton(dock, 'Undo');
+  await until(() => !!document.querySelector('.dialog'), 'the question on Undo');
+  const askedOnUndo = document.querySelector('.dialog h2')?.textContent;
+  clickButton(lastDialog(), 'Discard');
+  await until(() => app.reader.data !== stamped, 'the undo after Discard');
+  await settled();
+  check('Undo with areas waiting asks first; Discard drops them and then undoes', askedOnUndo === 'Apply the redactions?' && app.reader.pendingCount === 0 && sameBytes(app.reader.data, opened),
+    JSON.stringify({ askedOnUndo, pending: app.reader.pendingCount }));
+
+  // Save and Save As with areas waiting ask too; Cancel saves nothing.
+  await app.reader.change((b) => pdf.stamp(b, 1, red, { x: 0.1, y: 0.1, width: 0.2, height: 0.1 }));
+  app.reader.addRedaction(0, { x: 0.1, y: 0.1, width: 0.3, height: 0.1 });
+  const onDisk = await api.devRead(file);
+  const saving = app.reader.save();
+  await until(() => !!document.querySelector('.dialog'), 'the question on Save');
+  const askedOnSave = document.querySelector('.dialog h2')?.textContent;
+  clickButton(lastDialog(), 'Cancel');
+  const savedAnyway = await saving;
+  check('Save with areas waiting asks first, and Cancel saves nothing', askedOnSave === 'Apply the redactions?' && savedAnyway === false
+    && sameBytes(await api.devRead(file), onDisk) && app.reader.pendingCount === 1, JSON.stringify({ askedOnSave, savedAnyway }));
+
+  // Closing asks about the areas, then about the unsaved stamp.
+  const closing = app.reader.close();
+  await until(() => !!document.querySelector('.dialog'), 'the redaction question');
+  clickButton(lastDialog(), 'Discard');
+  await until(() => /Save the changes/.test(document.querySelector('.dialog h2')?.textContent ?? ''), 'the save question');
+  clickButton(lastDialog(), 'Don’t Save');
+  await closing;
 }
 
 /** Selecting a mark (move, resize, Delete, Undo), Shapes and Comment, driven with pointer events and keys. */
@@ -1050,6 +1084,23 @@ async function selectionTest(check: Check, app: App): Promise<void> {
   px = await pixels(app.reader.data, 0);
   check('Delete removes it, and Undo three times puts it back where it was placed', gone && !!back && back.id === original.id
     && ['x', 'y', 'width', 'height'].every((k) => Math.abs(back.rect[k as 'x'] - original.rect[k as 'x']) < 1e-6) && blue(px.at(0.3, 0.225)), JSON.stringify(back?.rect));
+
+  // Five quick Shift+Right nudges (10 pt each) while the first is still being written: none is dropped.
+  window.getSelection()?.removeAllRanges();
+  clickAt(0.3, 0.225);
+  await until(() => !!box(), 'the selection again');
+  for (let i = 0; i < 5; i++) box()!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', shiftKey: true, bubbles: true, cancelable: true }));
+  const expectedX = back.rect.x + 50 / 612;
+  for (let i = 0; i < 100; i++) {
+    await wait(50);
+    const now = (await marks())[0];
+    if (Math.abs(now.rect.x - expectedX) < 1e-6 && !reader.classList.contains('busy')) break;
+  }
+  const nudged = (await marks())[0];
+  check('quick arrow nudges all count: five Shift+Right move the mark 50 pt', Math.abs(nudged.rect.x - expectedX) < 1e-6 && Math.abs(nudged.rect.y - back.rect.y) < 1e-9
+    && Math.abs((box()?.getBoundingClientRect().left ?? 0) - page().getBoundingClientRect().left - expectedX * page().getBoundingClientRect().width) < 3,
+  JSON.stringify({ got: nudged.rect.x * 612, expected: expectedX * 612 }));
+  box()?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
 
   // Shapes: a rectangle dragged on the page, and the bar stays in Shapes.
   clickButton(dock, 'Markup');

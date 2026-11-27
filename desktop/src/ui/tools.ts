@@ -24,6 +24,8 @@ export type ToolsHost = {
   passwordFor: (file: string) => string | null;
   /** Password-protect on the document open in the reader: the reader does it, so its next save is encrypted too. */
   protectOpen: () => Promise<boolean>;
+  /** Asks about areas marked for redaction in the open document (Apply / Discard / Cancel). False = Cancel. */
+  settleRedactions: () => Promise<boolean>;
 };
 
 export type ToolSection = 'create' | 'combine' | 'protect' | 'enhance';
@@ -115,6 +117,9 @@ export class ToolsView {
         browse: () => api.pickPdf(name), // read once; not added to the recent list
       });
       if (!picked) return;
+      // The open document with areas marked for redaction: they are applied or dropped first, so no copy is made of
+      // what the user meant to remove.
+      if (typeof picked === 'string' && picked === this.host.openFile() && !(await this.host.settleRedactions())) return;
       // The document open in the reader with unsaved changes: use what the user sees, not the older copy on disk.
       // When it is protected, its bytes in the reader are decrypted and its password comes with them.
       const unsaved = typeof picked === 'string' ? this.host.unsaved(picked) : null;

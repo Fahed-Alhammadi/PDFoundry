@@ -156,6 +156,11 @@ export class Reader {
   private pending = new Map<number, PageRect[]>();
   /** The mark selected on a page (to move, resize or delete it), and the box drawn around it. */
   private selected: { page: number; mark: MarkInfo; box: HTMLElement } | null = null;
+  /** A move of the selected mark is being written; `nextMove` is the latest place asked for meanwhile. */
+  private moving = false;
+  private nextMove: PageRect | null = null;
+  /** The selected mark as it was before the moves now being written (put back when they fail). */
+  private moveFrom: MarkInfo | null = null;
   private matches: Match[] = [];
   private matchAt = -1;
   private observer: IntersectionObserver | null = null;
@@ -349,6 +354,7 @@ export class Reader {
   async save(): Promise<boolean> {
     await this.commitFields(); // the field being typed in (Ctrl+S, the close question) is written first
     if (!this.file || this.busy) return false;
+    if (!(await this.settleRedactions())) return false; // never a file saved with areas the user meant to remove
     if (!this.dirty) return true;
     if (this.ink || this.placement) {
       toast('Finish what you are placing or drawing first.', true);
@@ -373,6 +379,7 @@ export class Reader {
   async saveAs(): Promise<boolean> {
     await this.commitFields();
     if (!this.file || this.busy) return false;
+    if (!(await this.settleRedactions())) return false;
     const bytes = this.bytes;
     try {
       const saved = await api.saveAs(title(this.file), await this.encrypted(bytes), this.file);
@@ -412,6 +419,7 @@ export class Reader {
   async protectWithPassword(): Promise<boolean> {
     await this.commitFields();
     if (!this.file || this.busy) return false;
+    if (!(await this.settleRedactions())) return false;
     if (this.password || (await pdf.isProtected(this.bytes))) {
       alreadyProtected(this.file);
       return false;
@@ -453,6 +461,7 @@ export class Reader {
   async removePassword(): Promise<boolean> {
     await this.commitFields();
     if (!this.file || this.busy || !this.password) return false;
+    if (!(await this.settleRedactions())) return false;
     if (this.ink || this.placement) {
       toast('Finish what you are placing or drawing first.', true);
       return false;
@@ -647,6 +656,10 @@ export class Reader {
   async undo(): Promise<void> {
     await this.fieldWork; // a field change still being written comes first, so Undo takes back the latest step
     if (this.busy || !this.undoStack.length || this.ink || this.placement) return;
+    // Areas waiting to be redacted are places on pages as they are now: an older version may have other pages, so
+    // they are settled first. Apply is a change of its own, so Undo stops there.
+    const redactions = await this.askRedactions();
+    if (redactions === 'stay' || redactions === 'applied' || this.busy) return;
     this.deselect();
     this.busy = true;
     try {
@@ -1212,9 +1225,33 @@ export class Reader {
   private async moveSelected(rect: PageRect): Promise<void> {
     const s = this.selected;
     if (!s) return;
-    const { page, mark } = s;
-    const ok = await this.change((bytes) => pdf.moveMark(bytes, page, mark.id, rect));
-    await this.reselect(page, mark.id, ok ? undefined : mark);
+    // The box shows the new place at once, and further nudges build on it. While a move is being written, only the
+    // latest place waits: quick nudges become one move instead of being dropped.
+    const { page } = s;
+    const id = s.mark.id;
+    const before = this.moveFrom ?? { ...s.mark };
+    this.moveFrom = before;
+    s.mark = { ...s.mark, rect };
+    this.placeSelection(rect);
+    this.nextMove = rect;
+    if (this.moving) return;
+    this.moving = true;
+    let ok = true;
+    try {
+      while (this.nextMove && ok) {
+        const target = this.nextMove;
+        this.nextMove = null;
+        await this.idle();
+        ok = await this.change((bytes) => pdf.moveMark(bytes, page, id, target));
+      }
+    } finally {
+      this.moving = false;
+      this.nextMove = null;
+      this.moveFrom = null;
+    }
+    if (!ok) return void this.reselect(page, id, before);
+    // Still the same mark selected (not deselected or another picked meanwhile): show it as written.
+    if (this.selected?.mark.id === id) await this.reselect(page, id);
   }
 
   /** Selects the mark with this id again after a change (or `fallback` as it was, when the change failed). */
@@ -1357,15 +1394,23 @@ export class Reader {
 
   /** Before leaving (closing Markup or the document, organizing pages): asks about areas not yet redacted. False = stay. */
   async settleRedactions(): Promise<boolean> {
-    if (!this.pending.size) return true;
+    return (await this.askRedactions()) !== 'stay';
+  }
+
+  /** The question itself: 'none' (nothing waiting), 'applied', 'discarded', or 'stay' (Cancel, or Apply failed). */
+  private async askRedactions(): Promise<'none' | 'applied' | 'discarded' | 'stay'> {
+    if (!this.pending.size) return 'none';
     const answer = await choose('Apply the redactions?', '', [
       { label: 'Cancel', value: 'cancel' },
       { label: 'Discard', value: 'discard' },
       { label: 'Apply', value: 'apply', kind: 'primary' },
     ]);
-    if (answer === 'discard') this.discardRedactions();
-    if (answer === 'apply') return this.applyRedactions(false);
-    return answer === 'discard';
+    if (answer === 'discard') {
+      this.discardRedactions();
+      return 'discarded';
+    }
+    if (answer === 'apply') return (await this.applyRedactions(false)) ? 'applied' : 'stay';
+    return 'stay';
   }
 
   /**
