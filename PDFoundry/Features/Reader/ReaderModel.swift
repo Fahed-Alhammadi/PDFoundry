@@ -81,8 +81,22 @@ final class ReaderModel {
     /// The file exactly as it was when it was opened.
     @ObservationIgnored private var original: Data?
 
-    /// Password-protected files open read-only, so saving never strips their protection.
-    var canEdit: Bool { document.map { !$0.isEncrypted } ?? false }
+    /// The password every save encrypts the file with. Set when a protected file is unlocked with full access, or
+    /// when the user protects the open document. It lives only here, in memory, for as long as the document is open:
+    /// never on disk, in preferences or in logs.
+    @ObservationIgnored private(set) var password: String?
+    /// Observable twin of `password != nil`, so menus update without the password itself being observed.
+    private(set) var isProtected = false
+    /// The password the file was unlocked with when it was opened, for putting an encrypted original back.
+    @ObservationIgnored private var openedPassword: String?
+
+    /// A protected file can be edited once it is unlocked with full access (its owner password); every save then
+    /// keeps the password. With limited access, or a file with restrictions only, it stays read-only, so saving
+    /// never strips a protection the user can't put back.
+    var canEdit: Bool {
+        guard let document else { return false }
+        return !document.isEncrypted || (!document.isLocked && document.permissionsStatus == .owner)
+    }
 
     /// Does no work: SwiftUI may create a model more than once for the same screen. `load` reads the file.
     init(url: URL) {
@@ -131,6 +145,61 @@ final class ReaderModel {
         guard let document, document.unlock(withPassword: password) else { return false }
         isLocked = false
         pageCount = document.pageCount
+        if document.permissionsStatus == .owner {
+            setPassword(password)
+            openedPassword = password
+        }
+        return true
+    }
+
+    private func setPassword(_ value: String?) {
+        password = value
+        isProtected = value != nil
+    }
+
+    // MARK: Password
+
+    /// Protects the open document with `password`: the file is rewritten encrypted at once, and every later save
+    /// keeps it. Returns false (nothing changed) if the document can't be edited, is already protected, or the
+    /// file couldn't be written.
+    @discardableResult
+    func protect(with newPassword: String) -> Bool {
+        guard canEdit, password == nil, !newPassword.isEmpty else { return false }
+        setPassword(newPassword)
+        guard save() else {
+            setPassword(nil)
+            return false
+        }
+        return true
+    }
+
+    /// Writes the file without a password. Returns false (still protected) if the file couldn't be written.
+    ///
+    /// PDFKit keeps an encrypted document encrypted on every write, so the reader moves to an unencrypted copy of
+    /// the document. The steps so far can't be undone one by one after that (their pages are gone).
+    @discardableResult
+    func removePassword() -> Bool {
+        guard canEdit, let old = password, let document else { return false }
+        let plain = document.isEncrypted ? PDFOperations.unencrypted(document) : document
+        let index = pageIndex
+        let previous = self.document
+        self.document = plain
+        setPassword(nil)
+        guard save() else {
+            self.document = previous
+            setPassword(old)
+            return false
+        }
+        if plain !== previous {
+            cancelMode()
+            selectedAnnotation = nil
+            undoStack.removeAll()
+            canUndo = false
+            adopt(plain)
+            pdfView?.document = plain
+            if let page = plain.page(at: index) { pdfView?.go(to: page) }
+            syncPage()
+        }
         return true
     }
 
@@ -284,7 +353,7 @@ final class ReaderModel {
         var error: NSError?
         // Coordinated, so iCloud Drive and other apps see one complete change.
         NSFileCoordinator().coordinate(writingItemAt: url, options: .forReplacing, error: &error) { target in
-            written = document.write(to: target)
+            written = document.write(to: target, withOptions: PDFOperations.writeOptions(password: password))
         }
         guard written else {
             errorMessage = "This file can't be changed where it is. You can save a copy in PDFoundry instead."
@@ -309,6 +378,14 @@ final class ReaderModel {
             errorMessage = "The original couldn't be put back."
             return false
         }
+        // The original may be encrypted (the file was protected when it was opened) or plain (it was protected
+        // here later). The reader follows the file: unlocked with the password it was opened with, or no password.
+        if restored.isEncrypted {
+            if restored.isLocked, let openedPassword { _ = restored.unlock(withPassword: openedPassword) }
+            setPassword(restored.permissionsStatus == .owner ? openedPassword : nil)
+        } else {
+            setPassword(nil)
+        }
         cancelMode()
         selectedAnnotation = nil
         undoStack.removeAll()
@@ -326,7 +403,11 @@ final class ReaderModel {
         let folder = FileManager.default.temporaryDirectory.appending(path: "Share-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let copy = folder.appending(path: title + ".pdf")
-        if document.isEncrypted {
+        if password != nil {
+            // Shared with the same password as the file.
+            return document.write(to: copy, withOptions: PDFOperations.writeOptions(password: password)) ? copy : nil
+        }
+        if document.isEncrypted && !canEdit {
             // Writing the open document would save it without its password, so the file itself is shared, byte for
             // byte. It is read-only here, so the file is the document as shown.
             if (try? FileManager.default.copyItem(at: url, to: copy)) != nil { return copy }

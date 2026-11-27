@@ -76,6 +76,41 @@ enum PDFOperations {
         return document
     }
 
+    /// A copy of an unlocked document that is no longer encrypted. PDFKit writes an encrypted document encrypted
+    /// again whatever the options say, so taking a password off means moving everything into a new document:
+    /// the pages (with their annotations and form fields), the document's information and its outline.
+    static func unencrypted(_ source: PDFDocument) -> PDFDocument {
+        let result = PDFDocument()
+        for index in 0..<source.pageCount {
+            guard let page = source.page(at: index)?.copy() as? PDFPage else { continue }
+            result.insert(page, at: result.pageCount)
+        }
+        result.documentAttributes = source.documentAttributes
+        if let outline = source.outlineRoot {
+            let root = PDFOutline()
+            copyOutline(outline, into: root, from: source, to: result)
+            result.outlineRoot = root
+        }
+        return result
+    }
+
+    private static func copyOutline(_ source: PDFOutline, into target: PDFOutline, from old: PDFDocument, to new: PDFDocument) {
+        for index in 0..<source.numberOfChildren {
+            guard let child = source.child(at: index) else { continue }
+            let copy = PDFOutline()
+            copy.label = child.label
+            copy.isOpen = child.isOpen
+            if let destination = child.destination, let page = destination.page {
+                let pageIndex = old.index(for: page)
+                if let newPage = new.page(at: pageIndex) {
+                    copy.destination = PDFDestination(page: newPage, at: destination.point)
+                }
+            }
+            target.insertChild(copy, at: target.numberOfChildren)
+            copyOutline(child, into: copy, from: old, to: new)
+        }
+    }
+
     /// Joins the given files, in order, into one new document.
     static func merge(_ urls: [URL]) throws -> PDFDocument {
         try merge(urls.map { (name: $0.deletingPathExtension().lastPathComponent, data: try? Data(contentsOf: $0)) })

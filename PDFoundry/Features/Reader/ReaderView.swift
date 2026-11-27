@@ -74,7 +74,8 @@ struct ReaderView: View {
     private func saveCopy() {
         guard let document = model.document else { return }
         Task {
-            if (try? await store.save(document, named: model.title)) != nil { dismiss() }
+            // A protected document's copy keeps its password.
+            if (try? await store.save(document, named: model.title, password: model.password)) != nil { dismiss() }
         }
     }
 
@@ -190,7 +191,7 @@ struct ReaderView: View {
                     showSignatures = true
                 }
             } else {
-                Label("Password-protected documents are read-only.", systemImage: "lock.fill")
+                Label("This document's owner doesn't allow changes, so it's read-only.", systemImage: "lock.fill")
                     .labelStyle(.titleAndIcon)
                     .font(.footnote)
                     .foregroundStyle(.secondary)

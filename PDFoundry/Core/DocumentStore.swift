@@ -394,6 +394,28 @@ final class DocumentStore {
 
     // MARK: Changing
 
+    /// Protects the file at `url` with `password`, in place: the file itself is replaced by the encrypted version
+    /// (a file opened in place stays where it is; nothing is copied). An already protected file is refused.
+    func protect(_ url: URL, password: String) async throws {
+        let name = url.deletingPathExtension().lastPathComponent
+        guard !password.isEmpty else { throw PDFoundryError.wrongPassword }
+        guard let data = await Self.readCoordinated(url), let document = PDFDocument(data: data) else {
+            throw PDFoundryError.unreadable(name)
+        }
+        guard !document.isEncrypted else { throw PDFoundryError.alreadyProtected(name) }
+        let written: Bool = FileAccess.with(url) {
+            var written = false
+            var error: NSError?
+            // Coordinated, as the reader's saves are, so iCloud Drive and other apps see one complete change.
+            NSFileCoordinator().coordinate(writingItemAt: url, options: .forReplacing, error: &error) { target in
+                written = document.write(to: target, withOptions: PDFOperations.writeOptions(password: password))
+            }
+            return written
+        }
+        guard written else { throw PDFoundryError.writeFailed }
+        await refresh()
+    }
+
     func rename(_ item: PDFItem, to newName: String) async throws {
         let clean = Self.sanitized(newName)
         guard !clean.isEmpty, clean != item.name else { return }

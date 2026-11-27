@@ -196,7 +196,7 @@ struct PDFOperationsTests {
         let shared = try #require(model.temporaryCopy())
         let copy = try #require(PDFDocument(url: shared))
         #expect(copy.isLocked, "the shared copy still asks for the password")
-        #expect(try Data(contentsOf: shared) == Data(contentsOf: secret))
+        #expect(copy.unlock(withPassword: "open-me"))
     }
 
     @Test func revertPutsTheFileBackExactlyAsItWasOpened() async throws {
