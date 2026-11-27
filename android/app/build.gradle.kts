@@ -25,7 +25,7 @@ android {
         targetSdk = 36
         // CI sets VERSION_CODE for Play uploads (every upload needs a higher number); local builds use 1.
         versionCode = System.getenv("VERSION_CODE")?.toIntOrNull() ?: 1
-        versionName = "1.0.4"
+        versionName = "1.0.5"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
