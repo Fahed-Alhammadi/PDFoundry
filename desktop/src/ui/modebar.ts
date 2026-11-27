@@ -2,7 +2,7 @@
 //   Markup  Fill & Sign  Pages   Undo
 // A mode swaps the bar for its own tools, with a close button on the left and Undo at the right end:
 //   Markup:      ×  Highlight▾  Underline  Strikethrough  Text  Draw   Undo
-//   Fill & Sign: ×  Signature  Text   Undo
+//   Fill & Sign: ×  Signature  Initials  Text  Date  ✓  ✗   Undo
 // Pages is not a mode: it opens the page organizer. The same names and grouping as the phone apps.
 import { h, icon } from './dom.ts';
 import type { Rgba, TextMark } from '../core/pdf.ts';
@@ -31,13 +31,16 @@ export type ModeBarActions = {
   text: () => void;
   draw: () => void;
   signature: () => void;
+  initials: () => void;
+  date: () => void;
+  mark: (mark: 'check' | 'cross') => void;
   pages: () => void;
   undo: () => void;
 };
 
-function tool(name: string, label: string, onclick: (e: MouseEvent) => void, options: { disabled?: boolean; pressed?: boolean; menu?: boolean } = {}): HTMLButtonElement {
+function tool(name: string, label: string, onclick: (e: MouseEvent) => void, options: { disabled?: boolean; pressed?: boolean; menu?: boolean; title?: string } = {}): HTMLButtonElement {
   return h('button.tool', {
-    type: 'button', disabled: options.disabled, onclick,
+    type: 'button', disabled: options.disabled, onclick, title: options.title,
     'aria-pressed': options.pressed === undefined ? undefined : String(options.pressed),
     'aria-haspopup': options.menu ? 'menu' : undefined,
   }, icon(name, 22), h('span.tool-label', label, options.menu ? icon('caret', 12) : null));
@@ -73,7 +76,11 @@ export function modeBar(mode: ToolMode, state: { canUndo: boolean; armed: TextTo
   return [
     close,
     tool('sign', 'Signature', () => actions.signature()),
+    tool('initials', 'Initials', () => actions.initials()),
     tool('text', 'Text', () => actions.text()),
+    tool('date', 'Date', () => actions.date(), { title: 'Today’s date' }),
+    tool('check', 'Check', () => actions.mark('check'), { title: 'Check mark (✓)' }),
+    tool('cross', 'Cross', () => actions.mark('cross'), { title: 'Cross (✗)' }),
     ...undo,
   ];
 }

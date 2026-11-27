@@ -16,7 +16,7 @@ import { pathToFileURL } from 'node:url';
 import { BrowserWindow, Menu, app, dialog, ipcMain, nativeTheme, net, protocol, session, shell } from 'electron';
 import type { MenuItemConstructorOptions } from 'electron';
 import { Store, cleanName } from './store.ts';
-import type { Settings } from './store.ts';
+import type { InkKind, Settings } from './store.ts';
 import { REPO, Updater } from './updater.ts';
 import { welcomeGuide } from '../core/pdf.ts';
 
@@ -116,6 +116,8 @@ async function chooseSavePath(title: string, suggested: string, folder?: string)
 }
 
 type Handler = (...args: any[]) => unknown;
+
+const inkKind = (kind: unknown): InkKind => (kind === 'initials' ? 'initials' : 'signature');
 
 const handlers: Record<string, Handler> = {
   // The app
@@ -248,9 +250,9 @@ const handlers: Record<string, Handler> = {
   },
 
   // Signatures
-  signatures: () => store.listSignatures(),
-  addSignature: (png: Uint8Array) => store.addSignature(png),
-  removeSignature: (id: string) => store.removeSignature(id),
+  signatures: (kind?: string) => store.listSignatures(inkKind(kind)),
+  addSignature: (png: Uint8Array, kind?: string) => store.addSignature(png, inkKind(kind)),
+  removeSignature: (id: string, kind?: string) => store.removeSignature(id, inkKind(kind)),
 
   // Updates
   checkForUpdates: () => void updater.check(),

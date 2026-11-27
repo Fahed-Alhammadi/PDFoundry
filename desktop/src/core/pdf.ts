@@ -5,10 +5,11 @@
 // the page as it is displayed (after its rotation), measured from the top-left corner: the same convention as the
 // Android app's PdfEngine.
 import {
-  BlendMode, PDFArray, PDFDocument, PDFName, PDFPage, PDFRef, PDFStream, decodePDFRawStream, degrees, fill, popGraphicsState, pushGraphicsState, rectangle,
-  setFillingRgbColor, setGraphicsState,
+  BlendMode, PDFArray, PDFCheckBox, PDFDocument, PDFDropdown, PDFName, PDFOptionList, PDFPage, PDFRadioGroup, PDFRef, PDFSignature, PDFStream, PDFTextField,
+  decodePDFRawStream, degrees, fill, popGraphicsState, pushGraphicsState, rectangle, setFillingRgbColor, setGraphicsState,
 } from '@cantoo/pdf-lib';
-import type { PDFRawStream } from '@cantoo/pdf-lib';
+import type { PDFField, PDFRawStream } from '@cantoo/pdf-lib';
+import { Encodings } from '@cantoo/pdf-lib/standard-fonts';
 import { encryptionOf, isOwnerPassword } from './security.ts';
 
 export class PdfError extends Error {}
@@ -404,5 +405,130 @@ export async function welcomeGuide(): Promise<Uint8Array> {
   page.drawText('Try it: sign on the line below.', { x: 56, y: 190, size: 11.5, font: regular, color: rgb(0.2, 0.22, 0.27) });
   page.drawLine({ start: { x: 56, y: 130 }, end: { x: 300, y: 130 }, thickness: 1, color: rgb(0.2, 0.22, 0.27) });
   page.drawText('Signature', { x: 56, y: 114, size: 9, font: regular, color: rgb(0.45, 0.47, 0.52) });
+  return save(doc);
+}
+
+// Form fields. Values are written as the fields' own values (/V), with appearances so that every reader shows them,
+// and the fields stay fields: other apps can still read and change them. Nothing is flattened.
+
+export type FieldKind = 'text' | 'multiline' | 'checkbox' | 'radio' | 'choice' | 'signature';
+export type FieldValue = string | boolean | string[];
+/** One widget of a field: where it is on its page (displayed, fractions from the top-left) and the field's value. */
+export type FieldInfo = { name: string; kind: FieldKind; page: number; rect: PageRect; value: FieldValue; options: string[]; readOnly: boolean };
+
+/** `box` (page coordinates, unrotated) as a rectangle of the displayed page: the reverse of `userRect`. */
+export function displayedRect(page: PDFPage, box: { x: number; y: number; width: number; height: number }): PageRect {
+  const crop = page.getCropBox();
+  const turns = quarterTurns(page);
+  const shown = displayedSize(page);
+  const toShown = (px: number, py: number): [number, number] => {
+    const [x, y] = [px - crop.x, py - crop.y];
+    return turns === 0 ? [x, crop.height - y] : turns === 1 ? [y, x] : turns === 2 ? [crop.width - x, y] : [crop.height - y, crop.width - x];
+  };
+  const [x1, y1] = toShown(box.x, box.y);
+  const [x2, y2] = toShown(box.x + box.width, box.y + box.height);
+  return {
+    x: Math.min(x1, x2) / shown.width,
+    y: Math.min(y1, y2) / shown.height,
+    width: Math.abs(x2 - x1) / shown.width,
+    height: Math.abs(y2 - y1) / shown.height,
+  };
+}
+
+function kindOf(field: PDFField): FieldKind | null {
+  if (field instanceof PDFTextField) return field.isMultiline() ? 'multiline' : 'text';
+  if (field instanceof PDFCheckBox) return 'checkbox';
+  if (field instanceof PDFRadioGroup) return 'radio';
+  if (field instanceof PDFDropdown || field instanceof PDFOptionList) return 'choice';
+  if (field instanceof PDFSignature) return 'signature';
+  return null; // push buttons: nothing to fill
+}
+
+function valueOf(field: PDFField): FieldValue {
+  if (field instanceof PDFTextField) return field.getText() ?? '';
+  if (field instanceof PDFCheckBox) return field.isChecked();
+  if (field instanceof PDFRadioGroup) return field.getSelected() ?? '';
+  if (field instanceof PDFDropdown || field instanceof PDFOptionList) {
+    const selected = field.getSelected();
+    return selected.length > 1 ? selected : selected[0] ?? '';
+  }
+  return '';
+}
+
+/** The fillable fields of a document, one entry per widget, in page order. Empty without a form (or with an XFA-only one). */
+export async function fields(bytes: Uint8Array): Promise<FieldInfo[]> {
+  const doc = await open(bytes);
+  if (!doc.catalog.getAcroForm()) return [];
+  const pageOf = new Map<string, number>();
+  doc.getPages().forEach((page, index) => {
+    for (const ref of page.node.Annots()?.asArray() ?? []) if (ref instanceof PDFRef) pageOf.set(ref.toString(), index);
+  });
+  const out: FieldInfo[] = [];
+  for (const field of doc.getForm().getFields()) {
+    const kind = kindOf(field);
+    if (!kind) continue;
+    for (const widget of field.acroField.getWidgets()) {
+      const ref = doc.context.getObjectRef(widget.dict);
+      const owner = widget.P();
+      const page = (ref ? pageOf.get(ref.toString()) : undefined) ?? (owner ? doc.getPages().findIndex((p) => p.ref === owner) : -1);
+      if (page < 0) continue;
+      out.push({
+        name: field.getName(),
+        kind,
+        page,
+        rect: displayedRect(doc.getPage(page), widget.getRectangle()),
+        value: valueOf(field),
+        options: field instanceof PDFRadioGroup || field instanceof PDFDropdown || field instanceof PDFOptionList ? field.getOptions() : [],
+        readOnly: field.isReadOnly(),
+      });
+    }
+  }
+  return out.sort((a, b) => a.page - b.page || a.rect.y - b.rect.y || a.rect.x - b.rect.x);
+}
+
+/**
+ * Can a field show this text with the standard font (Helvetica, Windows Latin)? When not (Arabic, say), the window
+ * draws the text itself and the drawing becomes the field's appearance (`fillFields` `images`). pdf-lib would
+ * otherwise draw "?" for every letter it cannot encode.
+ */
+export function canEncode(text: string): boolean {
+  return Array.from(text.replace(/\s/g, ' ')).every((ch) => Encodings.WinAnsi.canEncodeUnicodeCodePoint(ch.codePointAt(0)!));
+}
+
+/**
+ * Fills fields by name: text and choices take strings (an option list may take several), checkboxes true or false,
+ * radio groups the chosen option ('' clears). `images`: for a text field whose text the standard font cannot show,
+ * a PNG of the text drawn by the window, used as the field's appearance; its value is still the real text. Refuses
+ * read-only fields and names that are not fields.
+ */
+export async function fillFields(bytes: Uint8Array, values: Record<string, FieldValue>, images: Record<string, Uint8Array> = {}): Promise<Uint8Array> {
+  const doc = await open(bytes);
+  const form = doc.getForm();
+  for (const [name, value] of Object.entries(values)) {
+    const field = form.getFieldMaybe(name);
+    if (!field || !kindOf(field) || field instanceof PDFSignature) throw new PdfError(`This form has no field “${name}” to fill.`);
+    if (field.isReadOnly()) throw new PdfError('That field can’t be changed.');
+    try {
+      if (field instanceof PDFTextField) {
+        const text = Array.isArray(value) ? value.join(' ') : value === false ? '' : String(value);
+        field.setText(text === '' ? undefined : text);
+        if (images[name] && text !== '') field.setImage(await doc.embedPng(images[name]));
+        else if (text !== '' && !canEncode(text)) throw new PdfError('This text needs to be drawn by the window first.');
+      } else if (field instanceof PDFCheckBox) {
+        if (value === true || value === 'true') field.check();
+        else field.uncheck();
+      } else if (field instanceof PDFRadioGroup) {
+        if (value === '' || value === false) field.clear();
+        else field.select(String(value));
+      } else if (field instanceof PDFDropdown || field instanceof PDFOptionList) {
+        const chosen = (Array.isArray(value) ? value : [String(value)]).filter((v) => v !== '');
+        if (!chosen.length) field.clear();
+        else field.select(chosen);
+      }
+    } catch (e) {
+      throw e instanceof PdfError ? e : new PdfError(`“${name}” can’t take that value.`);
+    }
+  }
+  form.updateFieldAppearances();
   return save(doc);
 }

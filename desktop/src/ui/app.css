@@ -418,3 +418,38 @@ button.row:hover { background: var(--hover); }
 .split-option input:disabled { opacity: 0.5; }
 .split-status { min-height: 20px; margin: 4px 0 0; color: var(--muted); font-size: 13px; }
 .split-status.error { color: var(--danger); }
+
+/* Form fields: pdf.js's annotation layer (the rules it needs from its own viewer stylesheet), fields only. A light
+   tint shows where they are. While a placing, drawing or text tool is in use the tool wins: fields take no clicks. */
+.annotationLayer {
+  position: absolute; top: 0; left: 0; z-index: 2; pointer-events: none; transform-origin: 0 0; color-scheme: only light;
+  --field-tint: rgba(0, 54, 255, 0.13); --input-focus-border-color: #1a66ff;
+}
+.annotationLayer section { position: absolute; text-align: initial; pointer-events: auto; box-sizing: border-box; transform-origin: 0 0; user-select: none; }
+.annotationLayer .hasOwnCanvas:not(.sandboxModified) :is(input, textarea) { display: none; }
+.annotationLayer .textWidgetAnnotation :is(input, textarea),
+.annotationLayer .choiceWidgetAnnotation select,
+.annotationLayer .buttonWidgetAnnotation:is(.checkBox, .radioButton) input {
+  background-image: linear-gradient(var(--field-tint), var(--field-tint)); border: 2px solid transparent; box-sizing: border-box; color: #000; min-height: 0;
+  font: calc(9px * var(--total-scale-factor)) sans-serif; height: 100%; margin: 0; padding: 0 2px; vertical-align: top; width: 100%; border-radius: 2px;
+}
+.annotationLayer .textWidgetAnnotation textarea { resize: none; }
+.annotationLayer :is(input, textarea, select)[disabled] { background-image: none; border-color: transparent; cursor: not-allowed; }
+.annotationLayer :is(input, textarea, select):hover:not([disabled]) { border-color: rgba(0, 0, 0, 0.6); }
+.annotationLayer :is(input, textarea, select):focus { background-image: none; border-color: var(--input-focus-border-color); outline: none; }
+.annotationLayer .buttonWidgetAnnotation:is(.checkBox, .radioButton) input { appearance: none; }
+.annotationLayer .buttonWidgetAnnotation.radioButton input { border-radius: 50%; }
+.annotationLayer .buttonWidgetAnnotation:is(.checkBox, .radioButton) [data-canvas-name] { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.annotationLayer .buttonWidgetAnnotation:is(.checkBox, .radioButton) [data-canvas-name="checked"]:has(~ input:not(:checked)) { display: none; }
+.annotationLayer .buttonWidgetAnnotation:is(.checkBox, .radioButton) [data-canvas-name="unchecked"]:has(~ input:checked) { display: none; }
+.annotationLayer .textWidgetAnnotation input.comb { font-family: monospace; padding: 0; }
+.annotationLayer .annotationContent { position: absolute; width: 100%; height: 100%; pointer-events: none; }
+.annotationLayer[data-main-rotation="90"] .norotate { transform: rotate(270deg); }
+.annotationLayer[data-main-rotation="180"] .norotate { transform: rotate(180deg); }
+.annotationLayer[data-main-rotation="270"] .norotate { transform: rotate(90deg); }
+.sign-field {
+  position: absolute; z-index: 2; display: flex; align-items: center; gap: 4px; padding: 0 6px; border: 1.5px dashed rgba(0, 54, 255, 0.45); border-radius: 3px;
+  background: rgba(0, 54, 255, 0.07); color: #1a3fb0; font-size: 11px; font-weight: 600; cursor: pointer; overflow: hidden; white-space: nowrap;
+}
+.sign-field:hover { background: rgba(0, 54, 255, 0.14); }
+.reader:is(.placing, .inking, .marking) :is(.annotationLayer section, .sign-field) { pointer-events: none; }

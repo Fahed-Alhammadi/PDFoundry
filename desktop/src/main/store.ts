@@ -6,6 +6,8 @@ import path from 'node:path';
 
 export type RecentFile = { path: string; name: string; folder: string; size: number; modified: number; opened: number };
 export type Settings = { appearance: 'system' | 'light' | 'dark'; welcomed: boolean };
+/** Saved signatures and saved initials are kept apart, the same way. */
+export type InkKind = 'signature' | 'initials';
 
 const DEFAULTS: Settings = { appearance: 'system', welcomed: false };
 const MAX_RECENT = 60;
@@ -52,16 +54,19 @@ export class Store {
   /** Where the welcome guide lives, and where documents of versions before 1.1 were kept. */
   readonly ownFolder: string;
   private readonly signatures: string;
+  private readonly initials: string;
   private readonly settingsFile: string;
   private readonly recentFile: string;
 
   constructor(root: string) {
     this.ownFolder = path.join(root, 'Documents');
     this.signatures = path.join(root, 'Signatures');
+    this.initials = path.join(root, 'Initials');
     this.settingsFile = path.join(root, 'settings.json');
     this.recentFile = path.join(root, 'recent.json');
     mkdirSync(this.ownFolder, { recursive: true });
     mkdirSync(this.signatures, { recursive: true });
+    mkdirSync(this.initials, { recursive: true });
     this.adoptOldLibrary();
   }
 
@@ -213,26 +218,31 @@ export class Store {
     }
   }
 
-  // Signatures: PNG files named by a random id.
+  // Signatures and initials: PNG files named by a random id, each kind in its own folder.
 
-  listSignatures(): { id: string; png: Uint8Array }[] {
-    return readdirSync(this.signatures)
+  private inkFolder(kind: InkKind = 'signature'): string {
+    return kind === 'initials' ? this.initials : this.signatures;
+  }
+
+  listSignatures(kind: InkKind = 'signature'): { id: string; png: Uint8Array }[] {
+    const folder = this.inkFolder(kind);
+    return readdirSync(folder)
       .filter((f) => /^[0-9a-f-]{36}\.png$/.test(f))
-      .map((f) => ({ id: f.slice(0, -4), file: path.join(this.signatures, f) }))
+      .map((f) => ({ id: f.slice(0, -4), file: path.join(folder, f) }))
       .sort((a, b) => statSync(b.file).mtimeMs - statSync(a.file).mtimeMs)
       .map(({ id, file }) => ({ id, png: readFileSync(file) }));
   }
 
-  addSignature(png: Uint8Array): string {
+  addSignature(png: Uint8Array, kind: InkKind = 'signature'): string {
     if (png.length > 4_000_000 || Buffer.from(png.subarray(0, 8)).toString('hex') !== '89504e470d0a1a0a') throw new Error('That signature could not be saved.');
     const id = randomUUID();
-    writeFileSync(path.join(this.signatures, `${id}.png`), png, { mode: 0o600 });
+    writeFileSync(path.join(this.inkFolder(kind), `${id}.png`), png, { mode: 0o600 });
     return id;
   }
 
-  removeSignature(id: string): void {
+  removeSignature(id: string, kind: InkKind = 'signature'): void {
     if (!/^[0-9a-f-]{36}$/.test(id)) throw new Error('That signature does not exist.');
-    rmSync(path.join(this.signatures, `${id}.png`), { force: true });
+    rmSync(path.join(this.inkFolder(kind), `${id}.png`), { force: true });
   }
 
   // Settings

@@ -1,8 +1,8 @@
 // The window's typed view of the main process (handlers in src/main/main.ts).
-import type { RecentFile, Settings } from '../main/store.ts';
+import type { InkKind, RecentFile, Settings } from '../main/store.ts';
 import type { UpdateState } from '../main/updater.ts';
 
-export type { RecentFile, Settings, UpdateState };
+export type { InkKind, RecentFile, Settings, UpdateState };
 
 export type AppInfo = {
   version: string;
@@ -59,10 +59,11 @@ export const api = {
   setDocument: (file: string | null, edited: boolean): Promise<void> => bridge.call('setDocument', file, edited),
   closeNow: (): Promise<void> => bridge.call('closeNow'),
 
-  signatures: async (): Promise<{ id: string; png: Uint8Array }[]> =>
-    ((await bridge.call('signatures')) as { id: string; png: Uint8Array }[]).map((s) => ({ id: s.id, png: new Uint8Array(s.png) })),
-  addSignature: (png: Uint8Array): Promise<string> => bridge.call('addSignature', png),
-  removeSignature: (id: string): Promise<void> => bridge.call('removeSignature', id),
+  /** Saved signatures, or saved initials (kept apart). */
+  signatures: async (kind: InkKind = 'signature'): Promise<{ id: string; png: Uint8Array }[]> =>
+    ((await bridge.call('signatures', kind)) as { id: string; png: Uint8Array }[]).map((s) => ({ id: s.id, png: new Uint8Array(s.png) })),
+  addSignature: (png: Uint8Array, kind: InkKind = 'signature'): Promise<string> => bridge.call('addSignature', png, kind),
+  removeSignature: (id: string, kind: InkKind = 'signature'): Promise<void> => bridge.call('removeSignature', id, kind),
 
   checkForUpdates: (): Promise<void> => bridge.call('checkForUpdates'),
   installUpdate: (): Promise<void> => bridge.call('installUpdate'),
