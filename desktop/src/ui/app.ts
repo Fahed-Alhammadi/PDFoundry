@@ -37,6 +37,14 @@ async function start(): Promise<void> {
   const settings = new SettingsView(info);
   const tools = new ToolsView({
     library,
+    openWith: async (file, tool) => {
+      if (!(await reader.open(file))) return;
+      show('documents');
+      if (tool === 'numbers') await reader.pageNumbers();
+      else if (tool === 'watermark') await reader.watermark();
+      else if (tool === 'ocr') await reader.makeSearchable();
+      else reader.startRedact();
+    },
     openFile: () => reader.file,
     unsaved: (file) => reader.unsaved(file),
     passwordFor: (file) => reader.passwordFor(file),

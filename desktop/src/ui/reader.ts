@@ -1250,6 +1250,13 @@ export class Reader {
     return [...this.pending.values()].reduce((n, rects) => n + rects.length, 0);
   }
 
+  /** Tools › Redact: the open document in Markup with Redact chosen. */
+  startRedact(): void {
+    if (!this.editable) return void toast('This PDF is protected, so it can only be read.', true);
+    this.setMode('markup');
+    this.armRedact();
+  }
+
   private armRedact(): void {
     const on = !this.redactTool;
     this.disarm();

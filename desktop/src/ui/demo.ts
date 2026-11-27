@@ -344,6 +344,7 @@ async function interfaceTest(checks: { name: string; pass: boolean; detail?: str
   await redactionTest(check, app);
   await pageToolsTest(check, app);
   await ocrTest(check, app);
+  await newTilesTest(check, app);
   await toolsTest(check, app);
   await fillSignTest(check, app);
   await splitTest(check, app);
@@ -560,8 +561,11 @@ async function toolsTest(check: (name: string, pass: boolean, detail?: string) =
 
   clickButton(rail, 'Tools');
   const sections = [...view.querySelectorAll('.tool-section h2')].map((e) => e.textContent);
-  check('the Tools view lists today’s tools in their sections', !view.hidden && JSON.stringify(sections) === '["Create","Combine & split","Protect & optimize"]'
-    && ['Create from Images', 'Merge PDFs', 'Extract Pages', 'Split PDF', 'Password-protect'].every((t) => hasButton(view, t)) && !hasButton(view, 'Scan Document'), JSON.stringify(sections));
+  const tiles = [...view.querySelectorAll('.tool-section')].map((s) => [...s.querySelectorAll('.row-title')].map((t) => t.textContent));
+  check('the Tools view lists every tool in its section, Enhance included', !view.hidden && JSON.stringify(sections) === '["Create","Combine & split","Protect & optimize","Enhance"]'
+    && JSON.stringify(tiles) === JSON.stringify([['Create from Images', 'Export as Images'], ['Merge PDFs', 'Extract Pages', 'Split PDF'],
+      ['Password-protect', 'Compress', 'Redact'], ['Make Searchable', 'Page Numbers', 'Watermark']])
+    && !hasButton(view, 'Scan Document'), JSON.stringify({ sections, tiles }));
 
   // From a recent file: pick it, tick pages 1 and 3, Extract, and say where to save.
   const extractFrom = async (choose: () => void, tick: number[], out: string) => {
@@ -640,6 +644,64 @@ async function toolsTest(check: (name: string, pass: boolean, detail?: string) =
 }
 
 type Check = (name: string, pass: boolean, detail?: string) => void;
+
+/** The new Tools tiles open the right thing; the Markup bar and the More menu have every new item. */
+async function newTilesTest(check: Check, app: App): Promise<void> {
+  const rail = document.querySelector('.rail')!;
+  const view = app.tools.el;
+  const reader = document.querySelector('.reader') as HTMLElement;
+  const dock = reader.querySelector('.dock')!;
+  const made = await PDFDocument.create();
+  made.addPage([612, 792]);
+  await api.devCreate('Tiles test', await made.save());
+  const pick = async (tile: string) => {
+    clickButton(rail, 'Tools');
+    clickButton(view, tile);
+    await until(() => !!document.querySelector('.dialog.picker .picker-row[aria-label="Tiles test"]'), `the ${tile} picker`);
+    clickButton(document.querySelector('.dialog.picker')!, 'Tiles test');
+  };
+  const sheetFor = async (tile: string, sheet: string) => {
+    await pick(tile);
+    await until(() => !!document.querySelector(`.dialog.${sheet}`), `the ${tile} sheet`);
+    const opened = app.reader.file.endsWith('Tiles test.pdf') && !reader.hidden;
+    clickButton(document.querySelector(`.dialog.${sheet}`)!, 'Cancel');
+    await wait(100);
+    return opened;
+  };
+  const results = {
+    numbers: await sheetFor('Page Numbers', 'page-numbers'),
+    watermark: await sheetFor('Watermark', 'watermark'),
+    ocr: await sheetFor('Make Searchable', 'ocr'),
+  };
+  await pick('Redact');
+  await until(() => findButton(dock, 'Redact')?.getAttribute('aria-pressed') === 'true', 'Redact to be chosen');
+  const labels = [...dock.querySelectorAll('.tool')].map((b) => b.textContent?.trim() || b.getAttribute('aria-label'));
+  check('Page Numbers, Watermark, Make Searchable and Redact open the file in the reader with their tool on top',
+    Object.values(results).every(Boolean) && app.reader.file.endsWith('Tiles test.pdf'), JSON.stringify(results));
+  check('the Markup bar has every tool, in order', JSON.stringify(labels) === JSON.stringify(['Close Markup', 'Highlight', 'Underline', 'Strikethrough', 'Text', 'Draw', 'Shapes', 'Comment', 'Redact', 'Undo']),
+    JSON.stringify(labels));
+  const more = findButton(reader.querySelector('.reader-bar')!, 'More')!;
+  more.click();
+  await until(() => !!document.querySelector('.menu'), 'the More menu');
+  const items = [...document.querySelectorAll('.menu button')].map((b) => b.textContent?.trim());
+  document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  document.querySelector('.menu')?.remove();
+  check('the More menu has Make Searchable, Page Numbers and Watermark', ['Make Searchable…', 'Page Numbers…', 'Watermark…'].every((l) => items.includes(l)), JSON.stringify(items));
+  clickButton(dock, 'Close Markup');
+  await app.reader.close();
+
+  // Compress and Export as Images read the file once and never open it.
+  const compressOpened = await (async () => {
+    await pick('Compress');
+    await until(() => !!document.querySelector('.dialog.compress'), 'the Compress sheet');
+    clickButton(document.querySelector('.dialog.compress')!, 'Cancel');
+    return !!app.reader.file;
+  })();
+  await pick('Export as Images');
+  await until(() => !!document.querySelector('.dialog.export'), 'the Export sheet');
+  clickButton(document.querySelector('.dialog.export')!, 'Cancel');
+  check('Compress and Export as Images show their sheets without opening the file', !compressOpened && !app.reader.file);
+}
 
 /** A Letter page "scanned" at 150 dpi: a picture of text, with no text in the PDF. */
 async function scannedPage(text: string, rtl: boolean): Promise<Uint8Array> {
