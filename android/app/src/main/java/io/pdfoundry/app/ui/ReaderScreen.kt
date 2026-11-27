@@ -97,6 +97,8 @@ import androidx.compose.ui.unit.dp
 import io.pdfoundry.app.app
 import io.pdfoundry.app.data.DocumentStore
 import io.pdfoundry.app.data.InkStroke
+import io.pdfoundry.app.data.bitmap
+import io.pdfoundry.app.data.todayText
 import io.pdfoundry.app.data.PdfEngine
 import io.pdfoundry.app.data.PdfException
 import io.pdfoundry.app.data.UnlockResult
@@ -116,8 +118,11 @@ import java.io.File
 /** What the page editor is doing. */
 sealed interface EditMode {
     data class Ink(val highlighter: Boolean) : EditMode
-    /** An image (signature or typed text) being positioned before it is placed. */
-    data class Place(val image: Bitmap, val label: String) : EditMode
+    /**
+     * An image (signature, initials, typed text, a date or a mark) being positioned before it is placed.
+     * [width] is how wide it starts, as a fraction of the page.
+     */
+    data class Place(val image: Bitmap, val label: String, val width: Float = 0.45f) : EditMode
     /** Words are being selected for a highlight, underline or strikethrough. */
     data class TextMark(val mark: io.pdfoundry.app.data.TextMark, val argb: Int) : EditMode
 }
@@ -548,8 +553,9 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
     val listState = rememberLazyListState()
 
     var showPages by remember { mutableStateOf(false) }
-    var showSignatures by remember { mutableStateOf(false) }
-    var showText by remember { mutableStateOf(false) }
+    var picking by remember { mutableStateOf<SignatureKind?>(null) }
+    // The text dialog: null when closed, otherwise what it starts with ("" for Text, today's date for Date).
+    var textDraft by remember { mutableStateOf<TextDraft?>(null) }
     var showSearch by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
     var confirmRevert by remember { mutableStateOf(false) }
@@ -655,9 +661,12 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
                         onPages = { showPages = true },
                         onUndo = { state.undo() },
                         onTextMark = { mark, argb -> begin(EditMode.TextMark(mark, argb)) },
-                        onText = { showText = true },
+                        onText = { textDraft = TextDraft("Add text", "") },
                         onDraw = { begin(EditMode.Ink(highlighter = false)) },
-                        onSignature = { showSignatures = true }
+                        onSignature = { picking = SignatureKind.Signature },
+                        onInitials = { picking = SignatureKind.Initials },
+                        onDate = { textDraft = TextDraft("Add date", todayText()) },
+                        onMark = { mark -> begin(EditMode.Place(mark.bitmap(), mark.label.lowercase(), width = 0.06f)) }
                     )
                 }
             }
@@ -700,33 +709,33 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
         )
     }
 
-    if (showText) {
-        var text by remember { mutableStateOf("") }
+    textDraft?.let { draft ->
+        var text by remember(draft) { mutableStateOf(draft.text) }
         AlertDialog(
-            onDismissRequest = { showText = false },
-            title = { Text("Add text") },
+            onDismissRequest = { textDraft = null },
+            title = { Text(draft.title) },
             text = {
                 Column {
-                    Text("Type the text, then drag it into place.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(if (draft.text.isEmpty()) "Type the text, then drag it into place." else "Change the date if you need to, then drag it into place.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.height(10.dp))
                     OutlinedTextField(value = text, onValueChange = { text = it }, singleLine = true, label = { Text("Text") })
                 }
             },
             confirmButton = {
                 TextButton(enabled = text.isNotBlank(), onClick = {
-                    showText = false
-                    begin(EditMode.Place(PdfEngine.textBitmap(text.trim()), "text"))
+                    textDraft = null
+                    begin(EditMode.Place(PdfEngine.textBitmap(text.trim()), if (draft.text.isEmpty()) "text" else "date", width = if (draft.text.isEmpty()) 0.45f else 0.3f))
                 }) { Text("Add") }
             },
-            dismissButton = { TextButton(onClick = { showText = false }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { textDraft = null }) { Text("Cancel") } }
         )
     }
 
-    if (showSignatures) {
-        ModalBottomSheet(onDismissRequest = { showSignatures = false }) {
-            SignaturePicker(onPick = { image ->
-                showSignatures = false
-                begin(EditMode.Place(image, "signature"))
+    picking?.let { kind ->
+        ModalBottomSheet(onDismissRequest = { picking = null }) {
+            SignaturePicker(kind, onPick = { image ->
+                picking = null
+                if (kind == SignatureKind.Initials) begin(EditMode.Place(image, "initials", width = 0.18f)) else begin(EditMode.Place(image, "signature"))
             })
         }
     }
@@ -738,6 +747,9 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
         }
     }
 }
+
+/** The text dialog's title and starting text. */
+private data class TextDraft(val title: String, val text: String)
 
 /** All pages in a column. Pinch to zoom; when zoomed, the page scrolls sideways too. */
 @Composable

@@ -174,7 +174,7 @@ private fun SavedSignaturesScreen(onBack: () -> Unit) {
                     Text("Draw your signature once and reuse it in any document.", textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             } else {
-                SignatureList(Modifier.weight(1f))
+                SignatureList(modifier = Modifier.weight(1f))
                 Text("Signatures are stored only on this device.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp))
             }
         }
