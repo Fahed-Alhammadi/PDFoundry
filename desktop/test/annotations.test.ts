@@ -109,3 +109,21 @@ test('a highlight darkens like a marker; underline and strikethrough do not', as
   assert.match(text(highlight), /\/BM\s*\/Multiply/);
   assert.doesNotMatch(text(underline), /\/Multiply/);
 });
+
+test('every appearance has its own resources, so Apple’s PDF viewers draw it', async () => {
+  // PDFKit (iPhone, iPad, Preview) draws nothing for a form XObject appearance without /Resources: ink, shapes and
+  // comments were invisible there while pdf.js showed them.
+  let bytes = await everyKind(await page(300, 400));
+  for (const kind of ['rectangle', 'ellipse', 'line', 'arrow'] as const) {
+    bytes = await pdf.shape(bytes, 0, kind, { x: 0.1, y: 0.85 }, { x: 0.3, y: 0.95 }, RED);
+  }
+  bytes = await pdf.comment(bytes, 0, { x: 0.8, y: 0.1 }, 'A note');
+  const doc = await PDFDocument.load(bytes);
+  const annots = annotations(doc);
+  assert.equal(annots.length, 11);
+  for (const a of annots) {
+    const ap = appearance(doc, a);
+    assert.ok(ap, `${subtype(a)} has an appearance`);
+    assert.ok(ap.dict.lookup(PDFName.of('Resources')), `${subtype(a)} appearance has /Resources`);
+  }
+});

@@ -125,7 +125,8 @@ export type NewAnnotation = {
 export function addAnnotation(doc: PDFDocument, page: PDFPage, a: NewAnnotation): string {
   const { x, y, width, height } = a.box;
   const bbox = [x, y, x + width, y + height];
-  const ap = doc.context.formXObject(a.draw, { BBox: bbox, ...(a.resources ? { Resources: a.resources } : {}) } as never);
+  // Always a /Resources dictionary, even an empty one: PDFKit (iPhone, iPad, Preview) draws nothing without it.
+  const ap = doc.context.formXObject(a.draw, { BBox: bbox, Resources: a.resources ?? {} } as never);
   const dict = doc.context.obj({
     Type: 'Annot',
     Subtype: a.subtype,
