@@ -221,6 +221,13 @@ object PdfEngine {
         true
     }
 
+    /** True when the file opens without a password but is encrypted: restrictions set by its author. */
+    fun isRestrictedOnly(file: File): Boolean = try {
+        PDDocument.load(file, memory()).use { it.isEncrypted }
+    } catch (e: InvalidPasswordException) {
+        false
+    }
+
     fun pageCount(file: File, password: String? = null): Int = load(file, password).use { it.numberOfPages }
 
     /**

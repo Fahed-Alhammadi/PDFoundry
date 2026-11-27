@@ -257,6 +257,12 @@ class ReaderState(
                 notice = "This file can't be reached right now. It may have been moved or deleted. It is shown as last seen."
             }
             withContext(Dispatchers.IO) { runCatching { file.copyTo(original, overwrite = true) } }
+            // Restrictions set by its author (it opens without a password): read-only before the pages show,
+            // so the editing bar never appears for it.
+            if (withContext(Dispatchers.IO) { runCatching { PdfEngine.isRestrictedOnly(file) }.getOrDefault(false) }) {
+                if (!readOnly) notice = "Password-protected documents are read-only."
+                readOnly = true
+            }
             reopen()
             // Opens without a password but carries restrictions set by its author: changes would remove them.
             if (!locked && source != null && withContext(Dispatchers.IO) { runCatching { PdfEngine.isProtected(file) }.getOrDefault(false) }) {
