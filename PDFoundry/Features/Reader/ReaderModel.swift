@@ -248,6 +248,25 @@ final class ReaderModel {
         mode = .placing
     }
 
+    /// Places a Check or Cross, like a signature.
+    func beginPlacing(mark: Mark) {
+        beginPlacing(signature: mark.image())
+    }
+
+    /// Places today's date as text.
+    func beginPlacingDate() {
+        beginPlacing(text: Self.todayText())
+    }
+
+    /// Today's date in the device's medium date style for its language and region ("Nov 27, 2026"), no time.
+    nonisolated static func todayText(_ date: Date = .now, locale: Locale = .current) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = locale
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter.string(from: date)
+    }
+
     func commitPlacement() {
         defer { cancelMode() }
         guard let placement, let pdfView, !placement.rect.isEmpty,

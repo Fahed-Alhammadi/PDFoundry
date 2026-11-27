@@ -1,12 +1,37 @@
 import PencilKit
 import SwiftUI
 
-/// Pick a saved signature or draw a new one. `onPick` receives the signature to place.
+extension EnvironmentValues {
+    /// The saved initials. Signatures are the environment's `SignatureStore`.
+    @Entry var initialsStore: SignatureStore?
+}
+
+extension SignatureKind {
+    var title: String { self == .signature ? "Signature" : "Initials" }
+    var newTitle: String { self == .signature ? "New Signature" : "New Initials" }
+}
+
+/// Pick a saved signature (or initials) or draw a new one. `onPick` receives the image to place.
 struct SignatureSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @Environment(SignatureStore.self) private var signatures
+    var kind = SignatureKind.signature
     let onPick: (UIImage) -> Void
 
+    @Environment(SignatureStore.self) private var savedSignatures
+    @Environment(\.initialsStore) private var savedInitials
+
+    var body: some View {
+        // The lists and the pad below read the store for this kind from the environment.
+        SignatureSheetContent(kind: kind, onPick: onPick)
+            .environment(kind == .initials ? (savedInitials ?? savedSignatures) : savedSignatures)
+    }
+}
+
+private struct SignatureSheetContent: View {
+    let kind: SignatureKind
+    let onPick: (UIImage) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(SignatureStore.self) private var signatures
     @State private var showPad = false
 
     var body: some View {
@@ -23,12 +48,12 @@ struct SignatureSheet: View {
                     }
                     .toolbar {
                         ToolbarItem(placement: .topBarTrailing) {
-                            Button("New Signature", systemImage: "plus") { showPad = true }
+                            Button(kind.newTitle, systemImage: "plus") { showPad = true }
                         }
                     }
                 }
             }
-            .navigationTitle("Signature")
+            .navigationTitle(kind.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -71,16 +96,27 @@ struct SignatureList: View {
                     .swipeActions {
                         Button("Delete", systemImage: "trash", role: .destructive) { signatures.delete(signature) }
                     }
-                    .accessibilityLabel("Saved signature")
+                    .accessibilityLabel(signatures.kind == .initials ? "Saved initials" : "Saved signature")
                 }
             } footer: {
-                Text(onPick == nil ? "Swipe a signature to delete it. Signatures are stored only on this device." : "Tap a signature to place it. Swipe to delete.")
+                Text(footer)
             }
         }
     }
 }
 
-/// A pad for drawing a signature with a finger or Apple Pencil.
+extension SignatureList {
+    private var footer: String {
+        switch (signatures.kind, onPick == nil) {
+        case (.signature, true): "Swipe a signature to delete it. Signatures are stored only on this device."
+        case (.signature, false): "Tap a signature to place it. Swipe to delete."
+        case (.initials, true): "Swipe initials to delete them. Initials are stored only on this device."
+        case (.initials, false): "Tap your initials to place them. Swipe to delete."
+        }
+    }
+}
+
+/// A pad for drawing a signature (or initials) with a finger or Apple Pencil.
 struct SignaturePad: View {
     private enum Ink: String, CaseIterable, Identifiable {
         case black, blue
@@ -111,7 +147,7 @@ struct SignaturePad: View {
                     Rectangle()
                         .fill(.gray.opacity(0.45))
                         .frame(height: 1)
-                    Text("Sign above the line")
+                    Text(signatures.kind == .initials ? "Write your initials above the line" : "Sign above the line")
                         .font(.caption)
                         .foregroundStyle(.gray)
                 }
@@ -143,7 +179,7 @@ struct SignaturePad: View {
                 if keep { signatures.add(image) }
                 onDone(image)
             } label: {
-                Text("Use Signature")
+                Text(signatures.kind == .initials ? "Use Initials" : "Use Signature")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 6)
@@ -154,7 +190,7 @@ struct SignaturePad: View {
             Spacer(minLength: 0)
         }
         .padding(20)
-        .navigationTitle("New Signature")
+        .navigationTitle(signatures.kind.newTitle)
         .navigationBarTitleDisplayMode(.inline)
     }
 

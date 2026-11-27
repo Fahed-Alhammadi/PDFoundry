@@ -10,7 +10,9 @@ struct ReaderView: View {
 
     @State private var showPages = false
     @State private var showSignatures = false
+    @State private var showInitials = false
     @State private var showTextPrompt = false
+    @State private var textPromptTitle = "Add Text"
     @State private var newText = ""
     @State private var password = ""
     @State private var wrongPassword = false
@@ -38,7 +40,12 @@ struct ReaderView: View {
                     model.beginPlacing(signature: image)
                 }
             }
-            .alert("Add Text", isPresented: $showTextPrompt) {
+            .sheet(isPresented: $showInitials) {
+                SignatureSheet(kind: .initials) { image in
+                    model.beginPlacing(signature: image)
+                }
+            }
+            .alert(textPromptTitle, isPresented: $showTextPrompt) {
                 TextField("Text", text: $newText)
                 Button("Cancel", role: .cancel) {}
                 Button("Add") { model.beginPlacing(text: newText) }
@@ -186,9 +193,17 @@ struct ReaderView: View {
                     showPages = true
                 } onText: {
                     newText = ""
+                    textPromptTitle = "Add Text"
                     showTextPrompt = true
                 } onSignature: {
                     showSignatures = true
+                } onInitials: {
+                    showInitials = true
+                } onDate: {
+                    // Today's date, which can be changed before it is placed.
+                    newText = ReaderModel.todayText()
+                    textPromptTitle = "Add Date"
+                    showTextPrompt = true
                 }
             } else {
                 Label("This document's owner doesn't allow changes, so it's read-only.", systemImage: "lock.fill")
