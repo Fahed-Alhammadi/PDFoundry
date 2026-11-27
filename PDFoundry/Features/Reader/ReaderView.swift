@@ -87,6 +87,18 @@ struct ReaderView: View {
             } message: {
                 Text("Anyone who has the file will be able to open it.")
             }
+            .sheet(item: $model.commentDraft) { draft in
+                CommentSheet(text: draft.comment?.contents ?? "", isNew: draft.comment == nil) { text in
+                    if let comment = draft.comment {
+                        model.updateComment(comment, text: text)
+                    } else if let point = draft.point {
+                        model.addComment(at: point, text: text)
+                    }
+                } onDelete: {
+                    if let comment = draft.comment { model.updateComment(comment, text: "") }
+                }
+                .presentationDetents([.medium, .large])
+            }
             .sheet(item: $shared) { file in
                 ActivityView(url: file.url)
             }
@@ -100,7 +112,8 @@ struct ReaderView: View {
 
     /// Opens a comment to read, edit or delete it.
     private func openComment(_ comment: PDFAnnotation) {
-        // Filled in with the comment sheet.
+        model.selectedAnnotation = nil
+        model.commentDraft = ReaderModel.CommentDraft(comment: comment)
     }
 
     /// When the file can't be changed where it is, the edited document is kept as a new one inside PDFoundry.
@@ -128,6 +141,7 @@ struct ReaderView: View {
             ZStack {
                 PDFKitView(model: model, horizontal: horizontalScroll)
 
+                BoxOverlay(model: model)
                 if model.mode == .reading, model.selectedAnnotation != nil {
                     SelectionOverlay(model: model) { comment in openComment(comment) }
                 }
@@ -164,7 +178,11 @@ struct ReaderView: View {
         switch model.mode {
         case .drawing: "Draw on the page, then tap Done."
         case .placing: "Drag to move. Use the handle to resize."
-        case .reading: model.hint
+        case .shaping: "Drag on the page to draw a \(model.shapeKind.title.lowercased()). Scroll with two fingers."
+        case .commenting: "Tap where the comment goes."
+        case .reading:
+            model.hint ?? (model.toolMode == .redact && model.pendingRedactionCount == 0
+                ? "Drag over what to black out. Scroll with two fingers." : nil)
         }
     }
 
@@ -269,6 +287,14 @@ struct ReaderView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Place") { model.commitPlacement() }
+                }
+            case .shaping:
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { model.cancelMode() }
+                }
+            case .commenting:
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { model.cancelMode() }
                 }
             }
         }

@@ -49,10 +49,12 @@ struct AnnotationSelection {
 @Observable
 final class ReaderModel {
     /// What the reader is doing right now: reading, or drawing / placing something on the page.
-    enum Mode { case reading, drawing, placing }
+    /// `shaping`: one finger drags shapes onto the page (two fingers scroll). `commenting`: the next tap places a comment.
+    enum Mode { case reading, drawing, placing, shaping, commenting }
     /// The group of tools the bottom bar shows. It stays as it is while a tool draws or places something, so
-    /// the bar comes back to the same tools afterwards (signing two places is one tap each).
-    enum ToolMode { case none, markup, fillSign }
+    /// the bar comes back to the same tools afterwards (signing two places is one tap each). `redact`: boxes are
+    /// dragged over the page and applied together.
+    enum ToolMode { case none, markup, fillSign, redact }
 
     let url: URL
     private(set) var document: PDFDocument?
@@ -376,6 +378,171 @@ final class ReaderModel {
         mode = .reading
         placement = nil
         drawing = PKDrawing()
+        boxDraft = nil
+    }
+
+    // MARK: Shapes
+
+    private(set) var shapeKind = ShapeKind.rectangle
+    @ObservationIgnored private(set) var shapeColor: UIColor = Mark.ink
+    /// The box or line being dragged right now, in the page view: from where the finger went down to where it is.
+    var boxDraft: (from: CGPoint, to: CGPoint)?
+
+    /// One finger drags boxes or lines on the page (and two fingers scroll) while drawing shapes or redaction boxes.
+    var dragsBoxes: Bool { mode == .shaping || (toolMode == .redact && mode == .reading) }
+
+    /// A one-finger drag on the page has ended: the shape or redaction box is added.
+    func finishBox(from: CGPoint, to: CGPoint) {
+        boxDraft = nil
+        if mode == .shaping {
+            commitShape(from: from, to: to)
+        } else if toolMode == .redact {
+            addRedaction(fromViewPoint: from, to: to)
+        }
+    }
+
+    /// One finger now drags `kind` onto the page, until Done.
+    func beginShape(_ kind: ShapeKind, color: UIColor) {
+        selectedAnnotation = nil
+        shapeKind = kind
+        shapeColor = color
+        mode = .shaping
+    }
+
+    /// Adds the shape dragged from `from` to `to` (page view points). The tool stays on for the next one.
+    func commitShape(from: CGPoint, to: CGPoint) {
+        boxDraft = nil
+        guard let pdfView, let page = pdfView.page(for: from, nearest: true) else { return }
+        let start = pdfView.convert(from, to: page), end = pdfView.convert(to, to: page)
+        guard hypot(end.x - start.x, end.y - start.y) >= 4 else { return }
+        let annotation: PDFAnnotation
+        switch shapeKind {
+        case .rectangle, .ellipse:
+            let box = CGRect(x: min(start.x, end.x), y: min(start.y, end.y), width: abs(end.x - start.x), height: abs(end.y - start.y))
+            annotation = PDFAnnotation(bounds: box, forType: shapeKind == .rectangle ? .square : .circle, withProperties: nil)
+        case .line, .arrow:
+            // Room around the ends for the stroke and the arrow head. PDFKit keeps the ends relative to the origin.
+            let box = CGRect(x: min(start.x, end.x), y: min(start.y, end.y), width: abs(end.x - start.x), height: abs(end.y - start.y))
+                .insetBy(dx: -10, dy: -10)
+            annotation = PDFAnnotation(bounds: box, forType: .line, withProperties: nil)
+            annotation.startPoint = CGPoint(x: start.x - box.minX, y: start.y - box.minY)
+            annotation.endPoint = CGPoint(x: end.x - box.minX, y: end.y - box.minY)
+            annotation.startLineStyle = .none
+            annotation.endLineStyle = shapeKind == .arrow ? .openArrow : .none
+        }
+        let border = PDFBorder()
+        border.lineWidth = ShapeKind.lineWidth
+        annotation.border = border
+        annotation.color = shapeColor
+        page.addAnnotation(annotation)
+        commit([(page, annotation)])
+    }
+
+    // MARK: Redaction
+
+    /// Boxes to black out, by page index, in page space. Held here only, never written, until they are applied.
+    private(set) var pendingRedactions: [Int: [CGRect]] = [:]
+
+    var pendingRedactionCount: Int { pendingRedactions.values.reduce(0) { $0 + $1.count } }
+
+    func addRedaction(_ rect: CGRect, page index: Int) {
+        let box = rect.standardized
+        guard box.width >= 2, box.height >= 2, let document, index >= 0, index < document.pageCount else { return }
+        pendingRedactions[index, default: []].append(box)
+    }
+
+    /// Adds the box dragged from `from` to `to` in the page view.
+    func addRedaction(fromViewPoint from: CGPoint, to: CGPoint) {
+        guard let pdfView, let document, let page = pdfView.page(for: from, nearest: true) else { return }
+        let start = pdfView.convert(from, to: page), end = pdfView.convert(to, to: page)
+        let box = CGRect(x: min(start.x, end.x), y: min(start.y, end.y), width: abs(end.x - start.x), height: abs(end.y - start.y))
+            .intersection(page.bounds(for: .mediaBox))
+        guard !box.isNull else { return }
+        addRedaction(box, page: document.index(for: page))
+    }
+
+    /// Adds a box over each line of the selected text.
+    func addRedactionsForSelection() {
+        guard let pdfView, let document, let selection = pdfView.currentSelection, !(selection.string ?? "").isEmpty else { return }
+        for line in selection.selectionsByLine() {
+            for page in line.pages {
+                addRedaction(line.bounds(for: page).insetBy(dx: -1, dy: -1), page: document.index(for: page))
+            }
+        }
+        pdfView.clearSelection()
+        hasSelection = false
+    }
+
+    func removeRedaction(page index: Int, at position: Int) {
+        guard var boxes = pendingRedactions[index], boxes.indices.contains(position) else { return }
+        boxes.remove(at: position)
+        pendingRedactions[index] = boxes.isEmpty ? nil : boxes
+    }
+
+    func discardRedactions() {
+        pendingRedactions = [:]
+    }
+
+    /// Where each pending box shows in the page view.
+    var pendingRedactionFrames: [(page: Int, position: Int, frame: CGRect)] {
+        _ = viewportTick
+        guard let pdfView, let document else { return [] }
+        return pendingRedactions.sorted { $0.key < $1.key }.flatMap { index, boxes in
+            boxes.enumerated().compactMap { position, box in
+                document.page(at: index).map { (index, position, pdfView.convert(box, from: $0)) }
+            }
+        }
+    }
+
+    // MARK: Comments
+
+    /// The next tap on the page places a comment.
+    func beginComment() {
+        selectedAnnotation = nil
+        mode = .commenting
+    }
+
+    /// Adds a comment (a sticky note) at `point` in the page view. An empty comment is not created.
+    @discardableResult
+    func addComment(at point: CGPoint, text: String) -> PDFAnnotation? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let pdfView, let page = pdfView.page(for: point, nearest: true) else { return nil }
+        let spot = pdfView.convert(point, to: page)
+        let side: CGFloat = 24
+        let annotation = PDFAnnotation(bounds: CGRect(x: spot.x - side / 2, y: spot.y - side / 2, width: side, height: side),
+                                       forType: .text, withProperties: nil)
+        annotation.contents = trimmed
+        annotation.iconType = .comment
+        annotation.color = Self.commentColor
+        page.addAnnotation(annotation)
+        commit([(page, annotation)])
+        return annotation
+    }
+
+    static let commentColor = UIColor(red: 1, green: 0.8, blue: 0.2, alpha: 1)
+
+    /// A comment being written (a new one at `point`) or opened (`comment`), shown in the comment sheet.
+    struct CommentDraft: Identifiable {
+        let id = UUID()
+        var point: CGPoint?
+        var comment: PDFAnnotation?
+    }
+
+    var commentDraft: CommentDraft?
+
+    /// Changes a comment's text as one Undo step. Emptying it deletes the comment.
+    func updateComment(_ comment: PDFAnnotation, text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let page = comment.page else { return }
+        if trimmed.isEmpty {
+            selectedAnnotation = AnnotationSelection(annotation: comment, page: page)
+            deleteSelectedAnnotation()
+            return
+        }
+        let old = comment.contents ?? ""
+        guard trimmed != old else { return }
+        comment.contents = trimmed
+        record(.edited(comment, old))
     }
 
     // MARK: Annotations
@@ -383,6 +550,11 @@ final class ReaderModel {
     func handleTap(at point: CGPoint) {
         // PDFView edits a form field on its own (ticks a box, picks a radio button); look for the change once it has.
         scheduleFieldSync()
+        if mode == .commenting, canEdit {
+            mode = .reading
+            commentDraft = CommentDraft(point: point)
+            return
+        }
         guard mode == .reading, canEdit, let pdfView else { return }
         if let page = pdfView.page(for: point, nearest: false),
            let annotation = page.annotation(at: pdfView.convert(point, to: page)),

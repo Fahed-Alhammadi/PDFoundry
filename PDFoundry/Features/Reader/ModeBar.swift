@@ -112,6 +112,10 @@ struct ModeBar: View {
                 BarItem("Text", symbol: "textformat", action: onText),
                 BarItem("Date", symbol: "calendar", action: onDate),
             ] + markItems(folded: foldMarks)
+        case .redact:
+            [
+                BarItem("Selected Text", symbol: "text.viewfinder") { model.addRedactionsForSelection() },
+            ]
         }
     }
 
