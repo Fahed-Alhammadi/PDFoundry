@@ -6,6 +6,9 @@ enum PDFoundryError: LocalizedError {
     case locked(String)
     case writeFailed
     case nothingToSave
+    case alreadyProtected(String)
+    case wrongPassword
+    case limitedAccess(String)
 
     var errorDescription: String? {
         switch self {
@@ -13,6 +16,9 @@ enum PDFoundryError: LocalizedError {
         case .locked(let name): "“\(name)” is password protected. Open it and unlock it first."
         case .writeFailed: "The PDF could not be saved. Check that the device has free storage."
         case .nothingToSave: "There are no pages to save."
+        case .alreadyProtected(let name): "“\(name)” is already protected with a password. To change it, open it, choose More › Remove Password, then protect it again."
+        case .wrongPassword: "That password didn't work. Try again."
+        case .limitedAccess(let name): "“\(name)” has restrictions set by its owner, so PDFoundry can't change it or copy its pages."
         }
     }
 }
@@ -45,6 +51,31 @@ nonisolated final class ImageStampAnnotation: PDFAnnotation {
 }
 
 enum PDFOperations {
+    /// Options for writing a document: with a password, it is encrypted, and the password is both the user (open)
+    /// and the owner password, with every permission allowed. PDFKit chooses the cipher (AES-128). Without one,
+    /// no options, so the file is written unencrypted.
+    nonisolated static func writeOptions(password: String?) -> [PDFDocumentWriteOption: Any] {
+        guard let password, !password.isEmpty else { return [:] }
+        return [
+            .userPasswordOption: password,
+            .ownerPasswordOption: password,
+            .accessPermissionsOption: NSNumber(value: 0xFF),
+        ]
+    }
+
+    /// Reads a document with full access: unprotected, or unlocked with a password that is its owner password.
+    /// A protected file without the password, with a wrong one, or with only limited access throws.
+    static func fullAccess(_ data: Data?, password: String?, name: String) throws -> PDFDocument {
+        guard let data, let document = PDFDocument(data: data) else { throw PDFoundryError.unreadable(name) }
+        guard document.isEncrypted else { return document }
+        if document.isLocked {
+            guard let password, !password.isEmpty else { throw PDFoundryError.locked(name) }
+            guard document.unlock(withPassword: password) else { throw PDFoundryError.wrongPassword }
+        }
+        guard document.permissionsStatus == .owner else { throw PDFoundryError.limitedAccess(name) }
+        return document
+    }
+
     /// Joins the given files, in order, into one new document.
     static func merge(_ urls: [URL]) throws -> PDFDocument {
         try merge(urls.map { (name: $0.deletingPathExtension().lastPathComponent, data: try? Data(contentsOf: $0)) })

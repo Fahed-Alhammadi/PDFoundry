@@ -300,12 +300,44 @@ final class DocumentStore {
         }
     }
 
+    /// Writes `document` as a new file in the library. With a password, the file is encrypted with it.
     @discardableResult
-    func save(_ document: PDFDocument, named name: String) async throws -> URL {
+    func save(_ document: PDFDocument, named name: String, password: String? = nil, refreshing: Bool = true) async throws -> URL {
         let destination = uniqueURL(named: name)
-        guard document.write(to: destination) else { throw PDFoundryError.writeFailed }
-        await refresh()
+        guard document.write(to: destination, withOptions: PDFOperations.writeOptions(password: password)) else {
+            throw PDFoundryError.writeFailed
+        }
+        if refreshing { await refresh() }
         return destination
+    }
+
+    /// The listed item for a file just written to the library.
+    private func item(for url: URL, pageCount: Int, isLocked: Bool) -> PDFItem {
+        items.first { $0.url.standardizedFileURL == url.standardizedFileURL } ?? PDFItem(
+            url: url,
+            name: url.deletingPathExtension().lastPathComponent,
+            pageCount: pageCount,
+            size: 0,
+            modified: .now,
+            isLocked: isLocked
+        )
+    }
+
+    /// Splits the file at `url` into new documents in the library, one per entry of `parts` (zero-based page
+    /// lists), named "<name> (part 1)", "(part 2)"… Like Extract, the source is only read, never written or listed.
+    /// A protected source needs its password (with full access), and every part is protected with it too.
+    func split(_ url: URL, into parts: [[Int]], password: String?) async throws -> [PDFItem] {
+        let name = url.deletingPathExtension().lastPathComponent
+        let source = try PDFOperations.fullAccess(await Self.readCoordinated(url), password: password, name: name)
+        let keep = source.isEncrypted ? password : nil
+        let documents = try parts.map { try PDFOperations.extract($0, from: source) }
+        var written: [(URL, Int)] = []
+        for (index, document) in documents.enumerated() {
+            let destination = try await save(document, named: "\(name) (part \(index + 1))", password: keep, refreshing: false)
+            written.append((destination, document.pageCount))
+        }
+        await refresh()
+        return written.map { item(for: $0.0, pageCount: $0.1, isLocked: keep != nil) }
     }
 
     @discardableResult
@@ -338,22 +370,14 @@ final class DocumentStore {
     /// Copies the pages at `pages` (zero-based, kept in document order) of the file at `url` into a new document in
     /// the library, named "<name> (pages)". The source is only read, never written: it may be a file opened in
     /// place, whose every change would otherwise land in the real file. It is not added to the library either.
-    func extractPages(from url: URL, pages: IndexSet) async throws -> PDFItem {
+    /// A protected source needs its password (with full access), and the new document keeps it.
+    func extractPages(from url: URL, pages: IndexSet, password: String? = nil) async throws -> PDFItem {
         let name = url.deletingPathExtension().lastPathComponent
-        guard let data = await Self.readCoordinated(url), let source = PDFDocument(data: data) else {
-            throw PDFoundryError.unreadable(name)
-        }
-        guard !source.isLocked else { throw PDFoundryError.locked(name) }
+        let source = try PDFOperations.fullAccess(await Self.readCoordinated(url), password: password, name: name)
+        let keep = source.isEncrypted ? password : nil
         let extracted = try PDFOperations.extract(Array(pages), from: source)
-        let destination = try await save(extracted, named: name + " (pages)")
-        return items.first { $0.url.standardizedFileURL == destination.standardizedFileURL } ?? PDFItem(
-            url: destination,
-            name: destination.deletingPathExtension().lastPathComponent,
-            pageCount: extracted.pageCount,
-            size: 0,
-            modified: .now,
-            isLocked: false
-        )
+        let destination = try await save(extracted, named: name + " (pages)", password: keep)
+        return item(for: destination, pageCount: extracted.pageCount, isLocked: keep != nil)
     }
 
     /// Reads a file's bytes through a file coordinator (so a file in iCloud is downloaded first), with access to it
