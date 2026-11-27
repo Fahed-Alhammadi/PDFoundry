@@ -18,7 +18,11 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.CallSplit
 import androidx.compose.material.icons.automirrored.filled.MergeType
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 import androidx.compose.material.icons.filled.DocumentScanner
 import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.PhotoLibrary
@@ -68,12 +72,20 @@ enum class ToolSection(val title: String) {
     Enhance("Enhance")
 }
 
-/** The whole-file tools. Later features (split, compress, password, OCR…) join a section here. */
+/** The whole-file tools. Later features (compress, OCR…) join a section here. */
 enum class PdfTool(val title: String, val detail: String, val icon: ImageVector, val tint: Color, val section: ToolSection) {
     Scan("Scan Document", "Turn paper into a PDF with the camera.", Icons.Filled.DocumentScanner, Brand.Ember, ToolSection.Create),
     Photos("Create from Photos", "Make a PDF from pictures in your gallery.", Icons.Filled.PhotoLibrary, Color(0xFFD9822B), ToolSection.Create),
     Merge("Merge PDFs", "Combine documents into one, in your order.", Icons.AutoMirrored.Filled.MergeType, Brand.Steel, ToolSection.Combine),
-    Extract("Extract Pages", "Save chosen pages as a new document.", Icons.Filled.FileUpload, Color(0xFF5B6478), ToolSection.Combine)
+    Extract("Extract Pages", "Save chosen pages as a new document.", Icons.Filled.FileUpload, Color(0xFF5B6478), ToolSection.Combine),
+    Split("Split PDF", "Make several PDFs from one.", Icons.AutoMirrored.Filled.CallSplit, Color(0xFFB8441A), ToolSection.Combine),
+    Protect("Password-protect", "Lock a PDF with a password.", Icons.Filled.Lock, Brand.Graphite, ToolSection.Protect)
+}
+
+/** The Tools tab's sections in order, each with its tools; a section with no tool yet is left out. */
+fun toolCatalog(scanner: Boolean): List<Pair<ToolSection, List<PdfTool>>> {
+    val tools = PdfTool.entries.filter { it != PdfTool.Scan || scanner }
+    return ToolSection.entries.map { section -> section to tools.filter { it.section == section } }.filter { it.second.isNotEmpty() }
 }
 
 /** Whether Google's document scanner can run here: it lives in Google Play services and needs no permission. */
@@ -97,13 +109,20 @@ fun ToolsScreen(onOpen: (PdfItem) -> Unit) {
     }
 
     val actions = rememberDocumentActions(snackbar) { file -> announce(file, "“${file.nameWithoutExtension}” is now in Documents.") }
-    val tools = remember { PdfTool.entries.filter { it != PdfTool.Scan || scannerAvailable(context) } }
+    val catalog = remember { toolCatalog(scannerAvailable(context)) }
 
     var picking by remember { mutableStateOf<PdfTool?>(null) }
     /** Documents waiting in the merge sheet. Temporary copies among them are this screen's to discard. */
     var mergeTargets by remember { mutableStateOf<List<PickedDocument>?>(null) }
-    /** The document whose pages are being chosen. The extract screen owns a temporary copy. */
-    var extracting by remember { mutableStateOf<PickedDocument?>(null) }
+    /** The document whose pages are being chosen, with its password if it has one. The extract screen owns a temporary copy. */
+    var extracting by remember { mutableStateOf<Pair<PickedDocument, String?>?>(null) }
+    /** The document being split, with its password if it has one. The split sheet owns a temporary copy. */
+    var splitting by remember { mutableStateOf<Pair<PickedDocument, String?>?>(null) }
+    /** A protected document waiting for its password before Extract or Split; this screen owns its temporary copy. */
+    var unlocking by remember { mutableStateOf<Pair<PdfTool, PickedDocument>?>(null) }
+    /** The document Password-protect is asking a password for (never a temporary copy). */
+    var protecting by remember { mutableStateOf<PickedDocument?>(null) }
+    var alreadyProtected by remember { mutableStateOf<PickedDocument?>(null) }
 
     // Leaving the tab (or a document arriving from another app) with the merge sheet open.
     val waitingMerge by rememberUpdatedState(mergeTargets)
@@ -111,8 +130,8 @@ fun ToolsScreen(onOpen: (PdfItem) -> Unit) {
         onDispose { waitingMerge?.let { store.release(it) } }
     }
 
-    extracting?.let { document ->
-        ExtractPagesScreen(document = document, onCancel = { extracting = null }, onExtracted = { result, pages ->
+    extracting?.let { (document, password) ->
+        ExtractPagesScreen(document = document, password = password, onCancel = { extracting = null }, onExtracted = { result, pages ->
             extracting = null
             scope.launch { announce(result, "Saved ${if (pages == 1) "1 page" else "$pages pages"} as “${result.nameWithoutExtension}” in Documents.") }
         })
@@ -130,10 +149,8 @@ fun ToolsScreen(onOpen: (PdfItem) -> Unit) {
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            ToolSection.entries.forEach { section ->
-                val inSection = tools.filter { it.section == section }
-                if (inSection.isEmpty()) return@forEach
-                item(key = section.name, span = { GridItemSpan(maxLineSpan) }) {
+            catalog.forEach { (section, inSection) ->
+                item(key = "section-${section.name}", span = { GridItemSpan(maxLineSpan) }) {
                     Text(
                         section.title,
                         style = MaterialTheme.typography.titleSmall,
@@ -141,12 +158,12 @@ fun ToolsScreen(onOpen: (PdfItem) -> Unit) {
                         modifier = Modifier.padding(start = 4.dp, top = 12.dp).semantics { heading() }
                     )
                 }
-                items(inSection, key = { it.name }) { tool ->
+                items(inSection, key = { "tool-${it.name}" }) { tool ->
                     ToolTile(tool) {
                         when (tool) {
                             PdfTool.Scan -> actions.scan()
                             PdfTool.Photos -> actions.createFromPhotos()
-                            PdfTool.Merge, PdfTool.Extract -> picking = tool
+                            PdfTool.Merge, PdfTool.Extract, PdfTool.Split, PdfTool.Protect -> picking = tool
                         }
                     }
                 }
@@ -156,17 +173,72 @@ fun ToolsScreen(onOpen: (PdfItem) -> Unit) {
 
     picking?.let { tool ->
         DocumentPickerSheet(
-            title = if (tool == PdfTool.Merge) "Choose documents to merge" else "Choose a document",
+            title = when (tool) {
+                PdfTool.Merge -> "Choose documents to merge"
+                PdfTool.Protect -> "Choose a document to protect"
+                PdfTool.Split -> "Choose a document to split"
+                else -> "Choose a document"
+            },
             multiple = tool == PdfTool.Merge,
             onDismiss = { picking = null },
             onPick = { picked ->
                 picking = null
-                when (tool) {
-                    PdfTool.Merge -> mergeTargets = picked
-                    else -> extracting = picked.firstOrNull()
+                val first = picked.firstOrNull()
+                when {
+                    tool == PdfTool.Merge -> mergeTargets = picked
+                    first == null -> Unit
+                    tool == PdfTool.Protect -> if (first.item.locked) alreadyProtected = first else protecting = first
+                    first.item.locked -> unlocking = tool to first
+                    tool == PdfTool.Split -> splitting = first to null
+                    else -> extracting = first to null
                 }
             },
-            onError = { message -> scope.launch { snackbar.showSnackbar(message) } }
+            onError = { message -> scope.launch { snackbar.showSnackbar(message) } },
+            allowLocked = tool != PdfTool.Merge,
+            // Protecting a copy would leave the real file unprotected: the file is opened where it lives.
+            openInPlace = tool == PdfTool.Protect
+        )
+    }
+
+    unlocking?.let { (tool, document) ->
+        UnlockDialog(document.item.name, document.file, onDismiss = { store.release(listOf(document)); unlocking = null }) { password ->
+            unlocking = null
+            if (tool == PdfTool.Split) splitting = document to password else extracting = document to password
+        }
+    }
+
+    splitting?.let { (document, password) ->
+        SplitSheet(document, password, onDismiss = { splitting = null }) { parts ->
+            splitting = null
+            val first = parts.first()
+            scope.launch {
+                announce(first, if (parts.size == 1) "Saved “${first.nameWithoutExtension}” in Documents." else "Saved ${parts.size} files, “${first.nameWithoutExtension}” to “${parts.last().nameWithoutExtension}”, in Documents.")
+            }
+        }
+    }
+
+    protecting?.let { document ->
+        ProtectDialog(document.item.name, onDismiss = { protecting = null }) { password ->
+            protecting = null
+            // In the app's scope: the file is replaced in full even if this screen goes meanwhile.
+            context.app.scope.launch {
+                val message = try {
+                    store.protect(document.file, password)
+                    "“${document.item.name}” is now protected with a password."
+                } catch (e: Exception) {
+                    e.message ?: "The password could not be set."
+                }
+                scope.launch { snackbar.showSnackbar(message) }
+            }
+        }
+    }
+
+    alreadyProtected?.let { document ->
+        AlertDialog(
+            onDismissRequest = { alreadyProtected = null },
+            title = { Text("Already protected") },
+            text = { Text("“${document.item.name}” already has a password. To remove it, open the document and choose More › Remove Password.") },
+            confirmButton = { TextButton(onClick = { alreadyProtected = null }) { Text("OK") } }
         )
     }
 

@@ -90,4 +90,21 @@ struct ExtractPagesTests {
         }
         #expect(try FileManager.default.contentsOfDirectory(atPath: library.path) == ["Report.pdf"])
     }
+
+    @Test func extractingFromAProtectedFileNeedsItsPasswordAndKeepsIt() async throws {
+        let store = makeStore()
+        let plain = try makePDF(named: "Secret", pages: 3, in: elsewhere)
+        let secret = elsewhere.appending(path: "Locked.pdf")
+        #expect(try #require(PDFDocument(url: plain)).write(to: secret, withOptions: PDFOperations.writeOptions(password: "pw")))
+
+        await #expect(throws: PDFoundryError.self) {
+            _ = try await store.extractPages(from: secret, pages: [0])
+        }
+        let item = try await store.extractPages(from: secret, pages: [0, 2], password: "pw")
+
+        let extracted = try #require(PDFDocument(url: item.url))
+        #expect(extracted.isLocked, "the new document asks for the same password")
+        #expect(extracted.unlock(withPassword: "pw"))
+        #expect(extracted.pageCount == 2)
+    }
 }

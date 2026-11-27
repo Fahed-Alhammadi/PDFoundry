@@ -8,14 +8,28 @@ struct SavedSignature: Identifiable {
     var id: URL { url }
 }
 
-/// Signatures the user has drawn, kept as transparent PNGs inside the app's private storage.
+/// What a saved drawing is: a signature or initials. Each kind has its own list and folder.
+enum SignatureKind {
+    case signature, initials
+
+    var folder: String {
+        switch self {
+        case .signature: "Signatures"
+        case .initials: "Initials"
+        }
+    }
+}
+
+/// Signatures (or initials) the user has drawn, kept as transparent PNGs inside the app's private storage.
 @Observable
 final class SignatureStore {
     private(set) var signatures: [SavedSignature] = []
+    let kind: SignatureKind
     private let directory: URL
 
-    init(directory: URL = URL.applicationSupportDirectory.appending(path: "Signatures")) {
-        self.directory = directory
+    init(kind: SignatureKind = .signature, root: URL = URL.applicationSupportDirectory) {
+        self.kind = kind
+        self.directory = root.appending(path: kind.folder)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         load()
     }

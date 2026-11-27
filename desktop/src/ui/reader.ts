@@ -1,26 +1,33 @@
 // The reader: one document, shown page by page, with the tools that change it (Markup: highlight, underline and
-// strikethrough on selected text, typed text, drawing; Fill & Sign: signatures and text; Pages: the organizer),
+// strikethrough on selected text, typed text, drawing; Fill & Sign: signatures, initials, text, the date, ✓ and ✗;
+// Pages: the organizer), the document's own form fields (filled in place whenever it can be changed),
 // search, zoom, printing and undo. The file is opened where it is. Changes are kept in memory until the user
 // chooses Save (back to the same file) or Save As; leaving with unsaved changes asks first.
+//
+// A protected file opened with a password that gives full access is decrypted once: every change, and every Undo
+// step, works on the decrypted bytes in memory, and Save and Save As encrypt them again with the same password. The
+// password is kept here only while the document is open.
 import { api, revealLabel, title } from './api.ts';
-import { button, choose, dialog, h, icon, iconButton, message, prompt, showMenu, toast } from './dom.ts';
+import { button, choose, confirm, dialog, h, icon, iconButton, message, prompt, showMenu, toast } from './dom.ts';
 import type { MenuItem } from './dom.ts';
-import { paintStrokes, rasterize, textImage } from './images.ts';
+import { TEXT_INK, fieldTextPng, markPng, paintStrokes, placedFromPng, rasterize, textImage } from './images.ts';
 import type { Placed, Stroke } from './images.ts';
 import { HIGHLIGHT_COLOURS, MARK_RED, modeBar } from './modebar.ts';
 import type { TextTool, ToolMode } from './modebar.ts';
 import { organizer } from './organizer.ts';
-import { PasswordNeeded, openPdf, pageSizes, renderPage, renderTextLayer, search } from './pdfview.ts';
-import type { Match, PDFDocumentProxy, Size } from './pdfview.ts';
+import { alreadyProtected, protectSheet } from './protect.ts';
+import { PasswordNeeded, openPdf, pageSizes, renderFormLayer, renderPage, renderTextLayer, search } from './pdfview.ts';
+import type { Match, PDFDocumentProxy, Size, Widget } from './pdfview.ts';
 import { signatureDialog } from './sign.ts';
+import { todayText } from '../core/dates.ts';
 import * as pdf from '../core/pdf.ts';
-import type { PageRect, TextMark } from '../core/pdf.ts';
+import type { FieldInfo, FieldValue, PageRect, TextMark } from '../core/pdf.ts';
 import { joinBoxes } from '../core/rects.ts';
 import type { TextDirection } from '../core/rects.ts';
 
 const UNDO_STEPS = 10;
 const PENS = [
-  { name: 'Black', color: '#111318' },
+  { name: 'Black', color: TEXT_INK },
   { name: 'Blue', color: '#1a3fb0' },
   { name: 'Red', color: '#c62828' },
 ];
@@ -46,10 +53,29 @@ export class Reader {
   private bytes: Uint8Array = new Uint8Array();
   /** The bytes as they are on disk. The document has unsaved changes whenever `bytes` is something else. */
   private savedBytes: Uint8Array = this.bytes;
+  /** The password of a protected document that was unlocked with full access. Every write is encrypted with it. */
+  private password: string | null = null;
   private doc: PDFDocumentProxy | null = null;
   private sizes: Size[] = [];
   private editable = true;
   private undoStack: Uint8Array[] = [];
+  /**
+   * A field change is written into `bytes` without redrawing the pages (the inputs already show it), so the open
+   * pdf.js document is older than `bytes` until the next redraw. Printing and the organizer redraw first.
+   */
+  private stale = false;
+  /** Field changes, applied one after another in the order they were made. */
+  private fieldWork: Promise<void> = Promise.resolve();
+  /** A form field has been typed in and not yet left: its value is only in the input so far. */
+  private typing = false;
+  /** Field changes queued or being written. Until they are done the document counts as changed. */
+  private pendingFields = 0;
+  /** Opened with an owner password that is not the open password: the next save sets the open password to it. */
+  private passwordNote = false;
+  /** The form widgets on each painted page, by pdf.js id. */
+  private widgets = new Map<string, Widget>();
+  /** The document's signature fields (drawn over the page as "Sign here" boxes). */
+  private signatureFields: Promise<FieldInfo[]> | null = null;
   private zoom: number | 'fit' = 'fit';
   private scale = 1;
   private busy = false;
@@ -66,6 +92,7 @@ export class Reader {
 
   private readonly heading = h('h1.doc-title');
   private readonly edited = h('span.edited', { hidden: true }, 'Edited');
+  private readonly locked = h('span.locked', { hidden: true, title: 'Protected with a password', 'aria-label': 'Protected with a password', role: 'img' }, icon('lock', 16));
   private readonly saveButton = h('button.button.save', { type: 'button', disabled: true, title: 'Save (Ctrl+S)', onclick: () => void this.save() }, 'Save');
   private readonly counter = h('span.page-counter', { role: 'status' });
   private readonly zoomLabel = h('span.zoom-label');
@@ -82,6 +109,7 @@ export class Reader {
       h('header.reader-bar',
         iconButton('back', 'Close document', () => void this.close()),
         this.heading,
+        this.locked,
         this.edited,
         this.counter,
         h('span.spacer'),
@@ -104,6 +132,20 @@ export class Reader {
     this.scroller.addEventListener('pointerup', (e) => {
       if (this.textTool) setTimeout(() => void this.markSelection(e), 0);
     });
+    // A form field changed (text when it loses focus, a box when it is ticked, a choice when picked): write it.
+    this.scroller.addEventListener('change', (e) => this.fieldChanged(e));
+    // Typing in a field already counts as a change (the Save button, the window's close question).
+    this.scroller.addEventListener('input', (e) => {
+      if (!(e.target as HTMLElement)?.closest?.('.annotationLayer') || this.typing) return;
+      this.typing = true;
+      this.report();
+    });
+    // Leaving a field that was typed in writes it, even when no change event came (a value set by a script, an
+    // input method): a change event, when there is one, comes first and has already cleared `typing`.
+    this.scroller.addEventListener('focusout', (e) => {
+      if (!(e.target as HTMLElement)?.closest?.('.annotationLayer') || !this.typing) return;
+      this.fieldChanged(e);
+    });
     // Pressing a tool must not take away the text selection it is meant for.
     this.dock.addEventListener('mousedown', (e) => e.preventDefault());
     new ResizeObserver(() => {
@@ -119,18 +161,23 @@ export class Reader {
     if (!(await this.leave())) return false;
     try {
       const bytes = await api.read(file);
-      const doc = await openPdf(bytes, (wrong) => prompt(wrong ? 'That password didn’t work' : 'This PDF is protected', 'Password', '', 'Unlock', 'password'));
+      let tried: string | null = null; // the password pdf.js was last given: the one that worked, once it opens
+      const doc = await openPdf(bytes, async (wrong) => (tried = await prompt(wrong ? 'That password didn’t work' : 'This PDF is protected', 'Password', '', 'Unlock', 'password')));
+      // Protected: editable only when the password gives full access. Then the document is worked on decrypted.
+      // Anything else (a password that only opens it, protection PDFoundry can't undo itself) is shown read-only.
+      const access = await pdf.access(bytes, tried);
       this.reset();
       this.file = file;
-      this.bytes = bytes;
-      this.savedBytes = bytes;
+      this.bytes = access.bytes;
+      this.savedBytes = access.bytes;
+      this.password = access.password;
+      this.passwordNote = access.changesPassword;
       this.doc = doc;
       this.sizes = await pageSizes(doc);
-      this.editable = await pdf.isEditable(bytes);
+      this.editable = access.editable;
       this.heading.textContent = title(file);
       this.heading.title = file;
-      this.notice.hidden = this.editable;
-      this.notice.replaceChildren(icon('lock', 18), 'This PDF is protected, so it can be read but not changed.');
+      this.showProtection();
       this.zoom = 'fit';
       this.layout(false);
       this.drawDock();
@@ -143,8 +190,23 @@ export class Reader {
     }
   }
 
+  /** The lock beside the title, and the notice of a protected file that can only be read. */
+  private showProtection(): void {
+    this.locked.hidden = !this.password;
+    this.notice.hidden = this.editable && !this.passwordNote;
+    this.notice.replaceChildren(icon('lock', 18), this.editable
+      ? 'Saving will set this document’s password to the one you entered.'
+      : 'This PDF is protected, so it can be read but not changed.');
+  }
+
   private reset(): void {
     this.observer?.disconnect();
+    this.password = null;
+    this.passwordNote = false;
+    this.typing = false;
+    this.stale = false;
+    this.widgets.clear();
+    this.signatureFields = null;
     void this.doc?.loadingTask.destroy();
     this.doc = null;
     this.undoStack = [];
@@ -164,6 +226,7 @@ export class Reader {
     this.reset();
     this.file = '';
     this.bytes = this.savedBytes = new Uint8Array();
+    this.showProtection();
     this.report();
     this.host.back();
     return true;
@@ -172,7 +235,14 @@ export class Reader {
   // Saving
 
   get dirty(): boolean {
-    return !!this.file && this.bytes !== this.savedBytes;
+    return !!this.file && (this.bytes !== this.savedBytes || this.typing || this.pendingFields > 0);
+  }
+
+  /** Writes the field being typed in (by leaving it) and waits for every field change to be in `bytes`. */
+  private async commitFields(): Promise<void> {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active.closest('.annotationLayer')) active.blur(); // fires its change
+    await this.fieldWork;
   }
 
   /** Shows whether there are unsaved changes, here and in the window's title bar. */
@@ -185,6 +255,7 @@ export class Reader {
 
   /** Before closing or opening something else: with unsaved changes, asks whether to save them. False = stay. */
   private async leave(): Promise<boolean> {
+    await this.commitFields();
     if (!this.dirty) return true;
     const answer = await choose(`Save the changes to “${title(this.file)}”?`, 'Your changes will be lost if you don’t save them.', [
       { label: 'Cancel', value: 'cancel' },
@@ -197,6 +268,7 @@ export class Reader {
 
   /** Writes the changes back to the file that was opened. Returns false when it could not be saved. */
   async save(): Promise<boolean> {
+    await this.commitFields(); // the field being typed in (Ctrl+S, the close question) is written first
     if (!this.file || this.busy) return false;
     if (!this.dirty) return true;
     if (this.ink || this.placement) {
@@ -205,8 +277,10 @@ export class Reader {
     }
     const bytes = this.bytes;
     try {
-      await api.save(this.file, bytes);
+      await api.save(this.file, await this.encrypted(bytes));
       this.savedBytes = bytes;
+      this.passwordNote = false; // done: the file now opens with the password that was entered
+      this.showProtection();
       this.report();
       toast('Saved.');
       return true;
@@ -218,18 +292,104 @@ export class Reader {
 
   /** Saves the document, changes included, as a new file and continues in that file. The original is left as it was. */
   async saveAs(): Promise<boolean> {
+    await this.commitFields();
     if (!this.file || this.busy) return false;
     const bytes = this.bytes;
     try {
-      const saved = await api.saveAs(title(this.file), bytes, this.file);
+      const saved = await api.saveAs(title(this.file), await this.encrypted(bytes), this.file);
       if (!saved) return false;
       this.file = saved;
       this.savedBytes = bytes;
+      this.passwordNote = false;
+      this.showProtection();
       this.heading.textContent = title(saved);
       this.heading.title = saved;
       this.report();
       this.host.opened(saved);
       toast('Saved.');
+      return true;
+    } catch (e) {
+      toast(message(e), true);
+      return false;
+    }
+  }
+
+  /** What goes to disk: the bytes encrypted with the document's password, when it has one. */
+  private encrypted(bytes: Uint8Array): Promise<Uint8Array> {
+    return this.password ? pdf.protect(bytes, this.password) : Promise.resolve(bytes);
+  }
+
+  // Passwords (More › Protect with Password / Remove Password, and Tools › Password-protect on the open document)
+
+  /** The open document's password, when `file` is that document and it is protected; otherwise null. */
+  passwordFor(file: string): string | null {
+    return file && file === this.file ? this.password : null;
+  }
+
+  /**
+   * Protects the open file with a new password, in place. With unsaved changes it asks first, because protecting
+   * writes the file (Save and Protect). From then on every save is encrypted with this password.
+   */
+  async protectWithPassword(): Promise<boolean> {
+    await this.commitFields();
+    if (!this.file || this.busy) return false;
+    if (this.password || (await pdf.isProtected(this.bytes))) {
+      alreadyProtected(this.file);
+      return false;
+    }
+    if (!this.editable) {
+      toast('This PDF can’t be changed by PDFoundry.', true);
+      return false;
+    }
+    if (this.ink || this.placement) {
+      toast('Finish what you are placing or drawing first.', true);
+      return false;
+    }
+    if (this.dirty) {
+      const answer = await choose(`Save the changes to “${title(this.file)}” first?`, 'Protecting saves the file, with your changes.', [
+        { label: 'Cancel', value: 'cancel' },
+        { label: 'Save and Protect', value: 'save', kind: 'primary' },
+      ]);
+      if (answer !== 'save') return false;
+    }
+    const password = await protectSheet(this.file);
+    if (!password || !this.file) return false;
+    const bytes = this.bytes;
+    try {
+      await api.save(this.file, await pdf.protect(bytes, password));
+      this.password = password;
+      this.savedBytes = bytes;
+      this.passwordNote = false;
+      this.showProtection();
+      this.report();
+      toast(`“${title(this.file)}” is now protected with a password.`);
+      return true;
+    } catch (e) {
+      toast(message(e), true);
+      return false;
+    }
+  }
+
+  /** Takes the password off: the file is written without encryption (with any unsaved changes), after asking. */
+  async removePassword(): Promise<boolean> {
+    await this.commitFields();
+    if (!this.file || this.busy || !this.password) return false;
+    if (this.ink || this.placement) {
+      toast('Finish what you are placing or drawing first.', true);
+      return false;
+    }
+    const ok = await confirm(`Remove the password from “${title(this.file)}”?`,
+      `Anyone who has the file will be able to open it.${this.dirty ? ' Your unsaved changes are saved too.' : ''}`, 'Remove Password');
+    if (!ok || !this.file) return false;
+    const bytes = this.bytes;
+    try {
+      await api.save(this.file, bytes);
+      this.password = null;
+      this.savedBytes = bytes;
+      this.passwordNote = false;
+      this.showProtection();
+      this.report();
+      toast('The password was removed.');
       return true;
     } catch (e) {
       toast(message(e), true);
@@ -285,7 +445,9 @@ export class Reader {
     try {
       const index = Number(page.dataset.index);
       const fresh = h('canvas.sheet');
-      await (await renderPage(doc, index, fresh, page.clientWidth)).promise;
+      // An editable document gets its form fields as inputs; otherwise they are drawn as saved.
+      const forms = this.editable ? new Map<string, HTMLCanvasElement>() : undefined;
+      await (await renderPage(doc, index, fresh, page.clientWidth, undefined, forms)).promise;
       if (doc !== this.doc || page.dataset.painted !== key) return; // outdated: a newer paint is under way
       page.querySelector('canvas.sheet')?.replaceWith(fresh); // swapped in when ready, so a redraw never flashes blank
       // The selectable text over the picture, sized by the page box's pixels per point.
@@ -297,6 +459,7 @@ export class Reader {
       page.querySelector('.textLayer')?.remove();
       fresh.after(layer);
       page.dataset.text = String(pieces);
+      if (forms) await this.paintForms(doc, index, page, layer, forms);
     } catch {
       delete page.dataset.painted;
     }
@@ -347,7 +510,7 @@ export class Reader {
   // Changing the document
 
   /** Applies a change and shows the result. Nothing is written to the file until Save. The previous version is kept for Undo. */
-  async change(action: (bytes: Uint8Array) => Promise<Uint8Array>, done?: string): Promise<boolean> {
+  async change(action: (bytes: Uint8Array) => Promise<Uint8Array>, done?: string, quiet = false): Promise<boolean> {
     if (this.busy || !this.doc) return false;
     if (!this.editable) {
       toast('This PDF is protected, so it can only be read.', true);
@@ -361,7 +524,10 @@ export class Reader {
       if (after !== before) {
         this.undoStack.push(before);
         if (this.undoStack.length > UNDO_STEPS) this.undoStack.shift();
-        await this.show(after);
+        if (quiet) {
+          this.bytes = after;
+          this.stale = true;
+        } else await this.show(after);
       }
       if (done) toast(done);
       return true;
@@ -384,11 +550,21 @@ export class Reader {
     this.bytes = bytes;
     this.doc = doc;
     this.sizes = sizes;
+    this.stale = false;
+    this.typing = false; // the inputs are drawn again from the bytes
+    this.widgets.clear();
+    this.signatureFields = null;
     this.matches = [];
     this.layout(true);
   }
 
+  /** Redraws from `bytes` when field changes were written without a redraw (before printing or organizing). */
+  private async fresh(): Promise<void> {
+    if (this.stale) await this.show(this.bytes);
+  }
+
   async undo(): Promise<void> {
+    await this.fieldWork; // a field change still being written comes first, so Undo takes back the latest step
     if (this.busy || !this.undoStack.length || this.ink || this.placement) return;
     this.busy = true;
     try {
@@ -454,6 +630,12 @@ export class Reader {
         },
         draw: () => this.beginInk(),
         signature: () => void signatureDialog((signature) => this.beginPlacement(signature, 0.32)),
+        initials: () => void signatureDialog((initials) => this.beginPlacement(initials, 0.12), 'initials'),
+        date: () => {
+          this.textTool = null;
+          this.textDialog(todayText(), 'Add date');
+        },
+        mark: (mark) => void this.placeMark(mark),
         pages: () => this.organize(),
         undo: () => void this.undo(),
       }));
@@ -775,8 +957,10 @@ export class Reader {
     }
   }
 
-  private textDialog(): void {
+  /** Text (or Date, with today's date filled in and editable) to place on the page. */
+  private textDialog(value = '', heading = 'Add text'): void {
     const input = h('textarea', { rows: 3, placeholder: 'Type your text', 'aria-label': 'Text to add' });
+    input.value = value;
     const size = h('select', { 'aria-label': 'Text size' },
       h('option', { value: '10' }, 'Small'), h('option', { value: '14', selected: true }, 'Medium'), h('option', { value: '20' }, 'Large'), h('option', { value: '30' }, 'Extra large'));
     let color = PENS[0].color;
@@ -797,8 +981,111 @@ export class Reader {
       const page = this.sizes[this.currentPage()];
       this.beginPlacement(image, image.widthPoints / page.width);
     }, 'primary');
-    const d = dialog('Add text', [input, h('div.pad-tools', h('span.hint', 'Size'), size, h('span.spacer'), h('span.hint', 'Colour'), ...swatches)],
+    const d = dialog(heading, [input, h('div.pad-tools', h('span.hint', 'Size'), size, h('span.spacer'), h('span.hint', 'Colour'), ...swatches)],
       [button('Cancel', () => d.close()), add]);
+  }
+
+  /** ✓ or ✗, placed and resized like a signature. About 18 points wide to start with. */
+  private async placeMark(mark: 'check' | 'cross'): Promise<void> {
+    this.textTool = null;
+    const item = await placedFromPng(await markPng(mark));
+    this.beginPlacement(item, 18 / this.sizes[this.currentPage()].width);
+  }
+
+  // Form fields: pdf.js's inputs over each page; every committed change is written into the document (one Undo step)
+
+  private async paintForms(doc: PDFDocumentProxy, index: number, page: HTMLElement, after: HTMLElement, forms: Map<string, HTMLCanvasElement>): Promise<void> {
+    const layer = h('div');
+    const widgets = await renderFormLayer(doc, index, layer, forms);
+    const signing = (await (this.signatureFields ??= pdf.fields(this.bytes).then((all) => all.filter((f) => f.kind === 'signature' && !f.readOnly)).catch(() => [])))
+      .filter((f) => f.page === index);
+    if (doc !== this.doc || !after.isConnected) return;
+    for (const widget of widgets) this.widgets.set(widget.id, widget);
+    page.querySelectorAll('.annotationLayer, .sign-field').forEach((el) => el.remove());
+    after.after(layer);
+    for (const field of signing) {
+      const box = h('button.sign-field', { type: 'button', title: `Sign ${field.name}`, 'aria-label': `Sign here (${field.name})`, onclick: () => this.signField(field) },
+        icon('sign', 16), h('span', 'Sign here'));
+      Object.assign(box.style, { left: `${field.rect.x * 100}%`, top: `${field.rect.y * 100}%`, width: `${field.rect.width * 100}%`, height: `${field.rect.height * 100}%` });
+      layer.after(box);
+    }
+  }
+
+  /** A signature field: the chosen signature is stamped to fit its box (the field itself stays an unsigned field). */
+  private signField(field: FieldInfo): void {
+    if (this.busy || this.ink || this.placement || this.textTool) return;
+    void signatureDialog(async (signature) => {
+      const size = this.sizes[field.page];
+      const box = { width: field.rect.width * size.width, height: field.rect.height * size.height };
+      const tall = Math.min(box.width / signature.aspect, box.height); // the signature's height that fits, in points
+      const width = (tall * signature.aspect) / size.width;
+      const height = tall / size.height;
+      const rect = { x: field.rect.x + (field.rect.width - width) / 2, y: field.rect.y + (field.rect.height - height) / 2, width, height };
+      await this.change((bytes) => pdf.stamp(bytes, field.page, signature.png, rect));
+      URL.revokeObjectURL(signature.url);
+    });
+  }
+
+  /** A pdf.js form input changed: its value is written into the document's field (an Undo step; saved on Save). */
+  private fieldChanged(e: Event): void {
+    const input = e.target as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+    const id = input?.closest?.('.annotationLayer') ? input.getAttribute('data-element-id') : null;
+    const widget = id ? this.widgets.get(id) : undefined;
+    if (!widget || !this.editable || widget.readOnly) return;
+    let value: FieldValue;
+    if (input instanceof HTMLSelectElement) {
+      const chosen = [...input.selectedOptions].map((o) => o.value); // export values: what the form stores
+      value = input.multiple ? chosen : chosen[0] ?? '';
+    } else if (input instanceof HTMLInputElement && input.type === 'checkbox') value = input.checked;
+    else if (input instanceof HTMLInputElement && input.type === 'radio') {
+      if (!input.checked) return; // the button that was turned off: the one turned on reports the choice
+      value = widget.buttonValue ?? '';
+    } else value = input.value;
+    const name = widget.fieldName;
+    const size = { width: Math.abs(widget.rect[2] - widget.rect[0]), height: Math.abs(widget.rect[3] - widget.rect[1]) };
+    this.typing = false;
+    this.pendingFields++;
+    this.report();
+    this.fieldWork = this.fieldWork.then(() => this.writeField(name, value, size, !!widget.multiLine)).finally(() => {
+      this.pendingFields--;
+      this.report();
+    });
+  }
+
+  private async writeField(name: string, value: FieldValue, size: { width: number; height: number }, multiline: boolean): Promise<void> {
+    const [file, doc] = [this.file, this.doc];
+    await this.idle(); // after any change under way
+    if (!this.doc || file !== this.file) return; // closed meanwhile
+    // Redrawn meanwhile (another change came first): its inputs don't show this value, so redraw once it is written.
+    const quiet = doc === this.doc;
+    let written = false;
+    if (this.busy) toast('That field couldn’t be changed because PDFoundry was busy. Please try again.', true);
+    else {
+      try {
+        const images: Record<string, Uint8Array> = {};
+        // Text the standard font can't show (Arabic, say) is drawn here and becomes the field's appearance; the
+        // field's value is still the text itself.
+        if (typeof value === 'string' && value && !pdf.canEncode(value)) images[name] = await fieldTextPng(value, size, multiline);
+        written = await this.change((bytes) => pdf.fillFields(bytes, { [name]: value }, images), undefined, quiet); // errors are shown
+      } catch (e) {
+        toast(message(e), true);
+      }
+    }
+    // Not written: the inputs go back to what the document holds, so nothing shows that isn't in it.
+    if (!written) {
+      await this.idle();
+      if (!this.busy && this.doc) await this.show(this.bytes).catch(() => {});
+    }
+  }
+
+  /** Waits (up to about 10 seconds) until no other change is being applied. */
+  private async idle(): Promise<void> {
+    for (let i = 0; this.busy && i < 400; i++) await new Promise((r) => setTimeout(r, 25));
+  }
+
+  /** Waits for field changes still being written (the self-test, and before saving). */
+  settle(): Promise<void> {
+    return this.fieldWork;
   }
 
   // Search
@@ -882,6 +1169,10 @@ export class Reader {
       { label: 'Save', icon: 'save', disabled: !this.dirty, action: () => void this.save() },
       { label: 'Save As…', icon: 'copy', action: () => void this.saveAs() },
       'separator',
+      this.password
+        ? { label: 'Remove Password', icon: 'unlock', action: () => void this.removePassword() }
+        : { label: 'Protect with Password', icon: 'lock', disabled: !this.editable, action: () => void this.protectWithPassword() },
+      'separator',
       { label: revealLabel(), icon: 'folder', action: () => void api.reveal(this.file) },
       { label: 'Print…', icon: 'print', action: () => void this.print() },
       'separator',
@@ -889,11 +1180,13 @@ export class Reader {
     ];
   }
 
-  organize(): void {
+  async organize(): Promise<void> {
     if (!this.doc) return;
     if (!this.editable) return void toast('This PDF is protected, so its pages cannot be changed.', true);
     if (this.ink) this.endInk();
     this.endPlacement();
+    await this.fieldWork;
+    await this.fresh();
     organizer(this);
   }
 
@@ -909,6 +1202,8 @@ export class Reader {
   /** Prints through the system dialog: each page is drawn as an image on its own sheet. */
   async print(): Promise<void> {
     if (!this.doc || this.busy) return;
+    await this.fieldWork;
+    await this.fresh();
     this.busy = true;
     const holder = document.getElementById('print')!;
     const urls: string[] = [];

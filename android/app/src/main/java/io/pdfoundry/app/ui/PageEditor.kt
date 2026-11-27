@@ -126,7 +126,7 @@ fun PageEditor(
     // The item being placed, as fractions of the page: centre and width.
     var centerX by remember { mutableFloatStateOf(0.5f) }
     var centerY by remember { mutableFloatStateOf(0.5f) }
-    var widthFraction by remember { mutableFloatStateOf(0.45f) }
+    var widthFraction by remember { mutableFloatStateOf((mode as? EditMode.Place)?.width ?: 0.45f) }
     var boxSize by remember { mutableStateOf(Offset(1f, 1f)) }
 
     val title = when (mode) {
@@ -274,7 +274,7 @@ fun PageEditor(
                                     .pointerInput(Unit) {
                                         detectDragGestures { change, drag ->
                                             change.consume()
-                                            widthFraction = (widthFraction + 2 * drag.x / widthPx).coerceIn(0.08f, 1.2f)
+                                            widthFraction = (widthFraction + 2 * drag.x / widthPx).coerceIn(0.03f, 1.2f)
                                         }
                                     }
                                     .semantics { contentDescription = "Resize" },
@@ -302,55 +302,64 @@ private fun PenSwatch(pen: Pen, selected: Boolean, onClick: () -> Unit) {
 
 // region Signatures
 
-/** Pick a saved signature or draw a new one. */
+/** Signatures and initials: drawn on the same pad, kept in separate lists. */
+enum class SignatureKind(val title: String, val newTitle: String, val use: String, val saved: String) {
+    Signature("Signature", "New signature", "Use signature", "Saved signature"),
+    Initials("Initials", "New initials", "Use initials", "Saved initials")
+}
+
 @Composable
-fun SignaturePicker(onPick: (Bitmap) -> Unit) {
-    val store = LocalContext.current.app.signatures
+private fun storeFor(kind: SignatureKind) = LocalContext.current.app.let { if (kind == SignatureKind.Initials) it.initials else it.signatures }
+
+/** Pick a saved signature (or initials) or draw a new one. */
+@Composable
+fun SignaturePicker(kind: SignatureKind = SignatureKind.Signature, onPick: (Bitmap) -> Unit) {
+    val store = storeFor(kind)
     var drawing by remember { mutableStateOf(store.signatures.isEmpty()) }
 
     Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 24.dp)) {
         if (drawing) {
-            SignaturePad(onUse = { image, keep ->
+            SignaturePad(kind, onUse = { image, keep ->
                 if (keep) store.add(image)
                 onPick(image)
             })
         } else {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Signature", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                Text(kind.title, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
                 TextButton(onClick = { drawing = true }) {
                     Icon(Icons.Filled.Add, null)
                     Spacer(Modifier.width(4.dp))
                     Text("New")
                 }
             }
-            SignatureList(onPick = onPick, modifier = Modifier.height(300.dp))
+            SignatureList(kind, onPick = onPick, modifier = Modifier.height(300.dp))
         }
     }
 }
 
-/** Saved signatures. With `onPick`, tapping one chooses it. */
+/** Saved signatures (or initials). With `onPick`, tapping one chooses it. */
 @Composable
-fun SignatureList(modifier: Modifier = Modifier, onPick: ((Bitmap) -> Unit)? = null) {
-    val store = LocalContext.current.app.signatures
+fun SignatureList(kind: SignatureKind = SignatureKind.Signature, modifier: Modifier = Modifier, onPick: ((Bitmap) -> Unit)? = null) {
+    val store = storeFor(kind)
     LazyColumn(modifier, verticalArrangement = Arrangement.spacedBy(10.dp)) {
         items(store.signatures, key = { it.file.name }) { signature ->
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     Modifier.weight(1f).height(84.dp).clip(RoundedCornerShape(12.dp)).background(Color.White)
                         .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(12.dp))
-                        .clickable(enabled = onPick != null, onClickLabel = "Use this signature") { onPick?.invoke(signature.image) }
+                        .clickable(enabled = onPick != null, onClickLabel = kind.use) { onPick?.invoke(signature.image) }
                         .padding(10.dp),
                     contentAlignment = Alignment.Center
-                ) { Image(signature.image.asImageBitmap(), "Saved signature", contentScale = ContentScale.Fit) }
-                IconButton(onClick = { store.delete(signature) }) { Icon(Icons.Filled.Delete, "Delete signature") }
+                ) { Image(signature.image.asImageBitmap(), kind.saved, contentScale = ContentScale.Fit) }
+                IconButton(onClick = { store.delete(signature) }) { Icon(Icons.Filled.Delete, "Delete ${kind.title.lowercase()}") }
             }
         }
     }
 }
 
-/** A pad for drawing a signature with a finger or stylus. */
+/** A pad for drawing a signature or initials with a finger or stylus. */
 @Composable
-fun SignaturePad(onUse: (Bitmap, keep: Boolean) -> Unit) {
+fun SignaturePad(kind: SignatureKind = SignatureKind.Signature, onUse: (Bitmap, keep: Boolean) -> Unit) {
     val strokes = remember { mutableStateListOf<MutableList<Offset>>() }
     var revision by remember { mutableIntStateOf(0) }
     var blue by remember { mutableStateOf(false) }
@@ -358,7 +367,7 @@ fun SignaturePad(onUse: (Bitmap, keep: Boolean) -> Unit) {
     val ink = if (blue) Color(0xFF0D3399) else Color.Black
 
     Column {
-        Text("New signature", style = MaterialTheme.typography.titleLarge)
+        Text(kind.newTitle, style = MaterialTheme.typography.titleLarge)
         Spacer(Modifier.height(12.dp))
         Box(Modifier.fillMaxWidth().height(190.dp).clip(RoundedCornerShape(16.dp)).background(Color.White).border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(16.dp))) {
             Column(Modifier.align(Alignment.BottomCenter).padding(horizontal = 24.dp).padding(bottom = 14.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -371,7 +380,7 @@ fun SignaturePad(onUse: (Bitmap, keep: Boolean) -> Unit) {
                         onDragStart = { strokes.add(mutableListOf(it)); revision++ },
                         onDrag = { change, _ -> strokes.lastOrNull()?.add(change.position); revision++ }
                     )
-                }.semantics { contentDescription = "Signature pad" }
+                }.semantics { contentDescription = if (kind == SignatureKind.Initials) "Initials pad" else "Signature pad" }
             ) {
                 revision
                 for (points in strokes) {
@@ -392,7 +401,7 @@ fun SignaturePad(onUse: (Bitmap, keep: Boolean) -> Unit) {
             Text("Save for next time")
         }
         Spacer(Modifier.height(6.dp))
-        Button(enabled = strokes.isNotEmpty(), onClick = { signatureBitmap(strokes, ink.toArgb())?.let { onUse(it, keep) } }, modifier = Modifier.fillMaxWidth()) { Text("Use signature") }
+        Button(enabled = strokes.isNotEmpty(), onClick = { signatureBitmap(strokes, ink.toArgb())?.let { onUse(it, keep) } }, modifier = Modifier.fillMaxWidth()) { Text(kind.use) }
     }
 }
 

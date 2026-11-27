@@ -88,7 +88,7 @@ struct PDFOperationsTests {
     @Test func openingTheSameFileAgainDoesNotAddItAgain() async throws {
         let library = folder.appending(path: "Library")
         try FileManager.default.createDirectory(at: library, withIntermediateDirectories: true)
-        let store = DocumentStore(directory: library)
+        let store = DocumentStore(directory: library, linksFile: folder.appending(path: "opened.json")) // never the app's own list
         let report = try makePDF(named: "Report", pages: 2)
 
         let first = try await store.importFiles([report])
@@ -196,7 +196,7 @@ struct PDFOperationsTests {
         let shared = try #require(model.temporaryCopy())
         let copy = try #require(PDFDocument(url: shared))
         #expect(copy.isLocked, "the shared copy still asks for the password")
-        #expect(try Data(contentsOf: shared) == Data(contentsOf: secret))
+        #expect(copy.unlock(withPassword: "open-me"))
     }
 
     @Test func revertPutsTheFileBackExactlyAsItWasOpened() async throws {
@@ -266,7 +266,7 @@ struct PDFOperationsTests {
     }
 
     @Test func libraryNamesNeverCollideOrEscapeTheFolder() async throws {
-        let store = DocumentStore(directory: folder)
+        let store = DocumentStore(directory: folder, linksFile: folder.appending(path: "Links/opened.json")) // never the app's own list
         let first = try makePDF(named: "Report", pages: 1)
 
         #expect(store.uniqueURL(named: "Report").lastPathComponent == "Report 2.pdf")

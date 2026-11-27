@@ -4,12 +4,14 @@ import SwiftUI
 struct PDFoundryApp: App {
     @State private var store = DocumentStore()
     @State private var signatures = SignatureStore()
+    @State private var initials = SignatureStore(kind: .initials)
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environment(store)
                 .environment(signatures)
+                .environment(\.initialsStore, initials)
         }
     }
 }

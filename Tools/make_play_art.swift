@@ -96,7 +96,7 @@ do {
 // Phone screenshots, 1080 x 1920, with a caption above the screen.
 let captions: [(file: String, caption: String)] = [
     ("01-library", "Your documents in one place"),
-    ("02-signed", "Sign and highlight"),
+    ("02-fill-sign", "Fill in and sign forms"),
     ("03-merge", "Merge documents"),
     ("04-pages", "Reorder, rotate and delete pages"),
     ("05-settings", "Private: no account, no ads"),

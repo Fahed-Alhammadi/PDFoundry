@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.Draw
 import androidx.compose.material.icons.filled.FileCopy
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Restore
@@ -96,8 +97,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.pdfoundry.app.app
 import io.pdfoundry.app.data.DocumentStore
+import io.pdfoundry.app.data.FieldKind
+import io.pdfoundry.app.data.FormField
 import io.pdfoundry.app.data.InkStroke
+import io.pdfoundry.app.data.bitmap
+import io.pdfoundry.app.data.todayText
 import io.pdfoundry.app.data.PdfEngine
+import io.pdfoundry.app.data.PdfException
+import io.pdfoundry.app.data.UnlockResult
 import io.pdfoundry.app.data.PdfSource
 import io.pdfoundry.app.data.SearchHit
 import io.pdfoundry.app.data.sameContents
@@ -114,8 +121,11 @@ import java.io.File
 /** What the page editor is doing. */
 sealed interface EditMode {
     data class Ink(val highlighter: Boolean) : EditMode
-    /** An image (signature or typed text) being positioned before it is placed. */
-    data class Place(val image: Bitmap, val label: String) : EditMode
+    /**
+     * An image (signature, initials, typed text, a date or a mark) being positioned before it is placed.
+     * [width] is how wide it starts, as a fraction of the page.
+     */
+    data class Place(val image: Bitmap, val label: String, val width: Float = 0.45f) : EditMode
     /** Words are being selected for a highlight, underline or strikethrough. */
     data class TextMark(val mark: io.pdfoundry.app.data.TextMark, val argb: Int) : EditMode
 }
@@ -123,8 +133,22 @@ sealed interface EditMode {
 /** Which set of tools the reader's bottom bar shows. The reader always opens in [None], the reading bar. */
 enum class ToolMode { None, Markup, FillSign }
 
-/** State and editing actions for one open document. */
-class ReaderState(private val context: Context, val file: File, private val scope: CoroutineScope, private val store: DocumentStore = context.app.store) {
+/**
+ * State and editing actions for one open document.
+ *
+ * A password-protected file that was unlocked with full access (see [UnlockResult.Full]) is changed
+ * through an unprotected copy in the app's private cache ([unlockedCopy]); after every change the copy
+ * is written back to [file] protected with the same password, so the file is never saved without it.
+ * The password is held in memory only, for as long as the document is open.
+ */
+class ReaderState(
+    private val context: Context,
+    val file: File,
+    private val scope: CoroutineScope,
+    private val store: DocumentStore = context.app.store,
+    /** Where saves run: outlives the screen, so a change asked for just before closing is still saved. */
+    private val work: CoroutineScope = context.app.scope
+) {
     var source by mutableStateOf<PdfSource?>(null)
         private set
     /** Bumped after every change so pages re-render. */
@@ -140,7 +164,10 @@ class ReaderState(private val context: Context, val file: File, private val scop
         private set
     var message by mutableStateOf<String?>(null)
 
-    /** Password-protected files are shown from an unlocked copy and stay read-only, so their protection is never removed. */
+    /**
+     * True when the document can't be changed: a password that only opens it for reading, a file with
+     * restrictions set by its author, or a file that can't be reached.
+     */
     var readOnly by mutableStateOf(false)
         private set
     /** Why the document is read-only, in words. */
@@ -148,6 +175,12 @@ class ReaderState(private val context: Context, val file: File, private val scop
         private set
     /** True while the file differs from how it was when it was opened. */
     var canRevert by mutableStateOf(false)
+        private set
+    /** True while the document has a password that every save applies (it was unlocked, or protected here). */
+    var hasPassword by mutableStateOf(false)
+        private set
+    /** The document's form fields, one per widget. Read again after every change. */
+    var fields by mutableStateOf<List<FormField>>(emptyList())
         private set
 
     /** The bar's mode. Using a tool and finishing or cancelling it returns to this mode, not to reading. */
@@ -158,7 +191,24 @@ class ReaderState(private val context: Context, val file: File, private val scop
     var editPage by mutableIntStateOf(0)
         private set
 
-    private var viewFile = file
+    // In memory only: never written to disk, preferences, logs or file names.
+    private var password: String? = null
+        set(value) {
+            field = value
+            hasPassword = value != null
+        }
+    /** The password the file had when it was opened, for Revert to Original. */
+    private var originalPassword: String? = null
+
+    /** The unprotected copy of a protected file, in the app's private cache. Deleted when the document closes. */
+    val unlockedCopy = File(DocumentStore.unlockedDirectory(context), "${java.util.UUID.randomUUID()}.pdf")
+    /** True while pages are shown from [unlockedCopy]. */
+    private var showsUnlocked = false
+    /** The file pages are shown and read from. */
+    val viewFile: File get() = if (showsUnlocked) unlockedCopy else file
+    /** The file changes are made to: [file] itself, or its unlocked copy while it has a password. */
+    private val content: File get() = if (password != null) unlockedCopy else file
+
     private val undoFolder = File(context.cacheDir, "undo/${file.path.hashCode()}").apply { deleteRecursively(); mkdirs() }
     private val undoStack = ArrayDeque<File>()
     /** The file exactly as it was when opened, kept until it is closed, for Revert to Original. */
@@ -176,10 +226,19 @@ class ReaderState(private val context: Context, val file: File, private val scop
             }
             withContext(Dispatchers.IO) { runCatching { file.copyTo(original, overwrite = true) } }
             reopen()
+            // Opens without a password but carries restrictions set by its author: changes would remove them.
+            if (!locked && source != null && withContext(Dispatchers.IO) { runCatching { PdfEngine.isProtected(file) }.getOrDefault(false) }) {
+                if (!readOnly) notice = "Password-protected documents are read-only."
+                readOnly = true
+            }
         }
     }
 
+    /** Set by [close]: nothing is opened for display after that. */
+    @Volatile private var closed = false
+
     private suspend fun reopen() {
+        if (closed) return
         val old = source
         val opened = withContext(Dispatchers.IO) {
             try {
@@ -192,6 +251,7 @@ class ReaderState(private val context: Context, val file: File, private val scop
                 null
             }
         }
+        fields = if (opened == null) emptyList() else withContext(Dispatchers.IO) { runCatching { PdfEngine.fields(viewFile) }.getOrDefault(emptyList()) }
         source = opened
         version++
         withContext(Dispatchers.IO) { old?.close() }
@@ -200,22 +260,61 @@ class ReaderState(private val context: Context, val file: File, private val scop
     fun unlock(password: String, onWrong: () -> Unit) {
         scope.launch {
             busy = true
-            val copy = File(context.cacheDir, "unlocked-${file.path.hashCode()}.pdf")
-            val ok = withContext(Dispatchers.IO) { runCatching { PdfEngine.unlock(file, password, copy) }.getOrDefault(false) }
+            val result = withContext(Dispatchers.IO) {
+                unlockedCopy.parentFile?.mkdirs()
+                runCatching { PdfEngine.unlock(file, password, unlockedCopy) }.getOrDefault(UnlockResult.Wrong)
+            }
             busy = false
-            if (ok) {
-                viewFile = copy
-                locked = false
-                readOnly = true
-                reopen()
-            } else {
-                onWrong()
+            when (result) {
+                UnlockResult.Full -> {
+                    this@ReaderState.password = password
+                    if (originalPassword == null) originalPassword = password
+                    showsUnlocked = true
+                    locked = false
+                    // Opened with its owner password while another one opens it: saves use the one entered.
+                    if (!readOnly && !withContext(Dispatchers.IO) { PdfEngine.opensWith(file, password) }) {
+                        message = "Saving will set this document's password to the one you entered."
+                    }
+                    reopen()
+                }
+                UnlockResult.Limited -> {
+                    // Opens it for reading only: a separate owner password the user did not give.
+                    showsUnlocked = true
+                    locked = false
+                    if (!readOnly) notice = "Password-protected documents are read-only."
+                    readOnly = true
+                    reopen()
+                }
+                UnlockResult.Wrong -> onWrong()
             }
         }
     }
 
     /**
-     * Runs one change to the file and saves it at once; a file opened where it lives is written back
+     * Writes what the document now holds to [file], protected with its password if it has one, and back
+     * to where the file lives. If any of that fails, [file] keeps the bytes it had.
+     */
+    private suspend fun save() {
+        val password = password
+        if (password == null) {
+            store.push(file)
+            return
+        }
+        val before = File(undoFolder, "before-save")
+        file.copyTo(before, overwrite = true)
+        try {
+            PdfEngine.protect(unlockedCopy, password, file)
+            store.push(file)
+        } catch (e: Exception) {
+            before.copyTo(file, overwrite = true)
+            throw e
+        } finally {
+            before.delete()
+        }
+    }
+
+    /**
+     * Runs one change to the document and saves it at once; a file opened where it lives is written back
      * there. A copy is kept first so the change can be undone.
      */
     fun edit(change: (File) -> Unit) {
@@ -223,14 +322,15 @@ class ReaderState(private val context: Context, val file: File, private val scop
         queue {
             try {
                 withContext(Dispatchers.IO) {
+                    val target = content
                     val snapshot = File(undoFolder, "${System.nanoTime()}.pdf")
-                    file.copyTo(snapshot, overwrite = true)
+                    target.copyTo(snapshot, overwrite = true)
                     try {
-                        change(file)
-                        store.push(file)
+                        change(target)
+                        save()
                     } catch (e: Exception) {
-                        // Nothing was saved: go back to the file as it was.
-                        snapshot.copyTo(file, overwrite = true)
+                        // Nothing was saved: go back to the document as it was.
+                        snapshot.copyTo(target, overwrite = true)
                         snapshot.delete()
                         throw e
                     }
@@ -251,12 +351,12 @@ class ReaderState(private val context: Context, val file: File, private val scop
     private val saving = Mutex()
     private val queued = AtomicInteger(0)
 
-    private fun queue(work: suspend () -> Unit) {
+    private fun queue(job: suspend () -> Unit) {
         queued.incrementAndGet()
         busy = true
-        scope.launch {
+        work.launch {
             try {
-                saving.withLock { work() }
+                saving.withLock { job() }
             } finally {
                 if (queued.decrementAndGet() == 0) busy = false
             }
@@ -267,14 +367,15 @@ class ReaderState(private val context: Context, val file: File, private val scop
         val snapshot = undoStack.removeLastOrNull() ?: return@queue
         try {
             withContext(Dispatchers.IO) {
+                val target = content
                 val current = File(undoFolder, "current")
-                file.copyTo(current, overwrite = true)
+                target.copyTo(current, overwrite = true)
                 try {
-                    snapshot.copyTo(file, overwrite = true)
-                    store.push(file)
+                    snapshot.copyTo(target, overwrite = true)
+                    save()
                 } catch (e: Exception) {
                     // Nothing was saved: the document stays as it was, and the step can be undone later.
-                    current.copyTo(file, overwrite = true)
+                    current.copyTo(target, overwrite = true)
                     throw e
                 } finally {
                     current.delete()
@@ -287,6 +388,72 @@ class ReaderState(private val context: Context, val file: File, private val scop
         }
         canUndo = undoStack.isNotEmpty()
         settle()
+    }
+
+    // Passwords ------------------------------------------------------------------------------
+
+    /**
+     * Protects the open document with [newPassword]: the file is replaced by its protected version at
+     * once, and every later change is saved with the same password.
+     */
+    fun protect(newPassword: String) {
+        if (readOnly || password != null || newPassword.isEmpty()) return
+        queue {
+            try {
+                withContext(Dispatchers.IO) {
+                    unlockedCopy.parentFile?.mkdirs()
+                    file.copyTo(unlockedCopy, overwrite = true)
+                    val before = File(undoFolder, "before-save")
+                    file.copyTo(before, overwrite = true)
+                    try {
+                        PdfEngine.protect(unlockedCopy, newPassword, file)
+                        store.push(file)
+                    } catch (e: Exception) {
+                        before.copyTo(file, overwrite = true)
+                        unlockedCopy.delete()
+                        throw e
+                    } finally {
+                        before.delete()
+                    }
+                }
+                password = newPassword
+                showsUnlocked = true
+                message = "This document is now protected with a password."
+            } catch (e: Exception) {
+                message = e.message ?: "The password could not be set."
+            }
+            settle()
+        }
+    }
+
+    /** Saves the document without its password, after the user confirmed. */
+    fun removePassword() {
+        if (readOnly || password == null) return
+        queue {
+            try {
+                withContext(Dispatchers.IO) {
+                    val before = File(undoFolder, "before-save")
+                    file.copyTo(before, overwrite = true)
+                    try {
+                        unlockedCopy.copyTo(file, overwrite = true)
+                        store.push(file)
+                    } catch (e: Exception) {
+                        before.copyTo(file, overwrite = true)
+                        throw e
+                    } finally {
+                        before.delete()
+                    }
+                }
+                password = null
+                showsUnlocked = false
+                message = "The password is removed."
+                settle()
+                withContext(Dispatchers.IO) { unlockedCopy.delete() }
+            } catch (e: Exception) {
+                message = e.message ?: "The password could not be removed."
+                settle()
+            }
+        }
     }
 
     // Tools ---------------------------------------------------------------------------------
@@ -321,8 +488,80 @@ class ReaderState(private val context: Context, val file: File, private val scop
         if (rects.isNotEmpty()) edit { PdfEngine.markText(it, page, rects, mark, argb, lower) }
     }
 
-    /** Puts the file back exactly as it was when it was opened. Undo brings the changes back. */
-    fun revertToOriginal() = edit { original.copyTo(it, overwrite = true) }
+    /**
+     * Fills in a form field (one Undo step), saved as the field's value. Nothing happens when the value
+     * is unchanged or the field can't be changed.
+     */
+    fun setField(field: FormField, value: String) {
+        if (field.readOnly || field.kind == FieldKind.Signature) return
+        val unchanged = if (field.kind == FieldKind.Checkbox || field.kind == FieldKind.Radio) (value.isNotEmpty() && value != "Off") == field.checked else value == field.value
+        if (unchanged) return
+        edit { PdfEngine.setField(it, field.name, value, field.widget) }
+    }
+
+    /** Signs a signature field: the image is stamped into the field's box, centred, keeping its shape. */
+    fun signField(field: FormField, image: Bitmap) {
+        val size = sizes.getOrNull(field.page) ?: return
+        val rect = fitted(field.rect, image.width.toFloat() / image.height, size.width.toFloat() / size.height)
+        val page = field.page
+        edit { PdfEngine.stamp(it, page, image, rect) }
+    }
+
+    /**
+     * Puts the document's contents back exactly as they were when it was opened. Revert restores
+     * contents, not protection: a document given a password since then keeps it. With the password it
+     * was opened with (or none), the file is restored byte for byte. Undo brings the changes back.
+     */
+    fun revertToOriginal() {
+        if (readOnly) return
+        queue {
+            try {
+                val opened = originalPassword
+                val restored = password ?: opened
+                withContext(Dispatchers.IO) {
+                    val target = content
+                    val snapshot = File(undoFolder, "${System.nanoTime()}.pdf")
+                    target.copyTo(snapshot, overwrite = true)
+                    val before = File(undoFolder, "before-save")
+                    file.copyTo(before, overwrite = true)
+                    try {
+                        if (restored != null) {
+                            unlockedCopy.parentFile?.mkdirs()
+                            if (opened != null) {
+                                if (PdfEngine.unlock(original, opened, unlockedCopy) != UnlockResult.Full) throw PdfException("The original could not be opened.")
+                            } else {
+                                original.copyTo(unlockedCopy, overwrite = true)
+                            }
+                        }
+                        if (restored == opened) original.copyTo(file, overwrite = true) else PdfEngine.protect(unlockedCopy, restored!!, file)
+                        store.push(file)
+                    } catch (e: Exception) {
+                        before.copyTo(file, overwrite = true)
+                        snapshot.copyTo(target, overwrite = true)
+                        snapshot.delete()
+                        throw e
+                    } finally {
+                        before.delete()
+                    }
+                    undoStack.addLast(snapshot)
+                    while (undoStack.size > 10) undoStack.removeFirst().delete()
+                }
+                password = restored
+                showsUnlocked = restored != null
+                if (restored == null) withContext(Dispatchers.IO) { unlockedCopy.delete() }
+                canUndo = true
+            } catch (e: Exception) {
+                message = e.message ?: "The change could not be saved."
+            }
+            settle()
+        }
+    }
+
+    /** Extract from the page organizer: a protected document's pages keep its password. */
+    suspend fun extract(pages: List<Int>): File {
+        if (showsUnlocked && password == null) throw PdfException("Pages can't be extracted from a read-only protected document.")
+        return store.extract(viewFile, pages, password)
+    }
 
     private suspend fun settle() {
         canRevert = withContext(Dispatchers.IO) { original.exists() && !sameContents(file, original) }
@@ -338,14 +577,26 @@ class ReaderState(private val context: Context, val file: File, private val scop
         runCatching { PdfEngine.search(viewFile, query) }.getOrDefault(emptyList())
     }
 
+    /**
+     * Closes the document. Changes still saving or waiting to be saved finish first; then the password
+     * is forgotten and the undo copies and the unlocked copy are deleted.
+     */
     fun close() {
-        val old = source
-        source = null
-        Thread {
-            old?.close()
-            undoFolder.deleteRecursively()
-            if (viewFile != file) viewFile.delete()
-        }.start()
+        closed = true
+        // In the same scope as the saves and after them: the lock is handed out first come, first served.
+        work.launch {
+            saving.withLock {
+                val old = source
+                source = null
+                password = null
+                originalPassword = null
+                withContext(Dispatchers.IO) {
+                    old?.close()
+                    undoFolder.deleteRecursively()
+                    unlockedCopy.delete()
+                }
+            }
+        }
     }
 }
 
@@ -359,11 +610,17 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
     val listState = rememberLazyListState()
 
     var showPages by remember { mutableStateOf(false) }
-    var showSignatures by remember { mutableStateOf(false) }
-    var showText by remember { mutableStateOf(false) }
+    var picking by remember { mutableStateOf<SignatureKind?>(null) }
+    // A form field being typed into, or a signature field waiting for its signature.
+    var typingField by remember { mutableStateOf<FormField?>(null) }
+    var signingField by remember { mutableStateOf<FormField?>(null) }
+    // The text dialog: null when closed, otherwise what it starts with ("" for Text, today's date for Date).
+    var textDraft by remember { mutableStateOf<TextDraft?>(null) }
     var showSearch by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
     var confirmRevert by remember { mutableStateOf(false) }
+    var askPassword by remember { mutableStateOf(false) }
+    var confirmRemovePassword by remember { mutableStateOf(false) }
     val store = context.app.store
     val location = store.location(file)
 
@@ -429,7 +686,7 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
                             IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, "More") }
                             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                                 DropdownMenuItem(text = { Text("Share") }, leadingIcon = { Icon(Icons.Filled.Share, null) }, onClick = { menu = false; context.sharePdfs(listOf(file)) })
-                                DropdownMenuItem(text = { Text("Print") }, leadingIcon = { Icon(Icons.Filled.Print, null) }, onClick = { menu = false; context.printPdf(file) })
+                                DropdownMenuItem(text = { Text("Print") }, leadingIcon = { Icon(Icons.Filled.Print, null) }, onClick = { menu = false; context.printPdf(state.viewFile, file.name) })
                                 if (location != null) {
                                     DropdownMenuItem(text = { Text("Save a copy in PDFoundry") }, leadingIcon = { Icon(Icons.Filled.FileCopy, null) }, onClick = {
                                         menu = false
@@ -438,6 +695,12 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
                                             snackbar.showSnackbar(if (saved) "A copy is now in your documents." else "The copy could not be saved.")
                                         }
                                     })
+                                }
+                                if (!state.readOnly && !state.hasPassword) {
+                                    DropdownMenuItem(text = { Text("Protect with Password") }, leadingIcon = { Icon(Icons.Filled.Lock, null) }, enabled = !state.busy, onClick = { menu = false; askPassword = true })
+                                }
+                                if (!state.readOnly && state.hasPassword) {
+                                    DropdownMenuItem(text = { Text("Remove Password") }, leadingIcon = { Icon(Icons.Filled.LockOpen, null) }, enabled = !state.busy, onClick = { menu = false; confirmRemovePassword = true })
                                 }
                                 if (!state.readOnly) {
                                     DropdownMenuItem(text = { Text("Revert to original") }, leadingIcon = { Icon(Icons.Filled.Restore, null) }, enabled = state.canRevert && !state.busy, onClick = { menu = false; confirmRevert = true })
@@ -466,9 +729,12 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
                         onPages = { showPages = true },
                         onUndo = { state.undo() },
                         onTextMark = { mark, argb -> begin(EditMode.TextMark(mark, argb)) },
-                        onText = { showText = true },
+                        onText = { textDraft = TextDraft("Add text", "") },
                         onDraw = { begin(EditMode.Ink(highlighter = false)) },
-                        onSignature = { showSignatures = true }
+                        onSignature = { picking = SignatureKind.Signature },
+                        onInitials = { picking = SignatureKind.Initials },
+                        onDate = { textDraft = TextDraft("Add date", todayText()) },
+                        onMark = { mark -> begin(EditMode.Place(mark.bitmap(), mark.label.lowercase(), width = 0.06f)) }
                     )
                 }
             }
@@ -486,7 +752,7 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
                 }
                 source == null -> CircularProgressIndicator(Modifier.align(Alignment.Center))
                 else -> {
-                    PageList(state, source, listState)
+                    PageList(state, source, listState, onFieldText = { typingField = it }, onFieldSign = { signingField = it })
                     Surface(shape = RoundedCornerShape(50), tonalElevation = 6.dp, shadowElevation = 2.dp, modifier = Modifier.align(Alignment.BottomStart).padding(12.dp)) {
                         Text("${currentPage + 1} of ${state.pageCount}", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
                     }
@@ -511,33 +777,71 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
         )
     }
 
-    if (showText) {
-        var text by remember { mutableStateOf("") }
+    textDraft?.let { draft ->
+        var text by remember(draft) { mutableStateOf(draft.text) }
         AlertDialog(
-            onDismissRequest = { showText = false },
-            title = { Text("Add text") },
+            onDismissRequest = { textDraft = null },
+            title = { Text(draft.title) },
             text = {
                 Column {
-                    Text("Type the text, then drag it into place.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(if (draft.text.isEmpty()) "Type the text, then drag it into place." else "Change the date if you need to, then drag it into place.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.height(10.dp))
                     OutlinedTextField(value = text, onValueChange = { text = it }, singleLine = true, label = { Text("Text") })
                 }
             },
             confirmButton = {
                 TextButton(enabled = text.isNotBlank(), onClick = {
-                    showText = false
-                    begin(EditMode.Place(PdfEngine.textBitmap(text.trim()), "text"))
+                    textDraft = null
+                    begin(EditMode.Place(PdfEngine.textBitmap(text.trim()), if (draft.text.isEmpty()) "text" else "date", width = if (draft.text.isEmpty()) 0.45f else 0.3f))
                 }) { Text("Add") }
             },
-            dismissButton = { TextButton(onClick = { showText = false }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { textDraft = null }) { Text("Cancel") } }
         )
     }
 
-    if (showSignatures) {
-        ModalBottomSheet(onDismissRequest = { showSignatures = false }) {
-            SignaturePicker(onPick = { image ->
-                showSignatures = false
-                begin(EditMode.Place(image, "signature"))
+    if (askPassword) {
+        ProtectDialog(file.nameWithoutExtension, onDismiss = { askPassword = false }) { password ->
+            askPassword = false
+            state.protect(password)
+        }
+    }
+
+    if (confirmRemovePassword) {
+        AlertDialog(
+            onDismissRequest = { confirmRemovePassword = false },
+            title = { Text("Remove the password?") },
+            text = { Text(if (location != null) "The file in $location is saved without a password. Anyone who has it can open it." else "The document is saved without a password. Anyone who has it can open it.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmRemovePassword = false
+                    state.removePassword()
+                }) { Text("Remove Password", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { confirmRemovePassword = false }) { Text("Cancel") } }
+        )
+    }
+
+    typingField?.let { field ->
+        FieldTextDialog(field, onDismiss = { typingField = null }) { text ->
+            typingField = null
+            state.setField(field, text)
+        }
+    }
+
+    signingField?.let { field ->
+        ModalBottomSheet(onDismissRequest = { signingField = null }) {
+            SignaturePicker(SignatureKind.Signature, onPick = { image ->
+                signingField = null
+                state.signField(field, image)
+            })
+        }
+    }
+
+    picking?.let { kind ->
+        ModalBottomSheet(onDismissRequest = { picking = null }) {
+            SignaturePicker(kind, onPick = { image ->
+                picking = null
+                if (kind == SignatureKind.Initials) begin(EditMode.Place(image, "initials", width = 0.18f)) else begin(EditMode.Place(image, "signature"))
             })
         }
     }
@@ -550,9 +854,33 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
     }
 }
 
+/**
+ * The largest rect with [imageAspect] (width / height, in points) that fits centred in [box] (page
+ * fractions) on a page with [pageAspect].
+ */
+fun fitted(box: RectF, imageAspect: Float, pageAspect: Float): RectF {
+    // In units where the page is pageAspect wide and 1 tall.
+    val boxWidth = box.width() * pageAspect
+    val boxHeight = box.height()
+    val width: Float
+    val height: Float
+    if (boxWidth / boxHeight > imageAspect) {
+        height = boxHeight
+        width = height * imageAspect
+    } else {
+        width = boxWidth
+        height = width / imageAspect
+    }
+    val w = width / pageAspect
+    return RectF(box.centerX() - w / 2, box.centerY() - height / 2, box.centerX() + w / 2, box.centerY() + height / 2)
+}
+
+/** The text dialog's title and starting text. */
+private data class TextDraft(val title: String, val text: String)
+
 /** All pages in a column. Pinch to zoom; when zoomed, the page scrolls sideways too. */
 @Composable
-private fun PageList(state: ReaderState, source: PdfSource, listState: androidx.compose.foundation.lazy.LazyListState) {
+private fun PageList(state: ReaderState, source: PdfSource, listState: androidx.compose.foundation.lazy.LazyListState, onFieldText: (FormField) -> Unit, onFieldSign: (FormField) -> Unit) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val baseWidthPx = constraints.maxWidth
         val baseWidth = maxWidth
@@ -593,6 +921,13 @@ private fun PageList(state: ReaderState, source: PdfSource, listState: androidx.
                     val bitmap by produceState<Bitmap?>(null, index, widthPx, state.version) { value = source.render(index, widthPx) }
                     Box(Modifier.fillMaxWidth().aspectRatio(size.width.toFloat() / size.height).background(Color.White)) {
                         bitmap?.let { Image(it.asImageBitmap(), "Page ${index + 1}", Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds) }
+                        FieldLayer(
+                            fields = state.fields.filter { it.page == index },
+                            enabled = !state.readOnly,
+                            onText = onFieldText,
+                            onSet = { field, value -> state.setField(field, value) },
+                            onSign = onFieldSign
+                        )
                     }
                 }
             }

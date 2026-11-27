@@ -4,7 +4,7 @@ import VisionKit
 
 /// A tool on the Tools tab: something done to whole files.
 enum PDFTool: CaseIterable, Identifiable {
-    case scan, photos, merge, extract
+    case scan, photos, merge, extract, split, protect
 
     var id: Self { self }
 
@@ -14,6 +14,8 @@ enum PDFTool: CaseIterable, Identifiable {
         case .photos: "Create from Photos"
         case .merge: "Merge PDFs"
         case .extract: "Extract Pages"
+        case .split: "Split PDF"
+        case .protect: "Password-protect"
         }
     }
 
@@ -23,6 +25,8 @@ enum PDFTool: CaseIterable, Identifiable {
         case .photos: "Make a PDF from pictures"
         case .merge: "Join documents into one"
         case .extract: "Save pages as a new PDF"
+        case .split: "Make several PDFs from one"
+        case .protect: "Lock a PDF with a password"
         }
     }
 
@@ -32,13 +36,16 @@ enum PDFTool: CaseIterable, Identifiable {
         case .photos: "photo.on.rectangle"
         case .merge: "arrow.triangle.merge"
         case .extract: "arrow.up.doc"
+        case .split: "scissors"
+        case .protect: "lock.doc"
         }
     }
 
     var section: ToolSection {
         switch self {
         case .scan, .photos: .create
-        case .merge, .extract: .combine
+        case .merge, .extract, .split: .combine
+        case .protect: .protect
         }
     }
 }
@@ -90,6 +97,8 @@ struct ToolsView: View {
     @State private var chosen: (PDFTool, [PDFItem])?
     @State private var mergeCandidates: [PDFItem]?
     @State private var extractSource: PDFItem?
+    @State private var splitSource: PDFItem?
+    @State private var protectSource: PDFItem?
     @State private var confirmation: String?
     @State private var errorMessage: String?
     @State private var confirmationTask: Task<Void, Never>?
@@ -148,7 +157,11 @@ struct ToolsView: View {
                 title: request.tool.title,
                 multiple: request.tool == .merge,
                 minimum: request.tool == .merge ? 2 : 1,
-                confirmTitle: "Next"
+                confirmTitle: "Next",
+                // Merge can't use protected files. Protect works on the real file, so one from Files is opened
+                // in place (and listed), never a copy that would leave the real file unprotected.
+                allowsLocked: request.tool != .merge,
+                opensInPlace: request.tool == .protect
             ) { items in
                 chosen = (request.tool, items)
             }
@@ -166,6 +179,24 @@ struct ToolsView: View {
                 show(confirmation: "Saved \(created.pageCount == 1 ? "1 page" : "\(created.pageCount) pages") as “\(created.name)” in Documents.")
             }
             .presentationSizing(.page)
+        }
+        .sheet(item: $splitSource) { source in
+            SplitView(item: source) { created in
+                show(confirmation: created.count == 1
+                     ? "Saved “\(created[0].name)” in Documents."
+                     : "Split “\(source.name)” into \(created.count) documents in Documents.")
+            }
+        }
+        .sheet(item: $protectSource) { source in
+            ProtectSheet(name: source.name, url: source.url) { password in
+                do {
+                    try await store.protect(source.url, password: password)
+                    show(confirmation: "“\(source.name)” is now protected with a password.")
+                    return nil
+                } catch {
+                    return error.localizedDescription
+                }
+            }
         }
         .alert("Something Went Wrong", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
             Button("OK", role: .cancel) {}
@@ -195,7 +226,7 @@ struct ToolsView: View {
         switch tool {
         case .scan: showScanner = true
         case .photos: showPhotoPicker = true
-        case .merge, .extract: picker = PickerRequest(tool: tool)
+        case .merge, .extract, .split, .protect: picker = PickerRequest(tool: tool)
         }
     }
 
@@ -206,6 +237,8 @@ struct ToolsView: View {
         switch tool {
         case .merge where items.count >= 2: mergeCandidates = items
         case .extract: extractSource = items.first
+        case .split: splitSource = items.first
+        case .protect: protectSource = items.first
         default: break
         }
     }
