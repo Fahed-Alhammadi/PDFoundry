@@ -470,6 +470,30 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
     }
 
     /**
+     * Password-protect from the Tools tab: replaces [file] (a library document, or the working copy of a
+     * file opened in place, whose real file is then written too) with its protected version. If saving
+     * fails, the file keeps what it had. Refuses a file that is already protected.
+     */
+    suspend fun protect(file: File, password: String) {
+        withContext(Dispatchers.IO) {
+            syncForReading(file)
+            if (PdfEngine.isProtected(file)) throw PdfException("This document is already protected with a password.")
+            val before = File(context.cacheDir, "protect-${System.nanoTime()}.pdf")
+            file.copyTo(before, overwrite = true)
+            try {
+                PdfEngine.protect(file, password, file)
+                push(file)
+            } catch (e: Exception) {
+                before.copyTo(file, overwrite = true)
+                throw e
+            } finally {
+                before.delete()
+            }
+        }
+        refresh()
+    }
+
+    /**
      * A private, temporary copy of a picked file, for a tool that uses it for one job only (Extract
      * Pages, Merge PDFs): the file is neither opened in place nor added to the library. Null when it
      * isn't a readable PDF. Remove it with [discardTemporary]; it is also removed if the caller is

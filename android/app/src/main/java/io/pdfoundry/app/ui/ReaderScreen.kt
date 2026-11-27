@@ -98,6 +98,8 @@ import io.pdfoundry.app.app
 import io.pdfoundry.app.data.DocumentStore
 import io.pdfoundry.app.data.InkStroke
 import io.pdfoundry.app.data.PdfEngine
+import io.pdfoundry.app.data.PdfException
+import io.pdfoundry.app.data.UnlockResult
 import io.pdfoundry.app.data.PdfSource
 import io.pdfoundry.app.data.SearchHit
 import io.pdfoundry.app.data.sameContents
@@ -123,7 +125,14 @@ sealed interface EditMode {
 /** Which set of tools the reader's bottom bar shows. The reader always opens in [None], the reading bar. */
 enum class ToolMode { None, Markup, FillSign }
 
-/** State and editing actions for one open document. */
+/**
+ * State and editing actions for one open document.
+ *
+ * A password-protected file that was unlocked with full access (see [UnlockResult.Full]) is changed
+ * through an unprotected copy in the app's private cache ([unlockedCopy]); after every change the copy
+ * is written back to [file] protected with the same password, so the file is never saved without it.
+ * The password is held in memory only, for as long as the document is open.
+ */
 class ReaderState(private val context: Context, val file: File, private val scope: CoroutineScope, private val store: DocumentStore = context.app.store) {
     var source by mutableStateOf<PdfSource?>(null)
         private set
@@ -140,7 +149,10 @@ class ReaderState(private val context: Context, val file: File, private val scop
         private set
     var message by mutableStateOf<String?>(null)
 
-    /** Password-protected files are shown from an unlocked copy and stay read-only, so their protection is never removed. */
+    /**
+     * True when the document can't be changed: a password that only opens it for reading, a file with
+     * restrictions set by its author, or a file that can't be reached.
+     */
     var readOnly by mutableStateOf(false)
         private set
     /** Why the document is read-only, in words. */
@@ -148,6 +160,9 @@ class ReaderState(private val context: Context, val file: File, private val scop
         private set
     /** True while the file differs from how it was when it was opened. */
     var canRevert by mutableStateOf(false)
+        private set
+    /** True while the document has a password that every save applies (it was unlocked, or protected here). */
+    var hasPassword by mutableStateOf(false)
         private set
 
     /** The bar's mode. Using a tool and finishing or cancelling it returns to this mode, not to reading. */
@@ -158,7 +173,24 @@ class ReaderState(private val context: Context, val file: File, private val scop
     var editPage by mutableIntStateOf(0)
         private set
 
-    private var viewFile = file
+    // In memory only: never written to disk, preferences, logs or file names.
+    private var password: String? = null
+        set(value) {
+            field = value
+            hasPassword = value != null
+        }
+    /** The password the file had when it was opened, for Revert to Original. */
+    private var originalPassword: String? = null
+
+    /** The unprotected copy of a protected file, in the app's private cache. Deleted when the document closes. */
+    val unlockedCopy = File(DocumentStore.unlockedDirectory(context), "${java.util.UUID.randomUUID()}.pdf")
+    /** True while pages are shown from [unlockedCopy]. */
+    private var showsUnlocked = false
+    /** The file pages are shown and read from. */
+    val viewFile: File get() = if (showsUnlocked) unlockedCopy else file
+    /** The file changes are made to: [file] itself, or its unlocked copy while it has a password. */
+    private val content: File get() = if (password != null) unlockedCopy else file
+
     private val undoFolder = File(context.cacheDir, "undo/${file.path.hashCode()}").apply { deleteRecursively(); mkdirs() }
     private val undoStack = ArrayDeque<File>()
     /** The file exactly as it was when opened, kept until it is closed, for Revert to Original. */
@@ -176,6 +208,11 @@ class ReaderState(private val context: Context, val file: File, private val scop
             }
             withContext(Dispatchers.IO) { runCatching { file.copyTo(original, overwrite = true) } }
             reopen()
+            // Opens without a password but carries restrictions set by its author: changes would remove them.
+            if (!locked && source != null && withContext(Dispatchers.IO) { runCatching { PdfEngine.isProtected(file) }.getOrDefault(false) }) {
+                if (!readOnly) notice = "Password-protected documents are read-only."
+                readOnly = true
+            }
         }
     }
 
@@ -200,22 +237,57 @@ class ReaderState(private val context: Context, val file: File, private val scop
     fun unlock(password: String, onWrong: () -> Unit) {
         scope.launch {
             busy = true
-            val copy = File(context.cacheDir, "unlocked-${file.path.hashCode()}.pdf")
-            val ok = withContext(Dispatchers.IO) { runCatching { PdfEngine.unlock(file, password, copy) != io.pdfoundry.app.data.UnlockResult.Wrong }.getOrDefault(false) }
+            val result = withContext(Dispatchers.IO) {
+                unlockedCopy.parentFile?.mkdirs()
+                runCatching { PdfEngine.unlock(file, password, unlockedCopy) }.getOrDefault(UnlockResult.Wrong)
+            }
             busy = false
-            if (ok) {
-                viewFile = copy
-                locked = false
-                readOnly = true
-                reopen()
-            } else {
-                onWrong()
+            when (result) {
+                UnlockResult.Full -> {
+                    this@ReaderState.password = password
+                    if (originalPassword == null) originalPassword = password
+                    showsUnlocked = true
+                    locked = false
+                    reopen()
+                }
+                UnlockResult.Limited -> {
+                    // Opens it for reading only: a separate owner password the user did not give.
+                    showsUnlocked = true
+                    locked = false
+                    if (!readOnly) notice = "Password-protected documents are read-only."
+                    readOnly = true
+                    reopen()
+                }
+                UnlockResult.Wrong -> onWrong()
             }
         }
     }
 
     /**
-     * Runs one change to the file and saves it at once; a file opened where it lives is written back
+     * Writes what the document now holds to [file], protected with its password if it has one, and back
+     * to where the file lives. If any of that fails, [file] keeps the bytes it had.
+     */
+    private suspend fun save() {
+        val password = password
+        if (password == null) {
+            store.push(file)
+            return
+        }
+        val before = File(undoFolder, "before-save")
+        file.copyTo(before, overwrite = true)
+        try {
+            PdfEngine.protect(unlockedCopy, password, file)
+            store.push(file)
+        } catch (e: Exception) {
+            before.copyTo(file, overwrite = true)
+            throw e
+        } finally {
+            before.delete()
+        }
+    }
+
+    /**
+     * Runs one change to the document and saves it at once; a file opened where it lives is written back
      * there. A copy is kept first so the change can be undone.
      */
     fun edit(change: (File) -> Unit) {
@@ -223,14 +295,15 @@ class ReaderState(private val context: Context, val file: File, private val scop
         queue {
             try {
                 withContext(Dispatchers.IO) {
+                    val target = content
                     val snapshot = File(undoFolder, "${System.nanoTime()}.pdf")
-                    file.copyTo(snapshot, overwrite = true)
+                    target.copyTo(snapshot, overwrite = true)
                     try {
-                        change(file)
-                        store.push(file)
+                        change(target)
+                        save()
                     } catch (e: Exception) {
-                        // Nothing was saved: go back to the file as it was.
-                        snapshot.copyTo(file, overwrite = true)
+                        // Nothing was saved: go back to the document as it was.
+                        snapshot.copyTo(target, overwrite = true)
                         snapshot.delete()
                         throw e
                     }
@@ -267,14 +340,15 @@ class ReaderState(private val context: Context, val file: File, private val scop
         val snapshot = undoStack.removeLastOrNull() ?: return@queue
         try {
             withContext(Dispatchers.IO) {
+                val target = content
                 val current = File(undoFolder, "current")
-                file.copyTo(current, overwrite = true)
+                target.copyTo(current, overwrite = true)
                 try {
-                    snapshot.copyTo(file, overwrite = true)
-                    store.push(file)
+                    snapshot.copyTo(target, overwrite = true)
+                    save()
                 } catch (e: Exception) {
                     // Nothing was saved: the document stays as it was, and the step can be undone later.
-                    current.copyTo(file, overwrite = true)
+                    current.copyTo(target, overwrite = true)
                     throw e
                 } finally {
                     current.delete()
@@ -287,6 +361,72 @@ class ReaderState(private val context: Context, val file: File, private val scop
         }
         canUndo = undoStack.isNotEmpty()
         settle()
+    }
+
+    // Passwords ------------------------------------------------------------------------------
+
+    /**
+     * Protects the open document with [newPassword]: the file is replaced by its protected version at
+     * once, and every later change is saved with the same password.
+     */
+    fun protect(newPassword: String) {
+        if (readOnly || password != null || newPassword.isEmpty()) return
+        queue {
+            try {
+                withContext(Dispatchers.IO) {
+                    unlockedCopy.parentFile?.mkdirs()
+                    file.copyTo(unlockedCopy, overwrite = true)
+                    val before = File(undoFolder, "before-save")
+                    file.copyTo(before, overwrite = true)
+                    try {
+                        PdfEngine.protect(unlockedCopy, newPassword, file)
+                        store.push(file)
+                    } catch (e: Exception) {
+                        before.copyTo(file, overwrite = true)
+                        unlockedCopy.delete()
+                        throw e
+                    } finally {
+                        before.delete()
+                    }
+                }
+                password = newPassword
+                showsUnlocked = true
+                message = "This document is now protected with a password."
+            } catch (e: Exception) {
+                message = e.message ?: "The password could not be set."
+            }
+            settle()
+        }
+    }
+
+    /** Saves the document without its password, after the user confirmed. */
+    fun removePassword() {
+        if (readOnly || password == null) return
+        queue {
+            try {
+                withContext(Dispatchers.IO) {
+                    val before = File(undoFolder, "before-save")
+                    file.copyTo(before, overwrite = true)
+                    try {
+                        unlockedCopy.copyTo(file, overwrite = true)
+                        store.push(file)
+                    } catch (e: Exception) {
+                        before.copyTo(file, overwrite = true)
+                        throw e
+                    } finally {
+                        before.delete()
+                    }
+                }
+                password = null
+                showsUnlocked = false
+                message = "The password is removed."
+                settle()
+                withContext(Dispatchers.IO) { unlockedCopy.delete() }
+            } catch (e: Exception) {
+                message = e.message ?: "The password could not be removed."
+                settle()
+            }
+        }
     }
 
     // Tools ---------------------------------------------------------------------------------
@@ -321,8 +461,55 @@ class ReaderState(private val context: Context, val file: File, private val scop
         if (rects.isNotEmpty()) edit { PdfEngine.markText(it, page, rects, mark, argb, lower) }
     }
 
-    /** Puts the file back exactly as it was when it was opened. Undo brings the changes back. */
-    fun revertToOriginal() = edit { original.copyTo(it, overwrite = true) }
+    /**
+     * Puts the file back exactly as it was when it was opened (with the password it had then, if any).
+     * Undo brings the changes back.
+     */
+    fun revertToOriginal() {
+        if (readOnly) return
+        queue {
+            try {
+                val restored = originalPassword
+                withContext(Dispatchers.IO) {
+                    val target = content
+                    val snapshot = File(undoFolder, "${System.nanoTime()}.pdf")
+                    target.copyTo(snapshot, overwrite = true)
+                    val before = File(undoFolder, "before-save")
+                    file.copyTo(before, overwrite = true)
+                    try {
+                        if (restored != null) {
+                            unlockedCopy.parentFile?.mkdirs()
+                            if (PdfEngine.unlock(original, restored, unlockedCopy) != UnlockResult.Full) throw PdfException("The original could not be opened.")
+                        }
+                        original.copyTo(file, overwrite = true)
+                        store.push(file)
+                    } catch (e: Exception) {
+                        before.copyTo(file, overwrite = true)
+                        snapshot.copyTo(target, overwrite = true)
+                        snapshot.delete()
+                        throw e
+                    } finally {
+                        before.delete()
+                    }
+                    undoStack.addLast(snapshot)
+                    while (undoStack.size > 10) undoStack.removeFirst().delete()
+                }
+                password = restored
+                showsUnlocked = restored != null
+                if (restored == null) withContext(Dispatchers.IO) { unlockedCopy.delete() }
+                canUndo = true
+            } catch (e: Exception) {
+                message = e.message ?: "The change could not be saved."
+            }
+            settle()
+        }
+    }
+
+    /** Extract from the page organizer: a protected document's pages keep its password. */
+    suspend fun extract(pages: List<Int>): File {
+        if (showsUnlocked && password == null) throw PdfException("Pages can't be extracted from a read-only protected document.")
+        return store.extract(viewFile, pages, password)
+    }
 
     private suspend fun settle() {
         canRevert = withContext(Dispatchers.IO) { original.exists() && !sameContents(file, original) }
@@ -341,10 +528,12 @@ class ReaderState(private val context: Context, val file: File, private val scop
     fun close() {
         val old = source
         source = null
+        password = null
+        originalPassword = null
         Thread {
             old?.close()
             undoFolder.deleteRecursively()
-            if (viewFile != file) viewFile.delete()
+            unlockedCopy.delete()
         }.start()
     }
 }
