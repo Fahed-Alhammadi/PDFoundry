@@ -10,7 +10,7 @@
 import { api, revealLabel, title } from './api.ts';
 import { button, choose, confirm, dialog, h, icon, iconButton, message, prompt, showMenu, toast } from './dom.ts';
 import type { MenuItem } from './dom.ts';
-import { TEXT_INK, fieldTextPng, markPng, paintStrokes, placedFromPng, rasterize, textImage } from './images.ts';
+import { TEXT_INK, fieldTextPng, markPng, paintStrokes, placedFromPng, textImage } from './images.ts';
 import type { Placed, Stroke } from './images.ts';
 import { HIGHLIGHT_COLOURS, MARK_RED, modeBar } from './modebar.ts';
 import type { TextTool, ToolMode } from './modebar.ts';
@@ -842,11 +842,11 @@ export class Reader {
     const ok = await this.change(async (bytes) => {
       let out = bytes;
       for (const [index, strokes] of ink.strokes) {
-        // Pen strokes cover the page; marker strokes darken it, so they are saved as a second, see-through image.
-        const pen = await rasterize(strokes.filter((s) => !s.marker), this.sizes[index]);
-        if (pen) out = await pdf.stamp(out, index, pen.png, pen.rect);
-        const marker = await rasterize(strokes.filter((s) => s.marker), this.sizes[index]);
-        if (marker) out = await pdf.stamp(out, index, marker.png, marker.rect, { multiply: true, opacity: 0.55 });
+        // Pen strokes cover the page; marker strokes darken it, so they are a second, see-through Ink annotation.
+        const pen = strokes.filter((s) => !s.marker);
+        if (pen.length) out = await pdf.ink(out, index, pen);
+        const marker = strokes.filter((s) => s.marker);
+        if (marker.length) out = await pdf.ink(out, index, marker, { multiply: true, opacity: 0.55 });
       }
       return out;
     });

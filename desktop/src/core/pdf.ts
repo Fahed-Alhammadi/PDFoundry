@@ -1,21 +1,27 @@
 // The PDF engine: every change PDFoundry makes to a document. Pure functions from bytes to bytes (no Electron, no
 // DOM), so they run in the window and in the tests (test/pdf.test.ts).
 //
-// Edits are drawn into the page itself, so they look the same in every other PDF reader. Positions are fractions of
-// the page as it is displayed (after its rotation), measured from the top-left corner: the same convention as the
-// Android app's PdfEngine.
+// Marks (highlights, drawings, signatures, typed text, …) are PDF annotations with their own appearance
+// (annotations.ts), so every other reader shows them the same way and they can be selected again. Positions are
+// fractions of the page as it is displayed (after its rotation), measured from the top-left corner (geometry.ts).
 import {
-  BlendMode, PDFArray, PDFCheckBox, PDFDocument, PDFDropdown, PDFHexString, PDFName, PDFOptionList, PDFPage, PDFRadioGroup, PDFRef, PDFSignature, PDFStream, PDFTextField,
-  StandardFonts, decodePDFRawStream, degrees, fill, popGraphicsState, pushGraphicsState, rectangle, setFillingRgbColor, setGraphicsState,
+  LineCapStyle, LineJoinStyle, PDFArray, PDFCheckBox, PDFDocument, PDFDropdown, PDFHexString, PDFName, PDFOptionList, PDFPage, PDFRadioGroup, PDFRef, PDFSignature,
+  PDFStream, PDFTextField, StandardFonts, appendBezierCurve, closePath, decodePDFRawStream, degrees, drawImage, fill, lineTo, moveTo, popGraphicsState,
+  pushGraphicsState, rectangle, setFillingRgbColor, setGraphicsState, setLineCap, setLineJoin, setLineWidth, setStrokingRgbColor, stroke,
 } from '@cantoo/pdf-lib';
-import type { PDFField, PDFFont, PDFRawStream } from '@cantoo/pdf-lib';
+import type { PDFField, PDFFont, PDFOperator, PDFRawStream } from '@cantoo/pdf-lib';
 import { Encodings } from '@cantoo/pdf-lib/standard-fonts';
+import { addAnnotation, marksOf } from './annotations.ts';
+import type { MarkInfo } from './annotations.ts';
+import { displayedRect, displayedSize, placement, userPoint, userRect } from './geometry.ts';
+import type { PageRect, PagePoint, UserBox } from './geometry.ts';
 import { encryptionOf, isOwnerPassword, isUserPassword } from './security.ts';
 
 export class PdfError extends Error {}
 
-/** A rectangle on the displayed page, as fractions (0…1) from its top-left corner. */
-export type PageRect = { x: number; y: number; width: number; height: number };
+export type { PageRect, PagePoint, UserBox } from './geometry.ts';
+export { displayedPoint, displayedRect, displayedSize, placement, userPoint, userRect } from './geometry.ts';
+export type { MarkInfo, MarkKind } from './annotations.ts';
 
 export type StampOptions = {
   /** Darkens what is underneath instead of covering it (the highlighter). */
@@ -235,36 +241,6 @@ export async function addBlankPage(bytes: Uint8Array, after: number): Promise<Ui
   return save(doc);
 }
 
-/** The page's size as a reader shows it: its crop box, turned by its rotation. */
-export function displayedSize(page: PDFPage): { width: number; height: number } {
-  const box = page.getCropBox();
-  return quarterTurns(page) % 2 ? { width: box.height, height: box.width } : { width: box.width, height: box.height };
-}
-
-function quarterTurns(page: PDFPage): number {
-  return ((Math.round(page.getRotation().angle / 90) % 4) + 4) % 4;
-}
-
-/**
- * Where an upright image must be drawn so that it lands on `rect` of the displayed page.
- * Returns the unrotated page coordinates of the image's bottom-left corner, its size, and the angle to draw it at.
- */
-export function placement(page: PDFPage, rect: PageRect): { x: number; y: number; width: number; height: number; angle: number } {
-  const box = page.getCropBox();
-  const turns = quarterTurns(page);
-  const shown = displayedSize(page);
-  // The image's bottom-left corner on the displayed page, in points from its top-left corner.
-  const dx = rect.x * shown.width;
-  const dy = (rect.y + rect.height) * shown.height;
-  let x: number;
-  let y: number;
-  if (turns === 0) [x, y] = [dx, box.height - dy];
-  else if (turns === 1) [x, y] = [dy, dx];
-  else if (turns === 2) [x, y] = [box.width - dx, dy];
-  else [x, y] = [box.width - dy, box.height - dx];
-  return { x: box.x + x, y: box.y + y, width: rect.width * shown.width, height: rect.height * shown.height, angle: turns * 90 };
-}
-
 /**
  * Does the page's own drawing leave something behind that would move or clip what is drawn after it? A `cm`,
  * clip (`W`) or `gs` outside any q…Q, or more `q` than `Q`. Returns how many `Q` are missing, or -1 when nothing
@@ -292,7 +268,7 @@ export function leftoverState(content: string): number {
  * a transformation, clip or graphics state behind, it is wrapped in q…Q, once (pdf-lib would wrap it again on every
  * edit, nesting deeper each time). Must be called before anything else touches the page.
  */
-function isolate(doc: PDFDocument, page: PDFPage): void {
+export function isolate(doc: PDFDocument, page: PDFPage): void {
   const node = page.node;
   (node as unknown as { autoNormalizeCTM: boolean }).autoNormalizeCTM = false;
   const contents = node.Contents();
@@ -311,23 +287,36 @@ function isolate(doc: PDFDocument, page: PDFPage): void {
   node.wrapContentStreams(start, end);
 }
 
-/** Draws a PNG onto a page: a signature, typed text, a drawing or a highlight. */
+/** The graphics state of a mark that darkens what is under it (`multiply`) or lets it show through (`opacity`). */
+function markState(options: StampOptions): Record<string, unknown> | null {
+  const opacity = options.opacity ?? 1;
+  if (!options.multiply && opacity >= 1) return null;
+  return { Type: 'ExtGState', ca: opacity, CA: opacity, ...(options.multiply ? { BM: 'Multiply' } : {}) };
+}
+
+/**
+ * Puts a PNG on a page as a stamp annotation: a signature, initials, typed text, the date, ✓ or ✗. The image is the
+ * annotation's appearance, so it looks the same everywhere (text the window drew stays shaped, Arabic included).
+ */
 export async function stamp(bytes: Uint8Array, pageIndex: number, png: Uint8Array, rect: PageRect, options: StampOptions = {}): Promise<Uint8Array> {
   const doc = await open(bytes);
   check(doc, [pageIndex]);
   if (!(rect.width > 0 && rect.height > 0)) throw new PdfError('There is nothing to place.');
   const page = doc.getPage(pageIndex);
-  isolate(doc, page);
   const image = await doc.embedPng(png);
   const at = placement(page, rect);
-  page.drawImage(image, {
-    x: at.x,
-    y: at.y,
-    width: at.width,
-    height: at.height,
-    rotate: degrees(at.angle),
-    opacity: options.opacity ?? 1,
-    blendMode: options.multiply ? BlendMode.Multiply : BlendMode.Normal,
+  const state = markState(options);
+  addAnnotation(doc, page, {
+    subtype: 'Stamp',
+    box: userRect(page, rect),
+    draw: [
+      pushGraphicsState(),
+      ...(state ? [setGraphicsState('GS')] : []),
+      ...drawImage('Im', { x: at.x, y: at.y, width: at.width, height: at.height, rotate: degrees(at.angle), xSkew: degrees(0), ySkew: degrees(0) }),
+      popGraphicsState(),
+    ],
+    resources: { XObject: { Im: image.ref }, ...(state ? { ExtGState: { GS: state } } : {}) },
+    entries: { Name: 'PDFoundry' },
   });
   return save(doc);
 }
@@ -337,25 +326,21 @@ export type TextMark = 'highlight' | 'underline' | 'strikethrough';
 /** Red, green, blue and opacity, each 0…1. */
 export type Rgba = [number, number, number, number];
 
-/** `rect` of the displayed page as a box in the page's own coordinates (points, from the bottom-left, unrotated). */
-export function userRect(page: PDFPage, rect: PageRect): { x: number; y: number; width: number; height: number } {
-  const box = page.getCropBox();
-  const turns = quarterTurns(page);
-  const shown = displayedSize(page);
-  // The same mapping as `placement`, applied to two opposite corners.
-  const toPage = (dx: number, dy: number): [number, number] =>
-    turns === 0 ? [dx, box.height - dy] : turns === 1 ? [dy, dx] : turns === 2 ? [box.width - dx, dy] : [box.width - dy, box.height - dx];
-  const [x1, y1] = toPage(rect.x * shown.width, rect.y * shown.height);
-  const [x2, y2] = toPage((rect.x + rect.width) * shown.width, (rect.y + rect.height) * shown.height);
-  return { x: box.x + Math.min(x1, x2), y: box.y + Math.min(y1, y2), width: Math.abs(x2 - x1), height: Math.abs(y2 - y1) };
+const MARKUP_SUBTYPES: Record<TextMark, string> = { highlight: 'Highlight', underline: 'Underline', strikethrough: 'StrikeOut' };
+
+/** The smallest box around boxes. */
+function union(boxes: UserBox[]): UserBox {
+  const x = Math.min(...boxes.map((b) => b.x));
+  const y = Math.min(...boxes.map((b) => b.y));
+  return { x, y, width: Math.max(...boxes.map((b) => b.x + b.width)) - x, height: Math.max(...boxes.map((b) => b.y + b.height)) - y };
 }
 
 /**
  * Highlights, underlines or strikes through text: `rects` are the selected words on the displayed page (fractions
- * from its top-left). Text is assumed upright on the unrotated page (a turned page turns its text with it), so the
- * lines are measured across the box's height in page coordinates: an underline at 92% of the way down, a
- * strikethrough at half, each 7% of the text's height thick. A highlight darkens what is under it, like a marker.
- * The marks are drawn into the page, like every other edit.
+ * from its top-left). One Highlight, Underline or StrikeOut annotation for all of them, with a quadrilateral per
+ * box. Text is assumed upright on the unrotated page (a turned page turns its text with it), so the lines are
+ * measured across the box's height in page coordinates: an underline at 92% of the way down, a strikethrough at
+ * half, each 7% of the text's height thick. A highlight darkens what is under it, like a marker.
  */
 export async function markText(bytes: Uint8Array, pageIndex: number, rects: PageRect[], mark: TextMark, rgba: Rgba): Promise<Uint8Array> {
   const doc = await open(bytes);
@@ -363,17 +348,10 @@ export async function markText(bytes: Uint8Array, pageIndex: number, rects: Page
   const chosen = rects.filter((r) => r.width > 0 && r.height > 0);
   if (!chosen.length) throw new PdfError('Select some text first.');
   const page = doc.getPage(pageIndex);
-  isolate(doc, page);
   const [r, g, b, alpha] = rgba;
-  const state = page.node.newExtGState('Mark', doc.context.obj({
-    Type: 'ExtGState',
-    ca: alpha,
-    CA: alpha,
-    ...(mark === 'highlight' ? { BM: 'Multiply' } : {}),
-  }));
-  const ops = [pushGraphicsState(), setGraphicsState(state), setFillingRgbColor(r, g, b)];
-  for (const rect of chosen) {
-    const box = userRect(page, rect);
+  const boxes = chosen.map((rect) => userRect(page, rect));
+  const ops = [pushGraphicsState(), setGraphicsState('GS'), setFillingRgbColor(r, g, b)];
+  for (const box of boxes) {
     if (mark === 'highlight') ops.push(rectangle(box.x, box.y, box.width, box.height));
     else {
       const thickness = box.height * 0.07;
@@ -382,8 +360,93 @@ export async function markText(bytes: Uint8Array, pageIndex: number, rects: Page
     }
   }
   ops.push(fill(), popGraphicsState());
-  page.pushOperators(...ops);
+  // Each box's corners in reading order (top-left, top-right, bottom-left, bottom-right of the displayed text).
+  const quads = chosen.flatMap((rect) => [
+    userPoint(page, { x: rect.x, y: rect.y }), userPoint(page, { x: rect.x + rect.width, y: rect.y }),
+    userPoint(page, { x: rect.x, y: rect.y + rect.height }), userPoint(page, { x: rect.x + rect.width, y: rect.y + rect.height }),
+  ].flat());
+  addAnnotation(doc, page, {
+    subtype: MARKUP_SUBTYPES[mark],
+    box: union(boxes),
+    draw: ops,
+    resources: { ExtGState: { GS: { Type: 'ExtGState', ca: alpha, CA: alpha, ...(mark === 'highlight' ? { BM: 'Multiply' } : {}) } } },
+    entries: { C: [r, g, b], CA: alpha, QuadPoints: quads },
+  });
   return save(doc);
+}
+
+/** A drawn line: points on the displayed page (fractions), a CSS colour (#rrggbb), its width as a fraction of the page width. */
+export type InkStroke = { points: PagePoint[]; color: string; width: number };
+
+export function hexColour(css: string): [number, number, number] {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(css.trim());
+  return m ? [parseInt(m[1], 16) / 255, parseInt(m[2], 16) / 255, parseInt(m[3], 16) / 255] : [0, 0, 0];
+}
+
+/** A filled circle (four Bézier curves). */
+function dot(x: number, y: number, r: number): PDFOperator[] {
+  const k = 0.5523 * r;
+  return [
+    moveTo(x + r, y),
+    appendBezierCurve(x + r, y + k, x + k, y + r, x, y + r),
+    appendBezierCurve(x - k, y + r, x - r, y + k, x - r, y),
+    appendBezierCurve(x - r, y - k, x - k, y - r, x, y - r),
+    appendBezierCurve(x + k, y - r, x + r, y - k, x + r, y),
+    closePath(),
+  ];
+}
+
+/**
+ * Freehand drawing (Markup › Draw) as one Ink annotation: the strokes as vector lines with round ends. `options`:
+ * the highlighter pen darkens what is under it (`multiply`) and lets it show (`opacity`).
+ */
+export async function ink(bytes: Uint8Array, pageIndex: number, strokes: InkStroke[], options: StampOptions = {}): Promise<Uint8Array> {
+  const doc = await open(bytes);
+  check(doc, [pageIndex]);
+  const drawn = strokes.filter((s) => s.points.length && s.width > 0);
+  if (!drawn.length) throw new PdfError('There is nothing to place.');
+  const page = doc.getPage(pageIndex);
+  const shown = displayedSize(page);
+  const state = markState(options);
+  const ops: PDFOperator[] = [pushGraphicsState(), ...(state ? [setGraphicsState('GS')] : []), setLineCap(LineCapStyle.Round), setLineJoin(LineJoinStyle.Round)];
+  const boxes: UserBox[] = [];
+  const list: number[][] = [];
+  for (const s of drawn) {
+    const width = s.width * shown.width;
+    const [r, g, b] = hexColour(s.color);
+    const points = s.points.map((p) => userPoint(page, p));
+    list.push(points.flat());
+    const xs = points.map((p) => p[0]);
+    const ys = points.map((p) => p[1]);
+    boxes.push({ x: Math.min(...xs) - width / 2, y: Math.min(...ys) - width / 2, width: Math.max(...xs) - Math.min(...xs) + width, height: Math.max(...ys) - Math.min(...ys) + width });
+    if (points.length === 1) ops.push(setFillingRgbColor(r, g, b), ...dot(points[0][0], points[0][1], width / 2), fill());
+    else {
+      ops.push(setStrokingRgbColor(r, g, b), setLineWidth(width), moveTo(...points[0]));
+      for (const p of points.slice(1)) ops.push(lineTo(...p));
+      ops.push(stroke());
+    }
+  }
+  ops.push(popGraphicsState());
+  addAnnotation(doc, page, {
+    subtype: 'Ink',
+    box: union(boxes),
+    draw: ops,
+    resources: state ? { ExtGState: { GS: state } } : undefined,
+    entries: {
+      C: hexColour(drawn[0].color),
+      ...(options.opacity !== undefined ? { CA: options.opacity } : {}),
+      BS: { Type: 'Border', W: drawn[0].width * shown.width, S: 'S' },
+      InkList: list,
+    },
+  });
+  return save(doc);
+}
+
+/** The marks on a page (see annotations.ts), for selecting them. */
+export async function marks(bytes: Uint8Array, pageIndex: number): Promise<MarkInfo[]> {
+  const doc = await open(bytes);
+  check(doc, [pageIndex]);
+  return marksOf(doc, doc.getPage(pageIndex));
 }
 
 /** A new document with one page per image, each page the size of its image (at most A4-like 842 points long). */
@@ -441,25 +504,6 @@ export type FieldKind = 'text' | 'multiline' | 'checkbox' | 'radio' | 'choice' |
 export type FieldValue = string | boolean | string[];
 /** One widget of a field: where it is on its page (displayed, fractions from the top-left) and the field's value. */
 export type FieldInfo = { name: string; kind: FieldKind; page: number; rect: PageRect; value: FieldValue; options: string[]; readOnly: boolean };
-
-/** `box` (page coordinates, unrotated) as a rectangle of the displayed page: the reverse of `userRect`. */
-export function displayedRect(page: PDFPage, box: { x: number; y: number; width: number; height: number }): PageRect {
-  const crop = page.getCropBox();
-  const turns = quarterTurns(page);
-  const shown = displayedSize(page);
-  const toShown = (px: number, py: number): [number, number] => {
-    const [x, y] = [px - crop.x, py - crop.y];
-    return turns === 0 ? [x, crop.height - y] : turns === 1 ? [y, x] : turns === 2 ? [crop.width - x, y] : [crop.height - y, crop.width - x];
-  };
-  const [x1, y1] = toShown(box.x, box.y);
-  const [x2, y2] = toShown(box.x + box.width, box.y + box.height);
-  return {
-    x: Math.min(x1, x2) / shown.width,
-    y: Math.min(y1, y2) / shown.height,
-    width: Math.abs(x2 - x1) / shown.width,
-    height: Math.abs(y2 - y1) / shown.height,
-  };
-}
 
 function kindOf(field: PDFField): FieldKind | null {
   if (field instanceof PDFTextField) return field.isMultiline() ? 'multiline' : 'text';

@@ -61,6 +61,28 @@ async function pixels(bytes: Uint8Array, index: number): Promise<{ at: (x: numbe
   };
 }
 
+/** The centre of the page's pixels that are not white, in page fractions (rendered at one pixel per point). Null when there are none. */
+async function colouredCentre(bytes: Uint8Array, index: number): Promise<{ x: number; y: number } | null> {
+  const doc = await openPdf(bytes);
+  const page = await doc.getPage(index + 1);
+  const canvas = document.createElement('canvas');
+  await (await renderPage(doc, index, canvas, page.getViewport({ scale: 1 }).width, 1)).promise;
+  void doc.loadingTask.destroy();
+  const { data, width, height } = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height);
+  let sx = 0, sy = 0, n = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      if (data[i] < 235 || data[i + 1] < 235 || data[i + 2] < 235) {
+        sx += x;
+        sy += y;
+        n++;
+      }
+    }
+  }
+  return n ? { x: (sx / n + 0.5) / width, y: (sy / n + 0.5) / height } : null;
+}
+
 async function blank(width: number, height: number, pages = 1): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
   for (let i = 0; i < pages; i++) doc.addPage([width, height]);
@@ -128,6 +150,42 @@ async function selfTest(checks: { name: string; pass: boolean; detail?: string }
     let dark = 0;
     for (let x = 0.1; x < 0.6; x += 0.004) for (let y = 0.1; y < 0.16; y += 0.004) if (px.at(x, y)[0] < 120) dark++;
     check(`typed ${label} text is drawn on the page`, dark > 20 && image.aspect > 1.5, JSON.stringify({ dark, aspect: image.aspect }));
+  }
+
+  // Marks are annotations: on a page turned 90° with a crop box, pdf.js draws each kind where it was placed (the
+  // centre of its coloured pixels within 2% of the page of the intended centre).
+  {
+    const made = await PDFDocument.create();
+    const p = made.addPage([300, 400]);
+    p.setCropBox(20, 40, 260, 320);
+    p.setRotation(degrees(90));
+    const page = await made.save();
+    const kinds: [string, (b: Uint8Array) => Promise<Uint8Array>, { x: number; y: number }][] = [
+      ['stamp', (b) => pdf.stamp(b, 0, red, { x: 0.1, y: 0.1, width: 0.2, height: 0.15 }), { x: 0.2, y: 0.175 }],
+      ['highlight', (b) => pdf.markText(b, 0, [{ x: 0.5, y: 0.1, width: 0.3, height: 0.1 }], 'highlight', [1, 0.8, 0, 0.5]), { x: 0.65, y: 0.15 }],
+      ['strikethrough', (b) => pdf.markText(b, 0, [{ x: 0.5, y: 0.4, width: 0.3, height: 0.1 }], 'strikethrough', [1, 0.23, 0.19, 1]), { x: 0.65, y: 0.45 }],
+      ['ink', (b) => pdf.ink(b, 0, [{ points: [{ x: 0.2, y: 0.6 }, { x: 0.6, y: 0.6 }], color: '#1a3fb0', width: 4 / 320 }]), { x: 0.4, y: 0.6 }],
+      ['marker', (b) => pdf.ink(b, 0, [{ points: [{ x: 0.3, y: 0.8 }, { x: 0.7, y: 0.85 }], color: '#ffe14d', width: 14 / 320 }], { multiply: true, opacity: 0.55 }), { x: 0.5, y: 0.825 }],
+    ];
+    const found: Record<string, unknown> = {};
+    let pass = true;
+    for (const [kind, make, expected] of kinds) {
+      const centre = await colouredCentre(await make(page), 0);
+      found[kind] = centre;
+      pass &&= !!centre && Math.abs(centre.x - expected.x) < 0.02 && Math.abs(centre.y - expected.y) < 0.02;
+    }
+    check('every mark kind is drawn where it was placed on a turned, cropped page', pass, JSON.stringify(found));
+  }
+
+  // A highlight over text keeps the text dark (it multiplies), and tints the paper around it.
+  {
+    const made = await PDFDocument.create();
+    made.addPage([300, 500]).drawRectangle({ x: 100, y: 240, width: 100, height: 20, color: rgb(0, 0, 0) });
+    const doc = await pdf.markText(await made.save(), 0, [{ x: 0.2, y: 0.4, width: 0.6, height: 0.2 }], 'highlight', [1, 0.8, 0, 0.5]);
+    const px = await pixels(doc, 0);
+    const bar = px.at(0.5, 0.5);
+    const paper = px.at(0.25, 0.42);
+    check('a highlight annotation multiplies: text under it stays dark', bar[0] < 40 && bar[1] < 40 && paper[0] > 200 && paper[2] < 200, JSON.stringify({ bar, paper }));
   }
 
   // The viewer agrees with the engine about page counts after merging.
