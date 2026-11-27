@@ -111,29 +111,34 @@ Permissions: the camera and adding to the photo library. The system asks for the
 
 ## Screenshots (iPhone 6.9", 1320 x 2868)
 
-Upload from `screenshots/ios/iphone-6.9/` in this order:
+App Store Connect takes up to 10 per size. Upload from `screenshots/ios/iphone-6.9/` in this order:
 
 1. `01-library.png` — Your documents in one place
 2. `08-fill-sign.png` — Fill in and sign forms
-3. `10-markup.png` — Highlight and mark up
+3. `13-shapes-comment.png` — Mark up with shapes and comments
 4. `09-tools.png` — Every tool in one place
-5. `04-place-signature.png` — Place your signature exactly
-6. `05-pages.png` — Reorder, rotate and delete pages
-7. `02-merge.png` — Merge documents
-8. `11-split.png` — Split a PDF
-9. `12-protect.png` — Protect with a password
-10. `03-signature-pad.png` — Draw your signature once
+5. `15-redact.png` — Black out text for good
+6. `17-watermark.png` — Add a watermark
+7. `04-place-signature.png` — Place your signature exactly
+8. `05-pages.png` — Reorder, rotate and delete pages
+9. `02-merge.png` — Merge documents
+10. `12-protect.png` — Protect with a password
+
+Also in the folder (not uploaded): `10-markup.png` (highlight), `14-selected-mark.png` (move or resize a placed signature), `16-tools-enhance.png` (Protect & optimize and Enhance tools), `11-split.png`, `03-signature-pad.png`, `06-settings.png`, `07-about.png`.
 
 ## Screenshots (iPad 13")
 
-Upload from `screenshots/ios/ipad-13/` in this order:
+App Store Connect takes up to 10 per size. Upload from `screenshots/ios/ipad-13/` in this order:
 
 1. `01-library.png` — Your documents in one place
 2. `02-fill-sign.png` — Fill in and sign forms
-3. `07-tools.png` — Every tool in one place
-4. `04-place-signature.png` — Place your signature exactly
-5. `05-pages.png` — Reorder, rotate and delete pages
-6. `06-merge.png` — Merge documents
-7. `08-split.png` — Split a PDF
-8. `09-protect.png` — Protect with a password
-9. `03-signature-pad.png` — Draw your signature once
+3. `13-shapes-comment.png` — Mark up with shapes and comments
+4. `07-tools.png` — Every tool in one place
+5. `15-redact.png` — Black out text for good
+6. `17-watermark.png` — Add a watermark
+7. `04-place-signature.png` — Place your signature exactly
+8. `05-pages.png` — Reorder, rotate and delete pages
+9. `06-merge.png` — Merge documents
+10. `09-protect.png` — Protect with a password
+
+Also in the folder (not uploaded): `14-selected-mark.png` (move or resize a placed signature), `08-split.png`, `03-signature-pad.png`. On iPad the whole Tools grid, including Enhance, fits in `07-tools.png`, so there is no separate `16-tools-enhance.png`.
