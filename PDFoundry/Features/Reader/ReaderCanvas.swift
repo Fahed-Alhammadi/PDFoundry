@@ -27,9 +27,12 @@ struct PDFKitView: UIViewRepresentable {
         center.addObserver(context.coordinator, selector: #selector(Coordinator.fieldEditingEnded), name: UITextView.textDidEndEditingNotification, object: nil)
         center.addObserver(context.coordinator, selector: #selector(Coordinator.annotationHit), name: .PDFViewAnnotationHit, object: view)
 
+        center.addObserver(context.coordinator, selector: #selector(Coordinator.viewportChanged), name: .PDFViewScaleChanged, object: view)
+
         let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.tapped(_:)))
         tap.delegate = context.coordinator
         view.addGestureRecognizer(tap)
+        context.coordinator.watchScrolling(of: view)
         return view
     }
 
@@ -48,9 +51,32 @@ struct PDFKitView: UIViewRepresentable {
 
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         private let model: ReaderModel
+        private var scrollObservation: NSKeyValueObservation?
 
         init(model: ReaderModel) {
             self.model = model
+        }
+
+        /// Overlays drawn over the page (a selected mark, redaction boxes) follow the page as it scrolls.
+        func watchScrolling(of view: PDFView) {
+            DispatchQueue.main.async { [weak self, weak view] in
+                guard let self, let view, let scroll = Self.scrollView(in: view) else { return }
+                scrollObservation = scroll.observe(\.contentOffset, options: [.new]) { [weak self] _, _ in
+                    MainActor.assumeIsolated { self?.viewportChanged() }
+                }
+            }
+        }
+
+        private static func scrollView(in view: UIView) -> UIScrollView? {
+            for subview in view.subviews {
+                if let scroll = subview as? UIScrollView { return scroll }
+                if let found = scrollView(in: subview) { return found }
+            }
+            return nil
+        }
+
+        @objc func viewportChanged() {
+            model.viewportTick &+= 1
         }
 
         @objc func pageChanged() {

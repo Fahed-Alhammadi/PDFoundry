@@ -29,9 +29,16 @@ struct AnnotationSelection {
         case "FreeText": "Text"
         case "Stamp": "Signature or Drawing"
         case "Ink": "Drawing"
+        case "Square": "Rectangle"
+        case "Circle": "Ellipse"
+        case "Line": annotation.endLineStyle == .openArrow ? "Arrow" : "Line"
+        case "Text": "Comment"
         default: "Annotation"
         }
     }
+
+    var isMovable: Bool { Annotations.isMovable(annotation) }
+    var isComment: Bool { annotation.type == "Text" }
 }
 
 /// State and editing actions for one open document.
@@ -77,7 +84,28 @@ final class ReaderModel {
     private enum UndoStep {
         case added([(PDFPage, PDFAnnotation)])
         case fields([(PDFAnnotation, FieldValue)])
+        /// Marks moved or resized, with where they were before.
+        case changed([(PDFAnnotation, AnnotationGeometry)])
+        /// Marks deleted, with the page they were on.
+        case removed([(PDFPage, PDFAnnotation)])
+        /// Comment text edited, with the text from before.
+        case edited(PDFAnnotation, String)
+        /// Pages replaced by new ones (redaction, Make Searchable).
+        case replaced([PageSwap])
     }
+
+    /// A page put in place of another one. `moved` are annotations carried over from the old page to the new one,
+    /// so Undo carries them back.
+    struct PageSwap {
+        let old: PDFPage
+        let new: PDFPage
+        var moved: [PDFAnnotation] = []
+    }
+
+    /// The selected mark as it was when the current drag began, so the finished drag is one Undo step.
+    @ObservationIgnored private var dragStart: AnnotationGeometry?
+    /// Changes whenever the page view scrolls or zooms, so overlays drawn over the page follow it.
+    var viewportTick = 0
 
     @ObservationIgnored private var undoStack: [UndoStep] = []
     /// Every form field's value as last saved, to find the fields the user has changed.
@@ -355,37 +383,101 @@ final class ReaderModel {
     func handleTap(at point: CGPoint) {
         // PDFView edits a form field on its own (ticks a box, picks a radio button); look for the change once it has.
         scheduleFieldSync()
-        guard mode == .reading, canEdit, let pdfView,
-              let page = pdfView.page(for: point, nearest: false),
-              let annotation = page.annotation(at: pdfView.convert(point, to: page)) else { return }
-        if FormFields.isSignatureField(annotation), !annotation.isReadOnly {
+        guard mode == .reading, canEdit, let pdfView else { return }
+        if let page = pdfView.page(for: point, nearest: false),
+           let annotation = page.annotation(at: pdfView.convert(point, to: page)),
+           FormFields.isSignatureField(annotation), !annotation.isReadOnly {
             signingField = annotation
             return
         }
-        let type = annotation.type ?? ""
-        guard type != "Link", type != "Widget", type != "Popup" else { return }
+        select(at: point)
+    }
+
+    /// Selects the mark under `point` (in the page view), or clears the selection when there is none.
+    func select(at point: CGPoint) {
+        guard canEdit, let pdfView, let page = pdfView.page(for: point, nearest: false),
+              let annotation = Annotations.mark(at: pdfView.convert(point, to: page), on: page) else {
+            selectedAnnotation = nil
+            return
+        }
         selectedAnnotation = AnnotationSelection(annotation: annotation, page: page)
+    }
+
+    var selectionIsMovable: Bool { selectedAnnotation?.isMovable ?? false }
+
+    /// Where the selected mark is in the page view, or nil.
+    var selectionFrame: CGRect? {
+        _ = viewportTick
+        guard let selected = selectedAnnotation, let pdfView else { return nil }
+        return pdfView.convert(selected.annotation.bounds, from: selected.page)
+    }
+
+    /// Moves or resizes the selected mark while a finger drags it (`viewRect` in the page view). Nothing is saved
+    /// until `finishDrag`.
+    func dragSelected(toViewRect viewRect: CGRect) {
+        guard let selected = selectedAnnotation, selected.isMovable, let pdfView else { return }
+        let start = dragStart ?? AnnotationGeometry(selected.annotation)
+        dragStart = start
+        start.moved(to: pdfView.convert(viewRect, to: selected.page).standardized).apply(to: selected.annotation)
+        viewportTick &+= 1
+    }
+
+    /// The finger is lifted: the drag becomes one Undo step and the file is saved.
+    func finishDrag() {
+        guard let selected = selectedAnnotation, let start = dragStart else { return }
+        dragStart = nil
+        guard AnnotationGeometry(selected.annotation) != start else { return }
+        record(.changed([(selected.annotation, start)]))
+    }
+
+    /// Moves or resizes the selected mark to `viewRect` in the page view, as one finished change.
+    func moveSelected(toViewRect viewRect: CGRect) {
+        dragSelected(toViewRect: viewRect)
+        finishDrag()
+    }
+
+    /// Moves or resizes the selected mark to `bounds` (page space), as one finished change. Text markup and marks
+    /// made by other apps stay where they are.
+    func moveSelected(to bounds: CGRect) {
+        guard let selected = selectedAnnotation, selected.isMovable else { return }
+        let before = AnnotationGeometry(selected.annotation)
+        let after = before.moved(to: bounds.standardized)
+        guard after != before else { return }
+        after.apply(to: selected.annotation)
+        viewportTick &+= 1
+        record(.changed([(selected.annotation, before)]))
     }
 
     func deleteSelectedAnnotation() {
         guard let selected = selectedAnnotation else { return }
         selected.page.removeAnnotation(selected.annotation)
-        undoStack = undoStack.compactMap { step in
-            guard case .added(let added) = step else { return step }
-            let left = added.filter { $0.1 !== selected.annotation }
-            return left.isEmpty ? nil : .added(left)
-        }
-        canUndo = !undoStack.isEmpty
         selectedAnnotation = nil
+        record(.removed([(selected.page, selected.annotation)]))
+    }
+
+    /// Adds one Undo step and saves.
+    private func record(_ step: UndoStep) {
+        syncFields()
+        undoStack.append(step)
+        canUndo = true
         save()
     }
 
     func undo() {
         syncFields()
         guard let last = undoStack.popLast() else { return }
+        selectedAnnotation = nil
         switch last {
         case .added(let added):
             for (page, annotation) in added { page.removeAnnotation(annotation) }
+        case .changed(let changed):
+            for (annotation, geometry) in changed { geometry.apply(to: annotation) }
+        case .removed(let removed):
+            for (page, annotation) in removed { page.addAnnotation(annotation) }
+        case .edited(let annotation, let text):
+            annotation.contents = text
+        case .replaced(let swaps):
+            restore(swaps)
         case .fields(let changed):
             // Back to front, so a radio group ends as it was.
             for (widget, old) in changed.reversed() {
@@ -484,12 +576,54 @@ final class ReaderModel {
         syncPage()
     }
 
+    /// Adds marks made here as one Undo step, tagged as PDFoundry's own, and saves.
     private func commit(_ added: [(PDFPage, PDFAnnotation)]) {
         guard !added.isEmpty else { return }
+        for (_, annotation) in added { Annotations.tag(annotation) }
+        record(.added(added))
+    }
+
+    // MARK: Replacing pages
+
+    /// Puts each swap's new page in place of its old one, carrying the listed annotations over, as one Undo step.
+    func replacePages(_ swaps: [PageSwap]) {
+        guard let document, !swaps.isEmpty else { return }
         syncFields()
-        undoStack.append(.added(added))
-        canUndo = true
-        save()
+        selectedAnnotation = nil
+        for swap in swaps {
+            let index = document.index(for: swap.old)
+            guard index != NSNotFound, index < document.pageCount else { continue }
+            for annotation in swap.moved {
+                swap.old.removeAnnotation(annotation)
+                swap.new.addAnnotation(annotation)
+            }
+            document.removePage(at: index)
+            document.insert(swap.new, at: index)
+        }
+        pagesReplaced()
+        record(.replaced(swaps))
+    }
+
+    private func restore(_ swaps: [PageSwap]) {
+        guard let document else { return }
+        for swap in swaps.reversed() {
+            let index = document.index(for: swap.new)
+            guard index != NSNotFound, index < document.pageCount else { continue }
+            for annotation in swap.moved {
+                swap.new.removeAnnotation(annotation)
+                swap.old.addAnnotation(annotation)
+            }
+            document.removePage(at: index)
+            document.insert(swap.old, at: index)
+        }
+        pagesReplaced()
+    }
+
+    /// The fields and the view after pages were swapped.
+    private func pagesReplaced() {
+        prepareFields()
+        pdfView?.layoutDocumentView()
+        syncPage()
     }
 
     /// Writes the document to the file it was opened from. Called after every change.

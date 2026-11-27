@@ -60,13 +60,6 @@ struct ReaderView: View {
             } message: {
                 Text("Type the text, then drag it into place.")
             }
-            .confirmationDialog(
-                model.selectedAnnotation?.title ?? "",
-                isPresented: Binding(get: { model.selectedAnnotation != nil }, set: { if !$0 { model.selectedAnnotation = nil } }),
-                titleVisibility: .visible
-            ) {
-                Button("Delete", role: .destructive) { model.deleteSelectedAnnotation() }
-            }
             .alert("Couldn't Save", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
                 Button("Save a Copy in PDFoundry") { saveCopy() }
                 Button("OK", role: .cancel) {}
@@ -105,6 +98,11 @@ struct ReaderView: View {
             .onDisappear { model.syncFields() }
     }
 
+    /// Opens a comment to read, edit or delete it.
+    private func openComment(_ comment: PDFAnnotation) {
+        // Filled in with the comment sheet.
+    }
+
     /// When the file can't be changed where it is, the edited document is kept as a new one inside PDFoundry.
     private func saveCopy() {
         guard let document = model.document else { return }
@@ -130,6 +128,9 @@ struct ReaderView: View {
             ZStack {
                 PDFKitView(model: model, horizontal: horizontalScroll)
 
+                if model.mode == .reading, model.selectedAnnotation != nil {
+                    SelectionOverlay(model: model) { comment in openComment(comment) }
+                }
                 if model.mode == .drawing {
                     DrawingCanvas(drawing: $model.drawing)
                 }
