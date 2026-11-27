@@ -5,9 +5,11 @@
 // the page as it is displayed (after its rotation), measured from the top-left corner: the same convention as the
 // Android app's PdfEngine.
 import {
-  BlendMode, PDFArray, PDFDocument, PDFPage, decodePDFRawStream, degrees, fill, popGraphicsState, pushGraphicsState, rectangle, setFillingRgbColor, setGraphicsState,
+  BlendMode, PDFArray, PDFDocument, PDFName, PDFPage, PDFRef, PDFStream, decodePDFRawStream, degrees, fill, popGraphicsState, pushGraphicsState, rectangle,
+  setFillingRgbColor, setGraphicsState,
 } from '@cantoo/pdf-lib';
 import type { PDFRawStream } from '@cantoo/pdf-lib';
+import { encryptionOf, isOwnerPassword } from './security.ts';
 
 export class PdfError extends Error {}
 
@@ -58,11 +60,12 @@ export async function pageCount(bytes: Uint8Array): Promise<number> {
   return (await open(bytes)).getPageCount();
 }
 
-/** Joins documents, in the order given, into one. */
+/** Joins documents, in the order given, into one. Protected documents are refused: the result would have no obvious password. */
 export async function merge(sources: Uint8Array[]): Promise<Uint8Array> {
   if (sources.length < 2) throw new PdfError('Choose two or more documents to merge.');
   const out = await PDFDocument.create();
   for (const bytes of sources) {
+    if (await isProtected(bytes)) throw new PdfError('A PDF protected with a password can’t be merged. Use More › Remove Password first.');
     const doc = await open(bytes);
     for (const page of await out.copyPages(doc, doc.getPageIndices())) out.addPage(page);
   }
@@ -77,6 +80,81 @@ export async function extract(bytes: Uint8Array, pages: number[]): Promise<Uint8
   const out = await PDFDocument.create();
   for (const page of await out.copyPages(doc, chosen)) out.addPage(page);
   return save(out);
+}
+
+/** One new document per part (each a list of pages, in order), as Split PDF makes them. The source is only read. */
+export async function split(bytes: Uint8Array, parts: number[][]): Promise<Uint8Array[]> {
+  if (!parts.length || parts.some((p) => !p.length)) throw new PdfError('There is nothing to split.');
+  const doc = await open(bytes);
+  const out: Uint8Array[] = [];
+  for (const part of parts) {
+    for (const p of part) if (!Number.isInteger(p) || p < 0 || p >= doc.getPageCount()) throw new PdfError(`There is no page ${p + 1}.`);
+    const piece = await PDFDocument.create();
+    for (const page of await piece.copyPages(doc, part)) piece.addPage(page);
+    out.push(await save(piece));
+  }
+  return out;
+}
+
+// Passwords. A protected document is decrypted once, when its password is entered; every change works on the
+// decrypted bytes, and every write encrypts them again with the same password (`protect`). The password is never
+// stored here.
+
+/** Is the file encrypted (an open password, or restrictions only)? */
+export async function isProtected(bytes: Uint8Array): Promise<boolean> {
+  try {
+    return (await PDFDocument.load(bytes, { ignoreEncryption: true, updateMetadata: false })).isEncrypted;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Decrypts a protected file with its password. Null when the password is wrong. `full`: the password is the owner
+ * password (or the same as the open password), which is what allows changing the file; a password that only opens
+ * it gives `full: false`, and the document must stay read-only. A file that is not protected comes back as it is.
+ */
+export async function unlock(bytes: Uint8Array, password: string): Promise<{ bytes: Uint8Array; full: boolean } | null> {
+  let probe: PDFDocument;
+  try {
+    probe = await PDFDocument.load(bytes, { ignoreEncryption: true, updateMetadata: false });
+  } catch {
+    throw new PdfError('This file is not a PDF that PDFoundry can read.');
+  }
+  const encryption = encryptionOf(probe);
+  if (!probe.isEncrypted || !encryption) return { bytes, full: true };
+  let doc: PDFDocument;
+  try {
+    doc = await PDFDocument.load(bytes, { password, updateMetadata: false });
+  } catch (e) {
+    if (/password/i.test(e instanceof Error ? e.message : String(e))) return null;
+    throw new PdfError('This PDF is protected in a way PDFoundry can’t open for changes.');
+  }
+  const full = await isOwnerPassword(encryption, password);
+  // pdf-lib drops the trailer's /Encrypt but keeps the dictionary itself and the old cross-reference streams (which
+  // still name it): a reader finding either would take the decrypted file for an encrypted one.
+  const ref = probe.context.trailerInfo.Encrypt;
+  if (ref instanceof PDFRef) doc.context.delete(ref);
+  for (const [at, object] of doc.context.enumerateIndirectObjects()) {
+    if (object instanceof PDFStream && object.dict.get(PDFName.of('Type')) === PDFName.of('XRef')) doc.context.delete(at);
+  }
+  return { bytes: await save(doc), full };
+}
+
+/**
+ * Encrypts a document with AES-256. The password is both the open (user) and the owner password, and everything is
+ * allowed, so whoever has the password can do anything with the file.
+ */
+export async function protect(bytes: Uint8Array, password: string): Promise<Uint8Array> {
+  if (!password) throw new PdfError('Enter a password.');
+  const doc = await open(bytes);
+  doc.encrypt({
+    userPassword: password,
+    ownerPassword: password,
+    algorithm: 'AES-256',
+    permissions: { printing: 'highResolution', modifying: true, copying: true, annotating: true, fillingForms: true, contentAccessibility: true, documentAssembly: true },
+  });
+  return save(doc);
 }
 
 export async function movePage(bytes: Uint8Array, from: number, to: number): Promise<Uint8Array> {
