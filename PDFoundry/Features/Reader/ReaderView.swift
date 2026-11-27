@@ -97,7 +97,11 @@ struct ReaderView: View {
             .sheet(item: $shared) { file in
                 ActivityView(url: file.url)
             }
-            .task { await model.load() }
+            .task {
+                // So Protect on the Tools tab can hand this reader the password (it may still be alive in its tab).
+                store.attach(model)
+                await model.load()
+            }
             .onDisappear { model.syncFields() }
     }
 
@@ -131,7 +135,8 @@ struct ReaderView: View {
                 }
                 if model.mode == .placing, let current = model.placement {
                     // The binding can be read once more after the placement is cleared, so it falls back to the last value.
-                    PlacementOverlay(placement: Binding(get: { model.placement ?? current }, set: { model.placement = $0 }))
+                    PlacementOverlay(placement: Binding(get: { model.placement ?? current }, set: { model.placement = $0 }),
+                                     avoiding: model.lastPlacedRect)
                 }
             }
             .ignoresSafeArea()

@@ -147,6 +147,13 @@ struct DocumentPicker: View {
             // Opened where it is and listed, so the tool changes the real file.
             let opened = (try? await store.open(urls)) ?? []
             items = opened.compactMap { url in store.items.first { $0.url.standardizedFileURL == url.standardizedFileURL } }
+            if items.count < urls.count {
+                isReading = false
+                notice = urls.count == 1
+                    ? "“\(urls[0].deletingPathExtension().lastPathComponent)” couldn't be opened where it is, so it can't be protected."
+                    : "Some files couldn't be opened where they are, so they can't be protected."
+                if items.isEmpty { return }
+            }
         } else {
             for url in urls {
                 if let item = await DocumentStore.pickedItem(url) { items.append(item) }
@@ -155,7 +162,9 @@ struct DocumentPicker: View {
         isReading = false
         let locked = allowsLocked ? [] : items.filter(\.isLocked)
         let usable = items.filter { allowsLocked || !$0.isLocked }
-        if let first = locked.first {
+        if opensInPlace, notice != nil {
+            // Already says which files couldn't be opened.
+        } else if let first = locked.first {
             notice = locked.count == 1 ? lockedNotice(first) : "\(locked.count) files are password protected, so they can't be merged. Use More › Remove Password first."
         } else {
             notice = items.count < urls.count ? "Some files couldn't be read as PDFs." : nil

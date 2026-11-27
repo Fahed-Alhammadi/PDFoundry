@@ -66,39 +66,43 @@ enum FormFields {
         return true
     }
 
-    /// Mends checkboxes and radio buttons saved by PDFKit (by PDFoundry, or by Preview). PDFKit writes a changed
-    /// button with its value as text and a single appearance, so on reading it back every button's "on" name is
-    /// the default "Yes": a box ticked as "On" reads as unticked, and the buttons of a radio group all share one
-    /// name, so they would all turn on and off together. The saved value still says which one is on, so each
-    /// button gets a name of its own again: the value for the one that is on, "Choice N" for the others (their
-    /// original names were not kept in the file). Only in memory; saved with the next change.
+    /// Mends checkboxes and radio buttons saved by PDFKit (by PDFoundry, or by Preview).
+    ///
+    /// When PDFKit writes a button it has changed, it keeps the value (`/V`) but not the button's own "on" name: read
+    /// back, the button is named "Yes" (tried: setting `/AS` and `/V` directly loses the name the same way). So a box
+    /// ticked as "On" reads as unticked, and the buttons of a radio group, all named "Yes", would turn on and off
+    /// together. This only touches buttons in that state, in memory; forms as they came are left alone:
+    /// - a checkbox named "Yes" whose saved value is another name gets that name back (each of its widgets alike);
+    /// - a radio group whose buttons are all named "Yes", with exactly one button saved as on, gives that button the
+    ///   saved value as its name, and the other buttons, whose names are lost, "Choice N" (one keeps "Yes" when
+    ///   the value isn't "Yes", so a Yes/No pair stays Yes/No).
+    /// Fields without a name are skipped.
     static func repair(_ document: PDFDocument) {
-        let buttons = widgets(in: document).filter {
-            $0.widgetFieldType == .button && [.checkBoxControl, .radioButtonControl].contains($0.widgetControlType)
-        }
         func saved(_ widget: PDFAnnotation) -> String? {
             let value = (widget.value(forAnnotationKey: .widgetValue) as? String) ?? ""
             return value.isEmpty || value == "Off" ? nil : value
         }
-        for (_, group) in Dictionary(grouping: buttons, by: { $0.fieldName ?? "" }) {
-            if group.count == 1 {
-                // A checkbox ticked under another name than the one PDFKit assumes.
-                let box = group[0]
-                if let value = saved(box), box.buttonWidgetState == .offState { box.buttonWidgetStateString = value }
-                continue
+        let buttons = widgets(in: document).filter { !($0.fieldName ?? "").isEmpty && $0.widgetFieldType == .button }
+        for box in buttons where box.widgetControlType == .checkBoxControl {
+            if box.buttonWidgetStateString == "Yes", box.buttonWidgetState == .offState, let value = saved(box), value != "Yes" {
+                box.buttonWidgetStateString = value
             }
-            // Radio buttons whose own name PDFKit lost read as the default "Yes".
-            let lost = group.filter { $0.buttonWidgetStateString == "Yes" }
-            guard !lost.isEmpty else { continue }
-            var named: PDFAnnotation?
-            if let value = group.lazy.compactMap(saved).first, !group.contains(where: { $0.buttonWidgetStateString == value }) {
-                // The saved value names the button that is on: the lost one that carries it, or the only lost one.
-                named = lost.first { saved($0) == value } ?? (lost.count == 1 ? lost[0] : nil)
-                named?.buttonWidgetStateString = value
-                named?.buttonWidgetState = .onState
-            }
-            for (index, widget) in group.enumerated() where widget !== named && widget.buttonWidgetStateString == "Yes" {
-                widget.buttonWidgetStateString = "Choice \(index + 1)"
+        }
+        let radios = buttons.filter { $0.widgetControlType == .radioButtonControl }
+        for (_, group) in Dictionary(grouping: radios, by: { $0.fieldName ?? "" }) where group.count > 1 {
+            guard group.allSatisfy({ $0.buttonWidgetStateString == "Yes" }) else { continue }
+            let on = group.filter { saved($0) != nil }
+            // Each button carries its own value only when all of them were written; otherwise it can't be told which.
+            guard on.count == 1, let chosen = on.first, let value = saved(chosen) else { continue }
+            chosen.buttonWidgetStateString = value
+            chosen.buttonWidgetState = .onState
+            var keptYes = value == "Yes"
+            for (index, widget) in group.enumerated() where widget !== chosen {
+                if !keptYes {
+                    keptYes = true // still named "Yes": one other button may well be the "Yes" one
+                } else {
+                    widget.buttonWidgetStateString = "Choice \(index + 1)"
+                }
             }
         }
     }

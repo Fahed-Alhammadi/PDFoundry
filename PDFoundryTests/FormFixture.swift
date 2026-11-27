@@ -55,6 +55,36 @@ enum FormFixture {
             stream("/Type /XObject /Subtype /Form /BBox [\(box)]", "q 0.5 G 0.5 0.5 17 17 re S Q"),
             "<< /Type /Font /Subtype /Type1 /BaseFont /ZapfDingbats >>",
         ]
+        return assemble(objects)
+    }
+
+    /// A form with a Yes/No radio group ("answer": buttons named Yes and No) and a checkbox with two widgets
+    /// ("copies", both named On), as forms made in Acrobat have.
+    static func yesNoSource() -> String {
+        let box = "0 0 18 18"
+        func button(_ parent: Int, _ x: Int, _ name: String) -> String {
+            "<< /Type /Annot /Subtype /Widget /Parent \(parent) 0 R /Rect [\(x) 600 \(x + 18) 618] /F 4 /P 3 0 R /AS /Off /MK << /CA (l) >> /DA (/ZaDb 0 Tf 0 g) /AP << /N << /\(name) 8 0 R /Off 9 0 R >> >> >>"
+        }
+        let objects: [String] = [
+            "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R 5 0 R] /DA (/Helv 12 Tf 0 g) /DR << /Font << /Helv 10 0 R /ZaDb 11 0 R >> >> >> >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 12 0 R /Resources << /Font << /Helv 10 0 R >> >> /Annots [6 0 R 7 0 R 13 0 R 14 0 R] >>",
+            "<< /FT /Btn /Ff 49152 /T (answer) /V /Off /Kids [6 0 R 7 0 R] >>",
+            "<< /FT /Btn /T (copies) /V /Off /Kids [13 0 R 14 0 R] >>",
+            button(4, 72, "Yes"),
+            button(4, 152, "No"),
+            stream("/Type /XObject /Subtype /Form /BBox [\(box)]", "q 0.07 0.08 0.11 rg 3 3 12 12 re f Q"),
+            stream("/Type /XObject /Subtype /Form /BBox [\(box)]", "q 0.5 G 0.5 0.5 17 17 re S Q"),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /ZapfDingbats >>",
+            stream("", "BT /Helv 12 Tf 72 630 Td (Answer: Yes / No) Tj 0 -60 Td (Copies: page 1 / page 2) Tj ET"),
+            button(5, 72, "On").replacingOccurrences(of: "600", with: "540").replacingOccurrences(of: "618", with: "558"),
+            button(5, 152, "On").replacingOccurrences(of: "600", with: "540").replacingOccurrences(of: "618", with: "558"),
+        ]
+        return assemble(objects)
+    }
+
+    static func assemble(_ objects: [String]) -> String {
         var text = "%PDF-1.7\n"
         var offsets: [Int] = []
         for (index, body) in objects.enumerated() {

@@ -89,13 +89,13 @@ struct FormFieldTests {
         }
     }
 
-    @Test func aRadioButtonTickedInTheReaderSurvivesSaving() throws {
-        // PDFView changes only the button that is tapped, not the rest of its group.
+    @Test func aRadioButtonTickedInTheReaderSurvivesSaving() async throws {
+        // PDFView changes only the button that is tapped, not the rest of its group; the reader saves the group.
         let url = try formURL()
-        let document = try #require(PDFDocument(url: url))
-        let drinks = try #require(widgets(document)["drink"])
+        let model = try await open(url)
+        let drinks = try #require(widgets(model.document)["drink"])
         drinks[1].buttonWidgetState = .onState
-        #expect(document.write(to: url))
+        model.syncFields()
 
         let reloaded = try #require(PDFDocument(url: url))
         FormFields.repair(reloaded)
@@ -103,6 +103,54 @@ struct FormFieldTests {
         #expect(saved.map { FormFields.value(of: $0) } == [.on(false), .on(true)])
         #expect(FormFields.set(saved[0], value: .on(true)))
         #expect(saved.map { FormFields.value(of: $0) } == [.on(true), .on(false)], "still one group")
+    }
+
+    private func yesNoForm() throws -> URL {
+        let url = folder.appending(path: "YesNo.pdf")
+        try Data(FormFixture.yesNoSource().utf8).write(to: url)
+        return url
+    }
+
+    @Test func aYesNoRadioGroupKeepsItsNamesAndValueThroughSaving() throws {
+        let url = try yesNoForm()
+        // Untouched: the names are the form's own and nothing is renamed.
+        let untouched = try #require(PDFDocument(url: url))
+        FormFields.repair(untouched)
+        #expect(try #require(widgets(untouched)["answer"]).map(\.buttonWidgetStateString) == ["Yes", "No"])
+
+        for (choice, expected) in [(0, [true, false]), (1, [false, true])] {
+            // A fresh form each time: PDFKit can't keep the name of a button it has changed (see `repair`).
+            try Data(FormFixture.yesNoSource().utf8).write(to: url)
+            let document = try #require(PDFDocument(url: url))
+            FormFields.repair(document)
+            let answer = try #require(widgets(document)["answer"])
+            #expect(FormFields.set(answer[choice], value: .on(true)))
+            #expect(document.write(to: url))
+
+            let reloaded = try #require(PDFDocument(url: url))
+            FormFields.repair(reloaded)
+            let saved = try #require(widgets(reloaded)["answer"])
+            #expect(saved.map { FormFields.value(of: $0) } == expected.map { .on($0) }, "choice \(choice)")
+            #expect(saved[choice].buttonWidgetStateString == (choice == 0 ? "Yes" : "No"), "the chosen button keeps its value")
+            #expect(Set(saved.map(\.buttonWidgetStateString)).count == 2, "the buttons stay apart")
+            if choice == 1 { #expect(saved[0].buttonWidgetStateString == "Yes", "a name that is still right is not changed") }
+        }
+    }
+
+    @Test func aCheckboxWithTwoWidgetsStaysOneField() throws {
+        let url = try yesNoForm()
+        let document = try #require(PDFDocument(url: url))
+        let copies = try #require(widgets(document)["copies"])
+        #expect(copies.count == 2)
+        #expect(FormFields.set(copies[0], value: .on(true)))
+        #expect(document.write(to: url))
+
+        let reloaded = try #require(PDFDocument(url: url))
+        FormFields.repair(reloaded)
+        let saved = try #require(widgets(reloaded)["copies"])
+        #expect(saved.count == 2)
+        #expect(saved.map { FormFields.value(of: $0) } == [.on(true), .on(true)], "both widgets show the one value")
+        #expect(Set(saved.map(\.buttonWidgetStateString)) == ["On"], "no button is renamed apart from the other")
     }
 
     @Test func arabicFieldValueRoundTrips() throws {
@@ -119,6 +167,7 @@ struct FormFieldTests {
         #expect(FormFields.value(of: field) == .text(arabic), "saved as real text")
         let rendered = page.thumbnail(of: CGSize(width: 612 * 2, height: 792 * 2), for: .mediaBox)
         #expect(rendered.hasDarkPixel(inPageRect: field.bounds, page: page), "the value is drawn, not a blank box")
+        #expect(try Self.appearanceLength(ofField: "name", in: url) > 0, "the saved field has its own appearance for other viewers")
     }
 
     @Test func fieldChangeIsUndoable() async throws {
@@ -213,5 +262,28 @@ struct FormFieldTests {
         moved.widgetStringValue = "Jane Doe"
         model.syncFields()
         #expect(FormFields.value(of: try #require(widgets(PDFDocument(url: url))["name"]?.first)) == .text("Jane Doe"))
+    }
+
+    /// The length of a field's normal appearance stream as written in the file, read with Core Graphics (not PDFKit,
+    /// which draws fields itself).
+    static func appearanceLength(ofField name: String, in url: URL) throws -> Int {
+        let document = try #require(CGPDFDocument(url as CFURL))
+        let page = try #require(document.page(at: 1)?.dictionary)
+        var annots: CGPDFArrayRef?
+        guard CGPDFDictionaryGetArray(page, "Annots", &annots), let annots else { return 0 }
+        for index in 0..<CGPDFArrayGetCount(annots) {
+            var annot: CGPDFDictionaryRef?
+            guard CGPDFArrayGetDictionary(annots, index, &annot), let annot else { continue }
+            var title: CGPDFStringRef?
+            guard CGPDFDictionaryGetString(annot, "T", &title), let title,
+                  (CGPDFStringCopyTextString(title) as String?) == name else { continue }
+            var ap: CGPDFDictionaryRef?
+            guard CGPDFDictionaryGetDictionary(annot, "AP", &ap), let ap else { return 0 }
+            var normal: CGPDFStreamRef?
+            guard CGPDFDictionaryGetStream(ap, "N", &normal), let normal else { return 0 }
+            var format = CGPDFDataFormat.raw
+            return (CGPDFStreamCopyData(normal, &format) as Data?)?.count ?? 0
+        }
+        return 0
     }
 }

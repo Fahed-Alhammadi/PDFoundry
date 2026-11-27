@@ -326,18 +326,59 @@ final class DocumentStore {
     /// Splits the file at `url` into new documents in the library, one per entry of `parts` (zero-based page
     /// lists), named "<name> (part 1)", "(part 2)"… Like Extract, the source is only read, never written or listed.
     /// A protected source needs its password (with full access), and every part is protected with it too.
+    /// The work is done away from the main thread. If a part can't be made, the parts already written are removed.
     func split(_ url: URL, into parts: [[Int]], password: String?) async throws -> [PDFItem] {
         let name = url.deletingPathExtension().lastPathComponent
-        let source = try PDFOperations.fullAccess(await Self.readCoordinated(url), password: password, name: name)
-        let keep = source.isEncrypted ? password : nil
-        let documents = try parts.map { try PDFOperations.extract($0, from: source) }
-        var written: [(URL, Int)] = []
-        for (index, document) in documents.enumerated() {
-            let destination = try await save(document, named: "\(name) (part \(index + 1))", password: keep, refreshing: false)
-            written.append((destination, document.pageCount))
+        let destinations = uniqueURLs(named: parts.indices.map { "\(name) (part \($0 + 1))" })
+        let data = await Self.readCoordinated(url)
+        do {
+            let result = try await Self.writeParts(of: data, named: name, password: password, parts: parts, to: destinations)
+            await refresh()
+            return zip(destinations, result.pageCounts).map { item(for: $0, pageCount: $1, isLocked: result.isProtected) }
+        } catch {
+            await refresh()
+            throw error
         }
-        await refresh()
-        return written.map { item(for: $0.0, pageCount: $0.1, isLocked: keep != nil) }
+    }
+
+    /// Free names for several new documents at once (none of them written yet).
+    private func uniqueURLs(named names: [String]) -> [URL] {
+        var taken: Set<String> = []
+        return names.map { name in
+            var url = uniqueURL(named: name)
+            var counter = 2
+            while taken.contains(url.lastPathComponent) {
+                url = uniqueURL(named: "\(name) \(counter)")
+                counter += 1
+            }
+            taken.insert(url.lastPathComponent)
+            return url
+        }
+    }
+
+    /// Reads a source with full access and writes one new document per page list, keeping the source's password.
+    /// Runs away from the main thread; every PDFDocument here is made and used on this one task.
+    @concurrent
+    private nonisolated static func writeParts(of data: Data?, named name: String, password: String?, parts: [[Int]],
+                                               to destinations: [URL]) async throws -> (pageCounts: [Int], isProtected: Bool) {
+        let source = try PDFOperations.fullAccess(data, password: password, name: name)
+        let keep = source.isEncrypted ? password : nil
+        var written: [URL] = []
+        var counts: [Int] = []
+        do {
+            for (pages, destination) in zip(parts, destinations) {
+                let document = try PDFOperations.extract(pages, from: source)
+                guard document.write(to: destination, withOptions: PDFOperations.writeOptions(password: keep)) else {
+                    throw PDFoundryError.writeFailed
+                }
+                written.append(destination)
+                counts.append(document.pageCount)
+            }
+        } catch {
+            for url in written { try? FileManager.default.removeItem(at: url) }
+            throw error
+        }
+        return (counts, keep != nil)
     }
 
     @discardableResult
@@ -373,11 +414,11 @@ final class DocumentStore {
     /// A protected source needs its password (with full access), and the new document keeps it.
     func extractPages(from url: URL, pages: IndexSet, password: String? = nil) async throws -> PDFItem {
         let name = url.deletingPathExtension().lastPathComponent
-        let source = try PDFOperations.fullAccess(await Self.readCoordinated(url), password: password, name: name)
-        let keep = source.isEncrypted ? password : nil
-        let extracted = try PDFOperations.extract(Array(pages), from: source)
-        let destination = try await save(extracted, named: name + " (pages)", password: keep)
-        return item(for: destination, pageCount: extracted.pageCount, isLocked: keep != nil)
+        let destination = uniqueURL(named: name + " (pages)")
+        let data = await Self.readCoordinated(url)
+        let result = try await Self.writeParts(of: data, named: name, password: password, parts: [Array(pages)], to: [destination])
+        await refresh()
+        return item(for: destination, pageCount: result.pageCounts[0], isLocked: result.isProtected)
     }
 
     /// Reads a file's bytes through a file coordinator (so a file in iCloud is downloaded first), with access to it
@@ -394,12 +435,43 @@ final class DocumentStore {
 
     // MARK: Changing
 
-    /// Protects the file at `url` with `password`, in place: the file itself is replaced by the encrypted version
-    /// (a file opened in place stays where it is; nothing is copied). An already protected file is refused.
+    // MARK: Open readers
+
+    private struct OpenReader {
+        weak var model: ReaderModel?
+    }
+
+    @ObservationIgnored private var readers: [OpenReader] = []
+
+    /// The reader showing a file tells the store, so a tool that changes the file (Protect) can tell it back.
+    /// Held weakly: a closed reader drops off by itself.
+    func attach(_ reader: ReaderModel) {
+        readers.removeAll { $0.model == nil || $0.model === reader }
+        readers.append(OpenReader(model: reader))
+    }
+
+    private func openReader(for url: URL) -> ReaderModel? {
+        let target = url.standardizedFileURL
+        return readers.lazy.compactMap(\.model).first { $0.url.standardizedFileURL == target }
+    }
+
+    /// Protects the file at `url` with `password`, in place: the file itself is overwritten with the encrypted
+    /// version (a file opened in place stays where it is; nothing is copied). An already protected file is refused.
+    /// If the file is open in a reader, the reader saves its last changes first and takes the password, so its next
+    /// save keeps the file protected.
     func protect(_ url: URL, password: String) async throws {
         let name = url.deletingPathExtension().lastPathComponent
         guard !password.isEmpty else { throw PDFoundryError.wrongPassword }
-        guard let data = await Self.readCoordinated(url), let document = PDFDocument(data: data) else {
+        let reader = openReader(for: url)
+        reader?.syncFields()
+        try await Self.protectFile(at: url, named: name, password: password, atomic: isInLibrary(url))
+        reader?.adoptProtection(password: password)
+        await refresh()
+    }
+
+    @concurrent
+    private nonisolated static func protectFile(at url: URL, named name: String, password: String, atomic: Bool) async throws {
+        guard let data = await readCoordinated(url), let document = PDFDocument(data: data) else {
             throw PDFoundryError.unreadable(name)
         }
         guard !document.isEncrypted else { throw PDFoundryError.alreadyProtected(name) }
@@ -408,12 +480,11 @@ final class DocumentStore {
             var error: NSError?
             // Coordinated, as the reader's saves are, so iCloud Drive and other apps see one complete change.
             NSFileCoordinator().coordinate(writingItemAt: url, options: .forReplacing, error: &error) { target in
-                written = PDFOperations.writeInPlace(document, to: target, password: password)
+                written = PDFOperations.writeInPlace(document, to: target, password: password, atomic: atomic)
             }
             return written
         }
         guard written else { throw PDFoundryError.writeFailed }
-        await refresh()
     }
 
     func rename(_ item: PDFItem, to newName: String) async throws {

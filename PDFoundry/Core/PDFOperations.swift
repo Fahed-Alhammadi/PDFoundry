@@ -1,7 +1,7 @@
 import PDFKit
 import UIKit
 
-enum PDFoundryError: LocalizedError {
+nonisolated enum PDFoundryError: LocalizedError, Equatable {
     case unreadable(String)
     case locked(String)
     case writeFailed
@@ -67,17 +67,46 @@ enum PDFOperations {
 
     /// Writes `document` into the existing file at `url`, keeping that file (it is overwritten, not replaced).
     /// `PDFDocument.write(to:)` puts a new file in its place, and a file in "On My iPhone" then gets a new identity
-    /// in the Files app: the bookmark PDFoundry keeps for a file opened in place stops resolving ("The file doesn't
-    /// exist") and the file drops off the list. Overwriting also works when only the file, not its folder, may be
-    /// written (a file picked in Files). Callers wrap it in a file coordinator, so other apps see one change.
-    nonisolated static func writeInPlace(_ document: PDFDocument, to url: URL, password: String?) -> Bool {
+    /// in the Files app: the bookmark PDFoundry keeps for a file opened in place stops resolving and the file drops
+    /// off the list. Overwriting also works when only the file, not its folder, may be written (a file picked in
+    /// Files). Files in PDFoundry's own folder (`atomic`) are written to a temporary file and swapped in.
+    /// Callers wrap it in a file coordinator, so other apps see one change.
+    nonisolated static func writeInPlace(_ document: PDFDocument, to url: URL, password: String?, atomic: Bool = false,
+                                         write: ((Data, URL) throws -> Void)? = nil) -> Bool {
         guard let data = document.dataRepresentation(options: writeOptions(password: password)) else { return false }
-        return (try? data.write(to: url)) != nil
+        return writeInPlace(data, to: url, atomic: atomic, write: write)
+    }
+
+    /// Writes `data` over the file at `url` safely: refused up front when the disk hasn't room for it, and if the
+    /// write fails part way (an overwrite has already cut the file short), the previous bytes are written back,
+    /// so a protected file never ends up cut short or unprotected.
+    nonisolated static func writeInPlace(_ data: Data, to url: URL, atomic: Bool = false,
+                                         write: ((Data, URL) throws -> Void)? = nil) -> Bool {
+        let folder = url.deletingLastPathComponent()
+        if let free = try? folder.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+            .volumeAvailableCapacityForImportantUsage, free > 0, free < Int64(data.count) + 1_000_000 {
+            return false
+        }
+        // Atomic: a temporary file beside it, then swapped in, so the old file stays whole until the new one is.
+        let writer = write ?? { data, url in try data.write(to: url, options: atomic ? .atomic : []) }
+        let previous = atomic ? nil : try? Data(contentsOf: url)
+        do {
+            try writer(data, url)
+            return true
+        } catch {
+            if let previous { try? previous.write(to: url) }
+            return false
+        }
+    }
+
+    /// Whether `url` is directly inside `folder`.
+    nonisolated static func isInsideFolder(_ url: URL, _ folder: URL) -> Bool {
+        url.deletingLastPathComponent().standardizedFileURL.path == folder.standardizedFileURL.path
     }
 
     /// Reads a document with full access: unprotected, or unlocked with a password that is its owner password.
     /// A protected file without the password, with a wrong one, or with only limited access throws.
-    static func fullAccess(_ data: Data?, password: String?, name: String) throws -> PDFDocument {
+    nonisolated static func fullAccess(_ data: Data?, password: String?, name: String) throws -> PDFDocument {
         guard let data, let document = PDFDocument(data: data) else { throw PDFoundryError.unreadable(name) }
         guard document.isEncrypted else { return document }
         if document.isLocked {
@@ -98,6 +127,9 @@ enum PDFOperations {
             result.insert(page, at: result.pageCount)
         }
         result.documentAttributes = source.documentAttributes
+        // Not kept: links from one page to another and page labels. PDFKit writes a page moved or copied into another
+        // document with its links pointing at page 1, and setting the destination again doesn't survive the write
+        // either (tried); it has no API for page labels. Form fields are kept (PDFKit writes the form again).
         if let outline = source.outlineRoot {
             let root = PDFOutline()
             copyOutline(outline, into: root, from: source, to: result)
@@ -132,8 +164,14 @@ enum PDFOperations {
     static func merge(_ sources: [(name: String, data: Data?)]) throws -> PDFDocument {
         let merged = PDFDocument()
         for (name, data) in sources {
-            guard let source = data.flatMap(PDFDocument.init(data:)) else { throw PDFoundryError.unreadable(name) }
-            guard !source.isLocked else { throw PDFoundryError.protectedSource(name) }
+            // Password-protected files and files with restrictions only are refused: a merged file has no password,
+            // so it would carry their pages out unprotected.
+            let source: PDFDocument
+            do {
+                source = try fullAccess(data, password: nil, name: name)
+            } catch PDFoundryError.locked, PDFoundryError.limitedAccess {
+                throw PDFoundryError.protectedSource(name)
+            }
             for index in 0..<source.pageCount {
                 guard let page = source.page(at: index)?.copy() as? PDFPage else { continue }
                 merged.insert(page, at: merged.pageCount)
@@ -144,7 +182,7 @@ enum PDFOperations {
     }
 
     /// Copies the pages at `indexes` into a new document.
-    static func extract(_ indexes: [Int], from document: PDFDocument) throws -> PDFDocument {
+    nonisolated static func extract(_ indexes: [Int], from document: PDFDocument) throws -> PDFDocument {
         let result = PDFDocument()
         for index in indexes.sorted() where index >= 0 && index < document.pageCount {
             guard let page = document.page(at: index)?.copy() as? PDFPage else { continue }

@@ -80,6 +80,9 @@ struct SplitView: View {
             await source.load(item)
             if let count = source.pageCount { plan = SplitPlan(pageCount: count) }
         }
+        .onChange(of: source.pageCount) { _, count in
+            if plan == nil, let count { plan = SplitPlan(pageCount: count) }
+        }
         .alert("Couldn't Split", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
             Button("OK", role: .cancel) {}
         } message: {
@@ -92,9 +95,7 @@ struct SplitView: View {
         if let binding = Binding($plan) {
             form(binding)
         } else {
-            source.placeholder(for: item) {
-                if let count = source.pageCount { plan = SplitPlan(pageCount: count) }
-            }
+            source.placeholder(for: item) {}
         }
     }
 
@@ -172,31 +173,50 @@ final class ToolSource {
     private(set) var unlockError: String?
 
     func load(_ item: PDFItem) async {
-        guard isLoading else { return }
+        guard isLoading, data == nil else { return }
         data = await DocumentStore.readCoordinated(item.url)
         defer { isLoading = false }
-        guard let data, let document = PDFDocument(data: data) else {
+        guard let data, let locked = await Self.isLocked(data) else {
             problem = "“\(item.name)” isn't a readable PDF."
             return
         }
-        if document.isLocked {
+        if locked {
             needsPassword = true
         } else {
-            take(item, password: nil)
+            await take(item, password: nil)
+        }
+    }
+
+    /// Whether the bytes are a PDF that asks for a password; nil if they aren't a PDF. Parsed off the main thread.
+    @concurrent
+    private nonisolated static func isLocked(_ data: Data) async -> Bool? {
+        PDFDocument(data: data).map(\.isLocked)
+    }
+
+    /// Checks a password (it must give full access) and counts the pages, off the main thread.
+    @concurrent
+    private nonisolated static func check(_ data: Data?, password: String?, name: String) async -> Result<(pages: Int, encrypted: Bool), PDFoundryError> {
+        do {
+            let document = try PDFOperations.fullAccess(data, password: password, name: name)
+            return .success((document.pageCount, document.isEncrypted))
+        } catch let error as PDFoundryError {
+            return .failure(error)
+        } catch {
+            return .failure(.unreadable(name))
         }
     }
 
     /// Checks the password (it must give full access) and reads the page count.
-    func take(_ item: PDFItem, password: String?) {
-        do {
-            let document = try PDFOperations.fullAccess(data, password: password, name: item.name)
-            self.password = document.isEncrypted ? password : nil
-            pageCount = document.pageCount
+    func take(_ item: PDFItem, password: String?) async {
+        switch await Self.check(data, password: password, name: item.name) {
+        case .success(let result):
+            self.password = result.encrypted ? password : nil
+            pageCount = result.pages
             needsPassword = false
             unlockError = nil
-        } catch PDFoundryError.wrongPassword {
+        case .failure(.wrongPassword):
             unlockError = PDFoundryError.wrongPassword.localizedDescription
-        } catch {
+        case .failure(let error):
             needsPassword = false
             problem = error.localizedDescription
         }
@@ -209,8 +229,10 @@ final class ToolSource {
             ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if needsPassword {
             PasswordPrompt(name: item.name, error: unlockError) { password in
-                self.take(item, password: password)
-                if self.pageCount != nil { onReady() }
+                Task {
+                    await self.take(item, password: password)
+                    if self.pageCount != nil { onReady() }
+                }
             }
         } else if let problem {
             ContentUnavailableView("Unable to Use", systemImage: "doc.questionmark", description: Text(problem))

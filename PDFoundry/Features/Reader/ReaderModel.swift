@@ -64,6 +64,8 @@ final class ReaderModel {
     /// Always `.none` when a document opens: the reader starts on the reading bar.
     var toolMode = ToolMode.none
     var placement: Placement?
+    /// Where the last item was placed, in the reader's space, so the next one doesn't start on top of it.
+    @ObservationIgnored private(set) var lastPlacedRect: CGRect?
     var drawing = PKDrawing()
     var selectedAnnotation: AnnotationSelection?
     var hint: String?
@@ -161,9 +163,21 @@ final class ReaderModel {
         if document.permissionsStatus == .owner {
             setPassword(password)
             openedPassword = password
+            // A file may have a separate open (user) password; PDFKit can't tell, and saves use the entered one
+            // for both, so the user hears it once, when the document becomes editable.
+            show(hint: Self.passwordNotice, for: .seconds(5))
         }
         prepareFields()
         return true
+    }
+
+    static let passwordNotice = "Saving will set this document's password to the one you entered."
+
+    /// The file was protected elsewhere (Tools) while it is open here: every later save keeps that password.
+    /// The document in memory is the same as the file, so nothing needs reading again.
+    func adoptProtection(password newPassword: String) {
+        guard canEdit else { return }
+        setPassword(newPassword)
     }
 
     private func setPassword(_ value: String?) {
@@ -289,6 +303,7 @@ final class ReaderModel {
         guard let placement, let pdfView, !placement.rect.isEmpty,
               let page = pdfView.page(for: CGPoint(x: placement.rect.midX, y: placement.rect.midY), nearest: true) else { return }
         let bounds = pdfView.convert(placement.rect, to: page)
+        lastPlacedRect = placement.rect
 
         switch placement.content {
         case .image(let image):
@@ -374,8 +389,10 @@ final class ReaderModel {
         case .fields(let changed):
             // Back to front, so a radio group ends as it was.
             for (widget, old) in changed.reversed() {
+                let readOnly = widget.isReadOnly
                 widget.isReadOnly = false
                 FormFields.set(widget, value: old)
+                widget.isReadOnly = readOnly
             }
             for (widget, _) in changed {
                 if let value = FormFields.value(of: widget) { fieldValues[ObjectIdentifier(widget)] = (widget, value) }
@@ -422,6 +439,15 @@ final class ReaderModel {
     /// text field stops editing, after taps, and before anything else is saved.
     func syncFields() {
         guard canEdit, !fieldValues.isEmpty else { return }
+        // PDFView changes only the radio button that was tapped. Setting it through FormFields turns the others
+        // off explicitly too, so each button is written with its own value (see FormFields.repair).
+        for entry in fieldValues.values where entry.widget.widgetControlType == .radioButtonControl
+            && entry.value == .on(false) && FormFields.value(of: entry.widget) == .on(true) {
+            let readOnly = entry.widget.isReadOnly
+            entry.widget.isReadOnly = false
+            FormFields.set(entry.widget, value: .on(true))
+            entry.widget.isReadOnly = readOnly
+        }
         var changed: [(PDFAnnotation, FieldValue)] = []
         for (key, entry) in fieldValues {
             guard let now = FormFields.value(of: entry.widget), now != entry.value else { continue }
@@ -475,7 +501,8 @@ final class ReaderModel {
         var error: NSError?
         // Coordinated, so iCloud Drive and other apps see one complete change.
         NSFileCoordinator().coordinate(writingItemAt: url, options: .forReplacing, error: &error) { target in
-            written = PDFOperations.writeInPlace(document, to: target, password: password)
+            written = PDFOperations.writeInPlace(document, to: target, password: password,
+                                                 atomic: PDFOperations.isInsideFolder(url, URL.documentsDirectory))
         }
         guard written else {
             errorMessage = "This file can't be changed where it is. You can save a copy in PDFoundry instead."
@@ -485,28 +512,35 @@ final class ReaderModel {
         return true
     }
 
-    /// Puts the file back exactly as it was when it was opened, and shows it.
+    /// Puts the file back as it was when it was opened, and shows it. A password set here since then stays: the
+    /// original contents are written with it (as on Android), so Revert never quietly unprotects a file.
     @discardableResult
     func revertToOriginal() -> Bool {
-        guard let original, canRevert else { return false }
+        guard let original, canRevert, let restored = PDFDocument(data: original) else { return false }
+        let keep = restored.isEncrypted ? nil : password
         var written = false
         var error: NSError?
         NSFileCoordinator().coordinate(writingItemAt: url, options: .forReplacing, error: &error) { target in
-            // Not an atomic write: that needs a temporary file beside the target, and a file picked in Files
-            // gives access to the file alone, not its folder. The coordinator already makes it one change.
-            written = (try? original.write(to: target)) != nil
+            if let keep {
+                written = PDFOperations.writeInPlace(restored, to: target, password: keep,
+                                                     atomic: PDFOperations.isInsideFolder(url, URL.documentsDirectory))
+            } else {
+                // The original bytes exactly. Written through the same safe path as every save.
+                written = PDFOperations.writeInPlace(original, to: target,
+                                                     atomic: PDFOperations.isInsideFolder(url, URL.documentsDirectory))
+            }
         }
-        guard written, let restored = PDFDocument(data: original) else {
+        guard written else {
             errorMessage = "The original couldn't be put back."
             return false
         }
-        // The original may be encrypted (the file was protected when it was opened) or plain (it was protected
-        // here later). The reader follows the file: unlocked with the password it was opened with, or no password.
+        // The original may be encrypted (the file was protected when it was opened) or plain. The reader follows the
+        // file: unlocked with the password it was opened with, or the one kept from this session, or none.
         if restored.isEncrypted {
             if restored.isLocked, let openedPassword { _ = restored.unlock(withPassword: openedPassword) }
             setPassword(restored.permissionsStatus == .owner ? openedPassword : nil)
         } else {
-            setPassword(nil)
+            setPassword(keep)
         }
         cancelMode()
         selectedAnnotation = nil
@@ -538,11 +572,11 @@ final class ReaderModel {
         return document.write(to: copy) ? copy : nil
     }
 
-    func show(hint text: String) {
+    func show(hint text: String, for duration: Duration = .seconds(2.5)) {
         hint = text
         hintTask?.cancel()
         hintTask = Task {
-            try? await Task.sleep(for: .seconds(2.5))
+            try? await Task.sleep(for: duration)
             if !Task.isCancelled { hint = nil }
         }
     }
@@ -556,6 +590,7 @@ final class ReaderModel {
         info.jobName = title
         info.outputType = .general
         controller.printInfo = info
+        // Handed over as bytes in memory: no temporary file is left on disk.
         controller.printingItem = document?.dataRepresentation() ?? url
         controller.present(animated: true)
     }
