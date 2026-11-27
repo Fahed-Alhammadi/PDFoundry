@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
@@ -21,7 +22,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.TextAutoSize
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material.icons.filled.Abc
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.CalendarToday
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Draw
 import androidx.compose.material.icons.filled.Edit
@@ -56,6 +60,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.pdfoundry.app.data.Mark
 import io.pdfoundry.app.data.TextMark
 
 /** A highlight colour, as on iOS. */
@@ -73,7 +78,8 @@ val MarkRed: Int = android.graphics.Color.rgb(255, 59, 48)
 
 /**
  * The reader's bottom bar. Reading: Markup, Fill & Sign, Pages and Undo. In a mode: close (×), that
- * mode's tools, and Undo, always at the right end.
+ * mode's tools, and Undo, always at the right end. Fill & Sign: Signature, Initials, Text, Date, ✓, ✗;
+ * where the bar is too narrow for all of them (most phones, or large text), ✓ and ✗ share one "Mark" menu.
  */
 @Composable
 fun ModeBar(
@@ -85,9 +91,14 @@ fun ModeBar(
     onTextMark: (TextMark, Int) -> Unit,
     onText: () -> Unit,
     onDraw: () -> Unit,
-    onSignature: () -> Unit
+    onSignature: () -> Unit,
+    onInitials: () -> Unit = {},
+    onDate: () -> Unit = {},
+    onMark: (Mark) -> Unit = {}
 ) {
     Surface(tonalElevation = 3.dp) {
+      BoxWithConstraints {
+        val foldMarks = maxWidth < 480.dp || largeText()
         Row(
             Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars).heightIn(min = 72.dp).padding(horizontal = 4.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -110,12 +121,32 @@ fun ModeBar(
                 ToolMode.FillSign -> {
                     CloseButton("Close Fill & Sign") { onMode(ToolMode.None) }
                     ToolButton(SignatureIcon, "Signature", onClick = onSignature)
+                    ToolButton(Icons.Filled.Abc, "Initials", onClick = onInitials)
                     ToolButton(Icons.Filled.TextFields, "Text", onClick = onText)
-                    // Keeps Undo at the right end with the same spacing as the other bars.
-                    Spacer(Modifier.weight(1f))
+                    ToolButton(Icons.Filled.CalendarToday, "Date", onClick = onDate)
+                    if (foldMarks) {
+                        MarkButton(onMark)
+                    } else {
+                        ToolButton(Icons.Filled.Check, Mark.Check.label) { onMark(Mark.Check) }
+                        ToolButton(Icons.Filled.Close, Mark.Cross.label) { onMark(Mark.Cross) }
+                    }
                 }
             }
             ToolButton(Icons.AutoMirrored.Filled.Undo, "Undo", enabled = canUndo, iconOnlyWhenLarge = mode != ToolMode.None, onClick = onUndo)
+        }
+      }
+    }
+}
+
+/** ✓ and ✗ under one button, for a narrow bar. */
+@Composable
+private fun RowScope.MarkButton(onPick: (Mark) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box(Modifier.weight(1f)) {
+        Row { ToolButton(Icons.Filled.Check, "Mark", trailing = Icons.Filled.ArrowDropDown) { open = true } }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(text = { Text(Mark.Check.label) }, leadingIcon = { Icon(Icons.Filled.Check, null) }, onClick = { open = false; onPick(Mark.Check) })
+            DropdownMenuItem(text = { Text(Mark.Cross.label) }, leadingIcon = { Icon(Icons.Filled.Close, null) }, onClick = { open = false; onPick(Mark.Cross) })
         }
     }
 }

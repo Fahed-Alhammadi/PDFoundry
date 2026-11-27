@@ -159,7 +159,20 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
      * one-time hand-over, or one its app doesn't let others change) is copied into the library
      * instead, as [import] does. Returns where each one can be read.
      */
-    suspend fun open(uris: List<Uri>, skipped: MutableList<Skipped>? = null): List<File> {
+    suspend fun open(uris: List<Uri>, skipped: MutableList<Skipped>? = null): List<File> = open(uris, skipped, copyHandovers = true)
+
+    /**
+     * Opens one PDF where it lives for a tool that changes the real file (Password-protect). A file that
+     * can't be kept and written where it is (a one-time hand-over, or one its app doesn't let others
+     * change) is refused rather than copied: changing a copy would leave the real file as it was.
+     */
+    suspend fun openForChange(uri: Uri): File {
+        val skipped = mutableListOf<Skipped>()
+        return open(listOf(uri), skipped, copyHandovers = false).firstOrNull()
+            ?: throw PdfException(if (skipped.isEmpty()) "PDFoundry can't change this file where it is." else if (skipped.first() == Skipped.NotPdf) "That file isn't a PDF." else "That file couldn't be read.")
+    }
+
+    private suspend fun open(uris: List<Uri>, skipped: MutableList<Skipped>?, copyHandovers: Boolean): List<File> {
         val handovers = mutableListOf<Uri>()
         val opened = withContext(Dispatchers.IO) {
             gate.withLock {
@@ -191,7 +204,7 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
                 }
             }
         }
-        val copied = if (handovers.isEmpty()) emptyList() else import(handovers, skipped = skipped)
+        val copied = if (handovers.isEmpty() || !copyHandovers) emptyList() else import(handovers, skipped = skipped)
         refresh()
         return (opened + copied).distinct()
     }
@@ -392,9 +405,10 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
         return destination
     }
 
-    suspend fun extract(source: File, pages: List<Int>): File {
+    /** From the reader's page organizer. With [password] (a protected document), the new file keeps it. */
+    suspend fun extract(source: File, pages: List<Int>, password: String? = null): File {
         val destination = withContext(Dispatchers.IO) {
-            uniqueFile("${source.nameWithoutExtension} extract").also { PdfEngine.extract(source, pages, it) }
+            uniqueFile("${source.nameWithoutExtension} extract").also { PdfEngine.extract(source, pages, it, password) }
         }
         refresh()
         return destination
@@ -433,14 +447,64 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
      * Extract Pages from the Tools tab: copies the chosen pages of [source] into a new library document,
      * "<name> (pages)". [source] is the file shown in the page picker: a library document, the working
      * copy of a file opened in place (brought up to date by [syncForReading] first), or a temporary copy.
-     * It is only read.
+     * It is only read. A protected source is opened with [password] and the new document keeps it.
      */
-    suspend fun extractPages(source: File, pages: List<Int>): File {
+    suspend fun extractPages(source: File, pages: List<Int>, password: String? = null): File {
         val destination = withContext(Dispatchers.IO) {
-            uniqueFile("${source.nameWithoutExtension} (pages)").also { PdfEngine.extract(source, pages, it) }
+            uniqueFile("${source.nameWithoutExtension} (pages)").also { PdfEngine.extract(source, pages, it, password) }
         }
         refresh()
         return destination
+    }
+
+    /**
+     * Split PDF from the Tools tab: each of [parts] (0-based pages) becomes a new library document,
+     * "<name> (part 1)", "(part 2)"… [source] is read the same way as for [extractPages] and never
+     * written. A protected source is opened with [password] and every part keeps it.
+     */
+    suspend fun split(source: File, parts: List<List<Int>>, password: String?): List<File> {
+        if (parts.isEmpty()) throw PdfException("There are no pages to save.")
+        val made = withContext(Dispatchers.IO) {
+            val destinations = mutableListOf<File>()
+            try {
+                parts.indices.forEach { index ->
+                    // Reserved one by one, so two parts never get the same name.
+                    destinations += uniqueFile("${source.nameWithoutExtension} (part ${index + 1})").also { it.createNewFile() }
+                }
+                PdfEngine.split(source, parts, destinations, password)
+            } catch (e: Exception) {
+                destinations.forEach { it.delete() }
+                throw e
+            }
+            destinations.toList()
+        }
+        refresh()
+        return made
+    }
+
+    /**
+     * Password-protect from the Tools tab: replaces [file] (a library document, or the working copy of a
+     * file opened in place, whose real file is then written too) with its protected version. If saving
+     * fails, the file keeps what it had. Refuses a file that is already protected.
+     */
+    suspend fun protect(file: File, password: String) {
+        withContext(Dispatchers.IO) {
+            // A working copy that can't be brought up to date must not be written over newer content.
+            if (!syncForReading(file)) throw PdfException("This file can't be reached right now, so it can't be protected. Try again when it can be opened.")
+            if (PdfEngine.isProtected(file)) throw PdfException("This document is already protected with a password.")
+            val before = File(context.cacheDir, "protect-${System.nanoTime()}.pdf")
+            file.copyTo(before, overwrite = true)
+            try {
+                PdfEngine.protect(file, password, file)
+                push(file)
+            } catch (e: Exception) {
+                before.copyTo(file, overwrite = true)
+                throw e
+            } finally {
+                before.delete()
+            }
+        }
+        refresh()
     }
 
     /**
@@ -477,8 +541,15 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
     private val pickedDirectory get() = File(context.cacheDir, "picked")
 
     /** Temporary files a tool was using when the app was closed. */
-    private fun clearLeftovers() {
+    internal fun clearLeftovers() {
         pickedDirectory.deleteRecursively()
+        // Unlocked copies of protected files, and the reader's undo copies (plain for a protected
+        // document), left by an earlier run that ended without closing them. Anything made since this
+        // process started belongs to a document open now and is kept.
+        val started = System.currentTimeMillis() - (android.os.SystemClock.elapsedRealtime() - android.os.Process.getStartElapsedRealtime())
+        listOf(unlockedDirectory(context), File(context.cacheDir, "undo")).forEach { folder ->
+            folder.listFiles()?.filter { it.lastModified() < started }?.forEach { it.deleteRecursively() }
+        }
         // Downloads made by an earlier version's Extract Pages.
         context.cacheDir.listFiles { file -> file.name.startsWith("extract-") && file.name.endsWith(".pdf") }?.forEach { it.delete() }
     }
@@ -522,6 +593,12 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
     }.getOrNull()
 
     companion object {
+        /**
+         * Where unprotected working copies of password-protected files live while they are open: the
+         * app's private cache, never the library or the real file's location. Each is deleted on close.
+         */
+        fun unlockedDirectory(context: Context) = File(context.cacheDir, "unlocked")
+
         /** A safe file name: no path separators, no leading dots, no ".pdf" suffix. */
         fun sanitized(name: String): String {
             var clean = name.replace('/', '-').replace('\\', '-').replace(':', '-').trim()

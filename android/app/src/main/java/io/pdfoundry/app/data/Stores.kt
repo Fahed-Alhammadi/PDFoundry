@@ -10,9 +10,12 @@ import java.io.File
 
 class SavedSignature(val file: File, val image: Bitmap)
 
-/** Signatures the user has drawn, kept as transparent PNGs in the app's private storage. */
-class SignatureStore(context: Context) {
-    private val directory = File(context.filesDir, "signatures").apply { mkdirs() }
+/**
+ * Signatures the user has drawn, kept as transparent PNGs in the app's private storage. Initials are a
+ * second store of the same kind in their own folder ("initials"), so the two lists never mix.
+ */
+class SignatureStore(context: Context, folder: String = "signatures", root: File = context.filesDir) {
+    private val directory = File(root, folder).apply { mkdirs() }
 
     var signatures by mutableStateOf<List<SavedSignature>>(emptyList())
         private set

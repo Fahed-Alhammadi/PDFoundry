@@ -46,6 +46,8 @@ class PdfApp : Application() {
         private set
     lateinit var signatures: SignatureStore
         private set
+    lateinit var initials: SignatureStore
+        private set
     lateinit var settings: Settings
         private set
     /** For work that must finish even if the screen that started it goes away (a merge or an extraction). */
@@ -56,6 +58,7 @@ class PdfApp : Application() {
         PdfEngine.init(this)
         store = DocumentStore(this)
         signatures = SignatureStore(this)
+        initials = SignatureStore(this, "initials")
         settings = Settings(this)
     }
 }

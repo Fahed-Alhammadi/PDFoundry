@@ -122,7 +122,7 @@ fun PagesScreen(state: ReaderState, onDone: () -> Unit) {
                         withSelection {
                             scope.launch {
                                 notice = try {
-                                    val file = store.extract(state.file, chosen)
+                                    val file = state.extract(chosen.toList())
                                     "Saved ${if (chosen.size == 1) "1 page" else "${chosen.size} pages"} as “${file.nameWithoutExtension}”."
                                 } catch (e: Exception) {
                                     e.message

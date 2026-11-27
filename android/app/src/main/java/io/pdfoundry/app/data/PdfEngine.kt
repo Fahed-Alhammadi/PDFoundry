@@ -15,7 +15,9 @@ import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.pdmodel.PDPage
 import com.tom_roush.pdfbox.pdmodel.PDPageContentStream
 import com.tom_roush.pdfbox.pdmodel.common.PDRectangle
+import com.tom_roush.pdfbox.pdmodel.encryption.AccessPermission
 import com.tom_roush.pdfbox.pdmodel.encryption.InvalidPasswordException
+import com.tom_roush.pdfbox.pdmodel.encryption.StandardProtectionPolicy
 import com.tom_roush.pdfbox.pdmodel.graphics.blend.BlendMode
 import com.tom_roush.pdfbox.pdmodel.graphics.image.JPEGFactory
 import com.tom_roush.pdfbox.pdmodel.graphics.image.LosslessFactory
@@ -48,6 +50,9 @@ data class TextWord(val text: String, val rect: RectF, val lower: Edge = Edge.Bo
 enum class TextMark { Highlight, Underline, Strikethrough }
 
 class PdfException(message: String) : IOException(message)
+
+/** What a password opens. [Full]: it is the owner password (or user and owner are the same), so the file can be changed. */
+enum class UnlockResult { Full, Limited, Wrong }
 
 /**
  * Every change to a PDF goes through here. Positions are given the way the user sees the page
@@ -88,25 +93,60 @@ object PdfEngine {
             }
         } catch (e: InvalidPasswordException) {
             destination.delete()
-            throw PdfException("One of the documents is password protected. Remove it from the merge.")
+            throw PdfException("One of the documents is password protected. Use More › Remove Password first.")
         } catch (e: IOException) {
             destination.delete()
             throw PdfException("One of the documents could not be read. It may be damaged.")
         }
     }
 
-    fun extract(source: File, pages: List<Int>, destination: File) {
-        PDDocument.load(source, memory()).use { document ->
-            PDDocument().use { result ->
-                pages.sorted().filter { it in 0 until document.numberOfPages }.forEach { result.importPage(document.getPage(it)) }
-                if (result.numberOfPages == 0) throw PdfException("There are no pages to save.")
-                // Saved while the source is still open: imported pages read their content from it.
+    /** Copies [pages] of [source] into a new file. With [password], the source is opened with it and the new file keeps it. */
+    fun extract(source: File, pages: List<Int>, destination: File, password: String? = null) {
+        load(source, password).use { document ->
+            requireFullAccess(document)
+            writePart(document, pages.sorted(), destination, password)
+        }
+    }
+
+    /**
+     * Writes each list of [parts] (0-based pages, in order) to the matching file in [destinations]. The
+     * source is only read. With [password], the source is opened with it and every part keeps it.
+     */
+    fun split(source: File, parts: List<List<Int>>, destinations: List<File>, password: String? = null) {
+        require(parts.size == destinations.size)
+        load(source, password).use { document ->
+            requireFullAccess(document)
+            parts.zip(destinations).forEach { (pages, destination) -> writePart(document, pages, destination, password) }
+        }
+    }
+
+    private fun writePart(document: PDDocument, pages: List<Int>, destination: File, password: String?) {
+        PDDocument().use { result ->
+            pages.filter { it in 0 until document.numberOfPages }.forEach { result.importPage(document.getPage(it)) }
+            if (result.numberOfPages == 0) throw PdfException("There are no pages to save.")
+            if (password != null) result.protect(policy(password))
+            // Saved while the source is still open: imported pages read their content from it.
+            try {
                 result.save(destination)
+            } catch (e: Exception) {
+                destination.delete()
+                throw e
             }
         }
     }
 
-    /** One page per image, sized to the image with A4 width. */
+    /**
+     * Copying pages out of a file whose protection can't be carried over (restrictions set by its author,
+     * or a password that only opens it) would drop that protection: refused, as editing it is.
+     */
+    private fun requireFullAccess(document: PDDocument) {
+        if (document.isEncrypted && !document.currentAccessPermission.isOwnerPermission) throw PdfException("Password-protected documents are read-only.")
+    }
+
+    private fun load(file: File, password: String?): PDDocument =
+        if (password == null) PDDocument.load(file, memory()) else PDDocument.load(file, password, memory())
+
+        /** One page per image, sized to the image with A4 width. */
     fun imagesToPdf(images: List<Bitmap>, destination: File) {
         if (images.isEmpty()) throw PdfException("There are no pages to save.")
         PDDocument().use { document ->
@@ -123,15 +163,88 @@ object PdfEngine {
         }
     }
 
-    /** Writes an unprotected copy of a password-protected file, for viewing. Returns false if the password is wrong. */
-    fun unlock(source: File, password: String, destination: File): Boolean = try {
+    /**
+     * Writes an unprotected copy of a password-protected file. [UnlockResult.Full] when the password may
+     * change the file, [UnlockResult.Limited] when it only opens it (nothing is written then unless
+     * [evenIfLimited]), [UnlockResult.Wrong] when it opens nothing.
+     */
+    fun unlock(source: File, password: String, destination: File, evenIfLimited: Boolean = true): UnlockResult = try {
         PDDocument.load(source, password, memory()).use { document ->
-            document.isAllSecurityToBeRemoved = true
-            document.save(destination)
+            val result = if (document.currentAccessPermission.isOwnerPermission) UnlockResult.Full else UnlockResult.Limited
+            if (result == UnlockResult.Full || evenIfLimited) {
+                document.isAllSecurityToBeRemoved = true
+                saveReplacing(document, destination)
+            }
+            result
         }
-        true
     } catch (e: InvalidPasswordException) {
-        false
+        UnlockResult.Wrong
+    }
+
+    /** What [password] opens in [file], without writing anything. An unprotected file is [UnlockResult.Full]. */
+    fun access(file: File, password: String): UnlockResult = try {
+        PDDocument.load(file, password, memory()).use { document ->
+            if (!document.isEncrypted || document.currentAccessPermission.isOwnerPermission) UnlockResult.Full else UnlockResult.Limited
+        }
+    } catch (e: InvalidPasswordException) {
+        UnlockResult.Wrong
+    }
+
+    /**
+     * True when [password] is also the password that opens [file] (its user password). False when it
+     * is only the owner password: saving with it as both then changes the password that opens the file.
+     */
+    fun opensWith(file: File, password: String): Boolean = try {
+        PDDocument.load(file, password, memory()).use { document ->
+            val encryption = document.encryption ?: return@use true
+            val id = (document.document.documentID?.get(0) as? com.tom_roush.pdfbox.cos.COSString)?.bytes ?: ByteArray(0)
+            com.tom_roush.pdfbox.pdmodel.encryption.StandardSecurityHandler().isUserPassword(
+                password, encryption.userKey, encryption.ownerKey, encryption.permissions, id,
+                encryption.revision, encryption.length / 8, encryption.isEncryptMetaData
+            )
+        }
+    } catch (e: Exception) {
+        true
+    }
+
+    /** True when the file is encrypted: it needs a password to open, or carries restrictions. */
+    fun isProtected(file: File): Boolean = try {
+        PDDocument.load(file, memory()).use { it.isEncrypted }
+    } catch (e: InvalidPasswordException) {
+        true
+    }
+
+    fun pageCount(file: File, password: String? = null): Int = load(file, password).use { it.numberOfPages }
+
+    /**
+     * Writes [source] (an unprotected PDF) to [destination] protected with [password]: AES-256, the same
+     * password to open it and to change it, nothing restricted. [destination] is replaced only once the
+     * protected copy is complete; it may be [source] itself.
+     */
+    fun protect(source: File, password: String, destination: File) {
+        if (password.isEmpty()) throw PdfException("Enter a password.")
+        PDDocument.load(source, memory()).use { document ->
+            if (document.isEncrypted) throw PdfException("This document is already protected with a password.")
+            document.protect(policy(password))
+            saveReplacing(document, destination)
+        }
+    }
+
+    private fun policy(password: String) = StandardProtectionPolicy(password, password, AccessPermission()).apply {
+        encryptionKeyLength = 256
+    }
+
+    /** Saves to a temporary file next to [destination], then puts it in place: [destination] is never half-written. */
+    private fun saveReplacing(document: PDDocument, destination: File) {
+        val temp = File(destination.parentFile, "${destination.name}.${System.nanoTime()}.tmp")
+        try {
+            document.save(temp)
+            if (!temp.renameTo(destination)) {
+                temp.copyTo(destination, overwrite = true)
+            }
+        } finally {
+            temp.delete()
+        }
     }
 
     fun search(file: File, query: String): List<SearchHit> {
@@ -465,7 +578,116 @@ object PdfEngine {
     }
 
     // endregion
+    // region Form fields
+
+    /**
+     * The form fields on every page, one entry per widget, with where each is on the displayed page.
+     * A document without a form, or with an XFA-only (dynamic) form, has none.
+     */
+    fun fields(file: File): List<FormField> = PDDocument.load(file, memory()).use { document ->
+        val form = document.documentCatalog.acroForm ?: return@use emptyList()
+        if (form.xfaIsDynamic()) return@use emptyList()
+        // Which page each widget is on: a widget's own /P entry is optional, so look at every page.
+        val pageOf = HashMap<Any, Int>()
+        document.pages.forEachIndexed { index, page ->
+            runCatching { page.annotations }.getOrDefault(emptyList()).forEach { pageOf[it.cosObject] = index }
+        }
+        val found = mutableListOf<FormField>()
+        for (field in form.fieldTree) {
+            val kind = kindOf(field) ?: continue
+            val terminal = field as? com.tom_roush.pdfbox.pdmodel.interactive.form.PDTerminalField ?: continue
+            val value = runCatching { valueOf(field) }.getOrDefault("")
+            val choice = field as? com.tom_roush.pdfbox.pdmodel.interactive.form.PDChoice
+            val options = choice?.let { runCatching { it.optionsExportValues }.getOrNull() }.orEmpty()
+            val labels = choice?.let { runCatching { it.optionsDisplayValues }.getOrNull() }?.takeIf { it.size == options.size } ?: options
+            terminal.widgets.forEachIndexed { index, widget ->
+                val pageIndex = pageOf[widget.cosObject] ?: widget.page?.let { document.pages.indexOf(it) }?.takeIf { it >= 0 } ?: return@forEachIndexed
+                if (widget.isHidden || widget.isNoView) return@forEachIndexed
+                val r = widget.rectangle ?: return@forEachIndexed
+                if (r.width <= 0f || r.height <= 0f) return@forEachIndexed
+                val page = document.getPage(pageIndex)
+                val box = page.cropBox
+                val rotation = ((page.rotation % 360) + 360) % 360
+                // To the unrotated crop box measured from its top-left, then to the page as displayed.
+                val unrotated = RectF(r.lowerLeftX - box.lowerLeftX, box.upperRightY - r.upperRightY, r.upperRightX - box.lowerLeftX, box.upperRightY - r.lowerLeftY)
+                found += FormField(
+                    name = field.fullyQualifiedName,
+                    kind = kind,
+                    page = pageIndex,
+                    rect = displayed(unrotated, box.width, box.height, rotation),
+                    value = value,
+                    options = options,
+                    onValue = (field as? com.tom_roush.pdfbox.pdmodel.interactive.form.PDButton)?.let { onValueOf(it, index) },
+                    readOnly = field.isReadOnly,
+                    widget = index,
+                    labels = labels,
+                    checked = (kind == FieldKind.Checkbox || kind == FieldKind.Radio) && checkedOf(widget)
+                )
+            }
+        }
+        found
+    }
+
+    /**
+     * Sets a form field's value and saves it as a field value (nothing is flattened), with appearances
+     * so viewers that don't draw their own show it. Text: the new text. Checkbox: its on name to tick
+     * it, "Off" (or empty) to clear it. Radio: the on name of the button chosen. Choice: an option.
+     * A text value the field's font can't show (Arabic in Helvetica) gets an appearance drawn by Android.
+     */
+    fun setField(file: File, name: String, value: String, widgetIndex: Int = 0) = edit(file) { document ->
+        val form = document.documentCatalog.acroForm ?: throw PdfException("This document has no form.")
+        val field = form.getField(name) ?: throw PdfException("This field is no longer in the document.")
+        if (field.isReadOnly) throw PdfException("This field can't be changed.")
+        when (field) {
+            is com.tom_roush.pdfbox.pdmodel.interactive.form.PDTextField -> {
+                try {
+                    field.setValue(value)
+                } catch (e: Exception) {
+                    // The field's font can't encode the text: keep it as the field's value, and draw it ourselves.
+                    field.cosObject.setString(com.tom_roush.pdfbox.cos.COSName.V, value)
+                    field.widgets.forEach { imageAppearance(document, it, value, field.isMultiline) }
+                }
+            }
+            is com.tom_roush.pdfbox.pdmodel.interactive.form.PDCheckBox, is com.tom_roush.pdfbox.pdmodel.interactive.form.PDRadioButton -> {
+                // Set directly, by widget: PdfBox's own setValue expects /Opt export values and appearance
+                // names to line up in ways real forms often don't.
+                val button = field as com.tom_roush.pdfbox.pdmodel.interactive.form.PDButton
+                setButton(button, widgetIndex, on = value.isNotEmpty() && value != "Off")
+            }
+            is com.tom_roush.pdfbox.pdmodel.interactive.form.PDChoice -> {
+                // /V is always the option's export value; the box shows its label.
+                val exports = runCatching { field.optionsExportValues }.getOrDefault(emptyList())
+                val labels = runCatching { field.optionsDisplayValues }.getOrDefault(emptyList())
+                val label = labels.getOrNull(exports.indexOf(value)) ?: value
+                val editable = field is com.tom_roush.pdfbox.pdmodel.interactive.form.PDComboBox && field.isEdit
+                if (exports.isNotEmpty() && value !in exports && !editable) throw PdfException("That isn't one of this list's options.")
+                val drawn = try {
+                    field.setValue(value)
+                    label == value
+                } catch (e: Exception) {
+                    // The field's font can't show it (a non-Latin option): keep the value, draw it ourselves.
+                    field.cosObject.setString(com.tom_roush.pdfbox.cos.COSName.V, value)
+                    false
+                }
+                if (!drawn) field.widgets.forEach { imageAppearance(document, it, label, multiline = false) }
+            }
+            else -> throw PdfException("This field can't be filled in here.")
+        }
+    }
+
+    // endregion
     // region Bitmaps
+
+    /** Text wrapped to [widthPx] on as many lines as it needs, at [textBitmap]'s size; right-to-left text flows from the right. */
+    fun textBlockBitmap(text: String, widthPx: Int, argb: Int = Color.BLACK): Bitmap {
+        val paint = android.text.TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = argb
+            textSize = 96f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+        }
+        val layout = android.text.StaticLayout.Builder.obtain(text, 0, text.length, paint, widthPx).build()
+        return Bitmap.createBitmap(widthPx, layout.height.coerceAtLeast(1), Bitmap.Config.ARGB_8888).also { layout.draw(Canvas(it)) }
+    }
 
     /** Typed text as a transparent bitmap. Drawn by Android, so any script (Arabic included) is shaped correctly. */
     fun textBitmap(text: String, argb: Int = Color.BLACK): Bitmap {
