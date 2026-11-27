@@ -1,8 +1,9 @@
-New in this build: a new Tools tab and a clearer reader.
+New in this build: fill in forms, split PDFs and password protection.
 
-• Tools tab: Scan Document, Create from Photos, Merge PDFs and Extract Pages in one place.
-• Extract Pages saves the pages you choose as a new PDF and never changes the original.
-• The reader's bar now has labelled groups: Markup (highlight, underline, strikethrough, text, draw), Fill & Sign (signature, text) and Pages.
-• After you place a signature the bar stays in Fill & Sign, so signing a second spot takes one tap.
+• Fill & Sign now has Signature, Initials, Text, Date, Check and Cross.
+• Fill in a PDF's own form fields: type in text fields, tick boxes, pick options, and tap a signature field to sign it. The values stay real form fields that other apps can change.
+• Tools > Split PDF makes several PDFs from one: every page, every few pages, or ranges you type. The original is not changed.
+• Tools > Password-protect locks a PDF with a password. In the reader, More > Protect with Password or Remove Password.
+• A protected PDF can be edited after you enter its password, and keeps the password every time it is saved.
 
-Please try: Tools > Extract Pages on a file opened from Files, then check the original is unchanged. Sign a document in two places. Highlight, underline and strike through some text.
+Please try: fill in and sign a PDF form, then open it in another app to check the fields. Split a document. Protect a file, close it, open it again with the password and edit it.

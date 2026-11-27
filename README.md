@@ -4,7 +4,7 @@
 
 # PDFoundry
 
-**Read, merge, edit and sign PDFs. Private, on your device, with no account.**
+**Read, merge, edit, fill in and sign PDFs. Private, on your device, with no account.**
 
 Apps for iPhone, iPad, Android, macOS, Windows and Linux.
 
@@ -19,7 +19,7 @@ Apps for iPhone, iPad, Android, macOS, Windows and Linux.
 <br>
 
 <img src="screenshots/ios/iphone-6.9/01-library.png" width="23%" alt="Document library on iPhone">
-<img src="screenshots/ios/iphone-6.9/08-signed.png" width="23%" alt="A signed and highlighted document on iPhone">
+<img src="screenshots/ios/iphone-6.9/08-fill-sign.png" width="23%" alt="A form filled in and signed on iPhone">
 <img src="screenshots/ios/iphone-6.9/05-pages.png" width="23%" alt="Page organizer on iPhone">
 <img src="screenshots/ios/iphone-6.9/09-tools.png" width="23%" alt="The Tools tab on iPhone">
 
@@ -45,7 +45,7 @@ Apps for iPhone, iPad, Android, macOS, Windows and Linux.
 
 ## Overview
 
-PDFoundry is a small PDF app that does four jobs well: reading, merging, editing and signing. It works entirely on the device. There is no account, no server, no advertising and no analytics. The phone apps make no network requests; the desktop app goes online only to check for its own updates.
+PDFoundry is a small PDF app that does a few jobs well: reading, merging and splitting, editing, filling in forms, signing and password protection. It works entirely on the device. There is no account, no server, no advertising and no analytics. The phone apps make no network requests; the desktop app goes online only to check for its own updates.
 
 The phone apps are native: Swift and SwiftUI on iPhone and iPad, Kotlin and Jetpack Compose on Android. The desktop app is built with Electron and runs on macOS, Windows and Linux. On every platform a PDF opens where you keep it, with no copy made. The desktop app works the way desktop PDF programs do and changes the file only when you choose Save. The phone apps save each change to the same file as you make it, and can put the file back as it was when you opened it.
 
@@ -54,8 +54,8 @@ The phone apps are native: Swift and SwiftUI on iPhone and iPad, Kotlin and Jetp
 | Platform | Version | Status |
 |---|---|---|
 | iPhone and iPad | 1.0.0 | Submitted to the App Store, waiting for review. Available to testers on TestFlight |
-| Android | 1.0.4 | In closed testing on Google Play |
-| macOS, Windows and Linux | 1.2.0 | Released. [Download](https://github.com/Fahed-Alhammadi/PDFoundry/releases/latest). The Mac app is signed and notarized |
+| Android | 1.0.5 | In closed testing on Google Play |
+| macOS, Windows and Linux | 1.3.0 | Released. [Download](https://github.com/Fahed-Alhammadi/PDFoundry/releases/latest). The Mac app is signed and notarized |
 
 Store links for the phone apps will be added here and on the [website](https://fahed-alhammadi.github.io/PDFoundry/) when the apps are public.
 
@@ -66,19 +66,21 @@ Store links for the phone apps will be added here and on the [website](https://f
 | **Read** | Open a PDF where it is in Files, or receive one from Mail, Safari or the share sheet. Search the text. Scroll vertically or sideways | Open a PDF where it is with the file picker, or receive one from any app's share menu. Search the text. Pinch to zoom | Open a PDF where it is, or drop it onto the window. Search the text. Zoom |
 | **Scan and create** | Scan paper with the camera. Build a PDF from photos | Scan paper with Google's document scanner. Build a PDF from photos | Build a PDF from images. No scanning |
 | **Merge** | Select documents, drag them into order, merge | Select documents, order them with arrows, merge | Select documents, order them with arrows, merge |
-| **Tools** | A Tools tab: Scan Document, Create from Photos, Merge PDFs, Extract Pages | Same | A Tools page in the sidebar: Create from Images, Merge PDFs, Extract Pages |
+| **Split** | Split a PDF into every page, every few pages, or the page ranges you type. The original is not changed | Same | Same, into a folder you choose |
+| **Tools** | A Tools tab: Scan Document, Create from Photos, Merge PDFs, Extract Pages, Split PDF, Password-protect | Same | A Tools page in the sidebar: Create from Images, Merge PDFs, Extract Pages, Split PDF, Password-protect |
 | **Reader** | A bar with three labelled groups: Markup, Fill & Sign and Pages, plus Undo | Same | Same |
 | **Markup** | Select text, then highlight (four colours), underline or strike through | Same | Same |
 | **Text and drawing** | Type anywhere. Draw with a finger or Apple Pencil | Type anywhere (Arabic shapes correctly). Draw with a finger or stylus, or with a highlighter pen | Type anywhere (Arabic shapes correctly). Draw with the mouse or a pen, or with a highlighter pen |
-| **Sign** | Draw once in black or blue ink, reuse, drag and resize before placing | Same | Same |
+| **Fill & Sign** | Signature, Initials, Text, Date, ✓ and ✗. Draw a signature or initials once, reuse them, drag and resize before placing | Same (✓ and ✗ share one Mark button on narrow phones) | Same |
+| **Forms** | Fill in a PDF's own form fields: text, check boxes, radio buttons, lists, and signature fields. Values stay real form fields, so other apps can still read and change them | Same | Same |
 | **Pages** | Reorder by dragging. Rotate, duplicate, extract, delete, add blank pages | Reorder with arrows. Rotate, duplicate, extract, delete, add blank pages | Reorder by dragging or with arrows. Rotate, duplicate, extract, delete, add blank pages |
 | **Undo** | Tap any mark to remove it, or undo recent edits. Revert to Original puts the file back as it was when you opened it | Undo the last ten changes while the document is open. Revert to original puts the file back as it was when you opened it | Undo the last ten changes; nothing is written until you save |
 | **Manage** | Rename, duplicate, share, print, delete. A file opened where it is can be removed from the list or copied into the app; the file itself is not touched. A file opened twice is listed once | Same | Save, Save As, print. A list of recent files |
 | **Storage** | Files you open stay where you keep them, and changes are saved to the same file. Scans, new PDFs and received files go in the app's folder in Files | Files you open stay where you keep them, and changes are saved to the same file. Scans, new PDFs and received files are kept inside the app | Files stay where you keep them. Changes are written when you choose Save |
-| **Protected PDFs** | Open with the password, read-only | Open with the password, read-only | Open with the password, read-only |
+| **Passwords** | Protect a PDF with a password (Tools or the reader's More menu), or remove it. A protected PDF can be edited once you enter its password, and every save keeps it | Same | Same |
 | **Permissions** | Camera, asked only when you tap Scan Document | None | None. Goes online only to check for its own updates |
 
-On every platform, signatures and edits are written into the PDF itself, so they look the same in every other PDF reader. Password-protected documents open read-only so their protection is never removed.
+On every platform, signatures and edits are written into the PDF itself, so they look the same in every other PDF reader. Passwords are used only while a document is open: they are never stored, and a protected file keeps its password after every edit. A file whose owner restricts changes, with a separate owner password you don't have, opens read-only.
 
 ## Screenshots
 
@@ -87,7 +89,7 @@ On every platform, signatures and edits are written into the PDF itself, so they
 <p>
   <img src="screenshots/ios/ipad-13/01-library.png" width="32%" alt="Document library on iPad">
   <img src="screenshots/ios/ipad-13/07-tools.png" width="32%" alt="The Tools tab on iPad">
-  <img src="screenshots/ios/ipad-13/05-pages.png" width="32%" alt="Page organizer on iPad">
+  <img src="screenshots/ios/ipad-13/02-fill-sign.png" width="32%" alt="A form filled in and signed on iPad">
 </p>
 
 **macOS, Windows and Linux**
@@ -95,17 +97,19 @@ On every platform, signatures and edits are written into the PDF itself, so they
 <p>
   <img src="screenshots/desktop/01-library.png" width="49%" alt="Recent files on the desktop">
   <img src="screenshots/desktop/02-signed.png" width="49%" alt="A signed and highlighted document on the desktop">
-  <img src="screenshots/desktop/09-markup.png" width="49%" alt="Markup tools and a text highlight on the desktop">
+  <img src="screenshots/desktop/15-form.png" width="49%" alt="A form being filled in on the desktop">
   <img src="screenshots/desktop/11-tools.png" width="49%" alt="The Tools page on the desktop">
+  <img src="screenshots/desktop/13-split.png" width="49%" alt="Split PDF on the desktop">
+  <img src="screenshots/desktop/14-protect.png" width="49%" alt="Password-protect on the desktop">
 </p>
 
 **Android**
 
 <p>
   <img src="screenshots/android/phone/01-library.png" width="23%" alt="Document library on Android">
-  <img src="screenshots/android/phone/02-signed.png" width="23%" alt="A signed and highlighted document on Android">
-  <img src="screenshots/android/phone/04-pages.png" width="23%" alt="Page organizer on Android">
+  <img src="screenshots/android/phone/02-fill-sign.png" width="23%" alt="A form filled in and signed on Android">
   <img src="screenshots/android/phone/07-tools.png" width="23%" alt="The Tools tab on Android">
+  <img src="screenshots/android/phone/09-split.png" width="23%" alt="Split PDF on Android">
 </p>
 
 ## Tech stack
@@ -171,10 +175,15 @@ npm start
 | Add a document | **+** in the library: Open from Files, Scan Document, or Create from Photos | **+** in the library: Open PDF, Scan document, or Create from photos | **Open**, or drop a PDF on the window. Create from images is in the **…** menu |
 | Merge | **Tools > Merge PDFs**, or **Select** in the library, choose documents, tap the merge button | **Tools > Merge PDFs**, or press and hold to select, choose documents, tap the merge button | **Tools > Merge PDFs**, or **Select**, choose files, **Merge**, then say where to save |
 | Extract pages | **Tools > Extract Pages**, pick a document, tick pages, **Extract**. The original is not changed | Same | Same, then say where to save |
+| Split | **Tools > Split PDF**, pick a document, choose every page, every N pages or custom ranges, **Split**. The parts are named "(part 1)", "(part 2)" and so on | Same | Same, then choose a folder |
+| Protect with a password | **Tools > Password-protect**, or **…** then **Protect with Password** in the reader. Type the password twice. It can't be recovered if you forget it | **Tools > Password-protect**, or **⋮** then **Protect with Password** | **Tools > Password-protect**, or **…** then **Protect with Password** |
+| Remove a password | Open the document with its password, then **…** then **Remove Password** | **⋮** then **Remove Password** | **…** then **Remove Password** |
 | Highlight, underline, strike through | **Markup**, then the tool, then select the words | **Markup**, then the tool, then drag across the words | **Markup**, then the tool, then select the words |
 | Add text | **Markup** or **Fill & Sign**, then **Text**, type, drag the text into place, tap **Place** | Same | Same |
 | Draw | **Markup**, then **Draw**, draw, tap **Done** | Same | Same |
-| Sign | **Fill & Sign**, then **Signature**, draw or pick a signature, position it, tap **Place**. The bar stays in Fill & Sign for the next one | Same | Same |
+| Fill in a form | Tap a field and type, or tap a box to tick it | Same | Click a field and type, then **Save** |
+| Sign | **Fill & Sign**, then **Signature** (or **Initials**), draw or pick one, position it, tap **Place**. Tapping a signature field signs it directly. The bar stays in Fill & Sign for the next one | Same | Same |
+| Date, tick or cross | **Fill & Sign**, then **Date**, **✓** or **✗**, position it, tap **Place** | Same | Same |
 | Edit pages | **Pages** in the reader's bar | **Pages** in the reader's bar | **Pages** in the bar, the grid button in the toolbar, or **View > Organize Pages** |
 | Remove an edit | Tap it, then **Delete** | Tap **Undo** | **Undo** |
 | Undo everything since opening | **…** then **Revert to Original** | **⋮** then **Revert to original** | Close without saving |
