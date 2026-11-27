@@ -705,7 +705,9 @@ async function fillSignTest(check: Check, app: App): Promise<void> {
   await until(() => !reader.classList.contains('busy'), 'the undo');
   await wait(300);
   const undone = (await pdf.fields(app.reader.data)).find((f) => f.name === 'arabic')?.value;
-  await until(() => !!input('arabic'), 'the fields again');
+  // The page's fields are redrawn after Undo; on a slow machine the old inputs are still there for a moment, so wait
+  // for the redrawn (emptied) field. If it never empties, the check below fails with the details.
+  await until(() => input('arabic')?.value === '', 'the redrawn fields').catch(() => undefined);
   check('Undo takes back a field change', undone === '' && input('arabic').value === '' && !app.reader.dirty, JSON.stringify({ undone, dirty: app.reader.dirty }));
 
   // Save (Ctrl+S) while still typing in a field: the field is written first.
