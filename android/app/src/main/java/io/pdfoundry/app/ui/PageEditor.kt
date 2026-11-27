@@ -85,6 +85,9 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import io.pdfoundry.app.data.ShapeKind
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import io.pdfoundry.app.data.PagePoint
 import io.pdfoundry.app.data.TextMark
@@ -140,6 +143,8 @@ fun PageEditor(
     var shapeStart by remember { mutableStateOf<Offset?>(null) }
     var shapeEnd by remember { mutableStateOf<Offset?>(null) }
     var commentAt by remember { mutableStateOf<Offset?>(null) }
+    // Where the finger went down: drag gestures report their start only after the touch slop.
+    var downAt by remember { mutableStateOf<Offset?>(null) }
 
     val title = when (mode) {
         is EditMode.Ink -> "Draw"
@@ -292,9 +297,9 @@ fun PageEditor(
                         val color = Color(mode.argb).copy(alpha = 1f)
                         val strokePx = PdfEngine.SHAPE_WIDTH * widthPx / pageSize.width
                         Canvas(
-                            Modifier.fillMaxSize().pointerInput(mode) {
+                            Modifier.fillMaxSize().pointerInput(mode) { awaitEachGesture { downAt = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial).position } }.pointerInput(mode) {
                                 detectDragGestures(
-                                    onDragStart = { shapeStart = it; shapeEnd = it },
+                                    onDragStart = { shapeStart = downAt ?: it; shapeEnd = it },
                                     onDragEnd = {
                                         val start = shapeStart
                                         val end = shapeEnd
@@ -358,9 +363,10 @@ fun PageEditor(
                                             if (hit >= 0) state.removeRedaction(pageIndex, hit)
                                         }
                                     }
+                                    .pointerInput(pageIndex) { awaitEachGesture { downAt = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial).position } }
                                     .pointerInput(pageIndex) {
                                         detectDragGestures(
-                                            onDragStart = { redactStart = it; redactEnd = it },
+                                            onDragStart = { redactStart = downAt ?: it; redactEnd = it },
                                             onDragEnd = {
                                                 val a = redactStart
                                                 val b = redactEnd
@@ -392,30 +398,7 @@ fun PageEditor(
                             .pointerInput(Unit) { detectTapGestures { commentAt = it } }
                             .semantics { contentDescription = "Page. Tap where the comment goes." }
                     ) {
-                        if (confirmApply) {
-        androidx.compose.material3.AlertDialog(
-            onDismissRequest = { confirmApply = false },
-            title = { Text(RedactApplyTitle) },
-            text = { Text(RedactApplyMessage) },
-            confirmButton = { TextButton(onClick = { confirmApply = false; state.applyRedactions() }) { Text("Apply", color = MaterialTheme.colorScheme.error) } },
-            dismissButton = { TextButton(onClick = { confirmApply = false }) { Text("Cancel") } }
-        )
-    }
-    if (askLeave) {
-        androidx.compose.material3.AlertDialog(
-            onDismissRequest = { askLeave = false },
-            title = { Text(RedactLeaveTitle) },
-            confirmButton = { TextButton(onClick = { askLeave = false; state.applyRedactions() }) { Text("Apply", color = MaterialTheme.colorScheme.error) } },
-            dismissButton = {
-                Row {
-                    TextButton(onClick = { askLeave = false; state.discardRedactions() }) { Text("Discard") }
-                    TextButton(onClick = { askLeave = false }) { Text("Cancel") }
-                }
-            }
-        )
-    }
-
-    commentAt?.let { at ->
+                        commentAt?.let { at ->
                             val density = LocalDensity.current
                             Icon(Icons.Outlined.ChatBubbleOutline, null, tint = Color(0xFF8A6A00), modifier = Modifier.offset { IntOffset((at.x - 12 * density.density).roundToInt(), (at.y - 12 * density.density).roundToInt()) }.size(24.dp))
                         }
@@ -460,6 +443,29 @@ fun PageEditor(
                 }
             }
         }
+    }
+
+    if (confirmApply) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { confirmApply = false },
+            title = { Text(RedactApplyTitle) },
+            text = { Text(RedactApplyMessage) },
+            confirmButton = { TextButton(onClick = { confirmApply = false; state.applyRedactions() }) { Text("Apply", color = MaterialTheme.colorScheme.error) } },
+            dismissButton = { TextButton(onClick = { confirmApply = false }) { Text("Cancel") } }
+        )
+    }
+    if (askLeave) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { askLeave = false },
+            title = { Text(RedactLeaveTitle) },
+            confirmButton = { TextButton(onClick = { askLeave = false; state.applyRedactions() }) { Text("Apply", color = MaterialTheme.colorScheme.error) } },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = { askLeave = false; state.discardRedactions() }) { Text("Discard") }
+                    TextButton(onClick = { askLeave = false }) { Text("Cancel") }
+                }
+            }
+        )
     }
 
     commentAt?.let { at ->

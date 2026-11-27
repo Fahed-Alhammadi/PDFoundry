@@ -35,6 +35,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Draw
+import androidx.compose.material.icons.filled.BrandingWatermark
+import androidx.compose.material.icons.filled.FormatListNumbered
+import androidx.compose.material.icons.automirrored.filled.ManageSearch
 import androidx.compose.material.icons.filled.FileCopy
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Lock
@@ -104,6 +107,8 @@ import io.pdfoundry.app.data.MarkInfo
 import io.pdfoundry.app.data.MarkKind
 import io.pdfoundry.app.data.PagePoint
 import io.pdfoundry.app.data.Redaction
+import io.pdfoundry.app.data.PageNumberStyle
+import io.pdfoundry.app.data.WatermarkStyle
 import io.pdfoundry.app.data.ShapeKind
 import io.pdfoundry.app.data.bitmap
 import io.pdfoundry.app.data.todayText
@@ -140,6 +145,12 @@ sealed interface EditMode {
     /** Boxes are marked for redaction, on any page, until they are applied or discarded. */
     data object Redact : EditMode
 }
+
+/** "No text was found on these pages." */
+const val OcrNothingFound = "No text was found on these pages."
+
+/** A tool a document is opened with from the Tools tab: its sheet (or Redact) comes up on top. */
+enum class ReaderStart { None, PageNumbers, Watermark, MakeSearchable, Redact }
 
 /** A selected mark and the page it is on. */
 data class Selection(val page: Int, val mark: MarkInfo)
@@ -544,6 +555,67 @@ class ReaderState(
         edit { PdfEngine.deleteMark(it, current.page, current.mark.id) }
     }
 
+    // Page tools ---------------------------------------------------------------------------------
+
+    /** Page numbers on every page: one change, one Undo step. */
+    fun addPageNumbers(style: PageNumberStyle) = edit { PdfEngine.addPageNumbers(it, style) }
+
+    /** A watermark on every page: one change, one Undo step. */
+    fun addWatermark(style: WatermarkStyle) = edit { PdfEngine.addWatermark(it, style) }
+
+    /** Make Searchable's progress: pages done and to do, while it runs. */
+    var ocrProgress by mutableStateOf<Pair<Int, Int>?>(null)
+        private set
+    @Volatile private var ocrCancelled = false
+
+    /** The pages without text, which Make Searchable would process. */
+    suspend fun pagesNeedingText(): List<Int> = withContext(Dispatchers.IO) {
+        runCatching { io.pdfoundry.app.data.Ocr.pagesNeedingText(viewFile) }.getOrDefault(emptyList())
+    }
+
+    /**
+     * Recognises the text of [pages] on a copy, then applies it as one change (one Undo step). Cancel
+     * ([cancelOcr]) or no text found changes nothing. [onDone] gets the number of pages that got text,
+     * or null when cancelled or failed.
+     */
+    fun makeSearchable(pages: List<Int>, onDone: (Int?) -> Unit = {}) {
+        if (readOnly || ocrProgress != null) return
+        ocrCancelled = false
+        ocrProgress = 0 to pages.size
+        work.launch {
+            val copy = File(undoFolder, "ocr-${System.nanoTime()}.pdf")
+            val found = try {
+                withContext(Dispatchers.IO) {
+                    // Waits for changes still saving, then works on a copy of the document as it is.
+                    saving.withLock { content.copyTo(copy, overwrite = true) }
+                    io.pdfoundry.app.data.Ocr.run(copy, pages, null, progress = { done, total -> ocrProgress = done to total }, isCancelled = { ocrCancelled || closed })
+                }
+            } catch (e: java.util.concurrent.CancellationException) {
+                null
+            } catch (e: Exception) {
+                message = e.message ?: "The text could not be recognised."
+                null
+            }
+            ocrProgress = null
+            when {
+                found == null -> copy.delete()
+                found == 0 -> {
+                    copy.delete()
+                    message = OcrNothingFound
+                }
+                else -> edit { target ->
+                    copy.copyTo(target, overwrite = true)
+                    copy.delete()
+                }
+            }
+            onDone(found)
+        }
+    }
+
+    fun cancelOcr() {
+        ocrCancelled = true
+    }
+
     // Redaction --------------------------------------------------------------------------------
 
     /**
@@ -723,7 +795,7 @@ class ReaderState(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ReaderScreen(file: File, onBack: () -> Unit) {
+fun ReaderScreen(file: File, onBack: () -> Unit, start: ReaderStart = ReaderStart.None) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val state = remember(file) { ReaderState(context.applicationContext, file, scope) }
@@ -740,6 +812,22 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
     var showSearch by remember { mutableStateOf(false) }
     // The comment open for reading or editing: its page and mark.
     var openComment by remember { mutableStateOf<Pair<Int, MarkInfo>?>(null) }
+    // The page tool sheet on top, if any.
+    var tool by remember { mutableStateOf(ReaderStart.None) }
+    // A tool asked for from the Tools tab comes up once the document is open (and unlocked).
+    var started by remember { mutableStateOf(false) }
+    LaunchedEffect(state.source, state.locked, state.readOnly) {
+        if (started || start == ReaderStart.None || state.source == null || state.locked) return@LaunchedEffect
+        started = true
+        when {
+            state.readOnly -> state.message = state.notice
+            start == ReaderStart.Redact -> {
+                state.toolMode = ToolMode.Markup
+                state.begin(EditMode.Redact, 0)
+            }
+            else -> tool = start
+        }
+    }
     var menu by remember { mutableStateOf(false) }
     var confirmRevert by remember { mutableStateOf(false) }
     var askPassword by remember { mutableStateOf(false) }
@@ -828,6 +916,11 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
                                 }
                                 if (!state.readOnly && state.hasPassword) {
                                     DropdownMenuItem(text = { Text("Remove Password") }, leadingIcon = { Icon(Icons.Filled.LockOpen, null) }, enabled = !state.busy, onClick = { menu = false; confirmRemovePassword = true })
+                                }
+                                if (!state.readOnly) {
+                                    DropdownMenuItem(text = { Text("Make Searchable") }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.ManageSearch, null) }, enabled = !state.busy, onClick = { menu = false; tool = ReaderStart.MakeSearchable })
+                                    DropdownMenuItem(text = { Text("Page Numbers") }, leadingIcon = { Icon(Icons.Filled.FormatListNumbered, null) }, enabled = !state.busy, onClick = { menu = false; tool = ReaderStart.PageNumbers })
+                                    DropdownMenuItem(text = { Text("Watermark") }, leadingIcon = { Icon(Icons.Filled.BrandingWatermark, null) }, enabled = !state.busy, onClick = { menu = false; tool = ReaderStart.Watermark })
                                 }
                                 if (!state.readOnly) {
                                     DropdownMenuItem(text = { Text("Revert to original") }, leadingIcon = { Icon(Icons.Filled.Restore, null) }, enabled = state.canRevert && !state.busy, onClick = { menu = false; confirmRevert = true })
@@ -974,6 +1067,14 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
                 if (kind == SignatureKind.Initials) begin(EditMode.Place(image, "initials", width = 0.18f)) else begin(EditMode.Place(image, "signature"))
             })
         }
+    }
+
+    if (state.readOnly && tool != ReaderStart.None) tool = ReaderStart.None
+    when (tool) {
+        ReaderStart.PageNumbers -> PageNumbersSheet(state, onDismiss = { tool = ReaderStart.None })
+        ReaderStart.Watermark -> WatermarkSheet(state, onDismiss = { tool = ReaderStart.None })
+        ReaderStart.MakeSearchable -> OcrSheet(state, onDismiss = { tool = ReaderStart.None })
+        else -> Unit
     }
 
     openComment?.let { (page, mark) ->

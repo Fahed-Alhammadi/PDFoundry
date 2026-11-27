@@ -564,6 +564,8 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
         listOf(unlockedDirectory(context), File(context.cacheDir, "undo")).forEach { folder ->
             folder.listFiles()?.filter { it.lastModified() < started }?.forEach { it.deleteRecursively() }
         }
+        // Pictures made by Export as Images for sharing, and sheet previews, from an earlier run.
+        listOf(File(context.cacheDir, "exports"), File(context.cacheDir, "preview")).forEach { it.deleteRecursively() }
         // Downloads made by an earlier version's Extract Pages.
         context.cacheDir.listFiles { file -> file.name.startsWith("extract-") && file.name.endsWith(".pdf") }?.forEach { it.delete() }
     }

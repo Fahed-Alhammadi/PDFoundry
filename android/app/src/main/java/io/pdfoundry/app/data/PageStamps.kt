@@ -65,11 +65,11 @@ object PageStamps {
 
     fun addPageNumbers(file: File, style: PageNumberStyle) = PdfEngine.edit(file) { document -> addPageNumbers(document, style) }
 
-    fun addPageNumbers(document: PDDocument, style: PageNumberStyle) {
+    /** [count] and [first] let a preview of one page number it as it would be in the whole document. */
+    fun addPageNumbers(document: PDDocument, style: PageNumberStyle, count: Int = document.numberOfPages, first: Int = 0) {
         val font = PDType1Font.HELVETICA
-        val count = document.numberOfPages
-        for (index in 0 until count) {
-            val text = style.text(index, count) ?: continue
+        for (index in 0 until document.numberOfPages) {
+            val text = style.text(first + index, count) ?: continue
             overlay(document, index) { stream, width, height ->
                 val textWidth = font.getStringWidth(text) / 1000f * NUMBER_SIZE
                 val x = when (style.position.align) {
@@ -126,6 +126,39 @@ object PageStamps {
                     stream.drawImage(picture, -across / 2, -h / 2, across, h)
                 }
             }
+        }
+    }
+
+    /**
+     * Page [pageIndex] of [file] with [apply] done to a one-page copy of it, rendered [widthPx] wide, for a
+     * sheet's live preview. [apply] gets the copy and the document's page count. [file] is only read.
+     */
+    fun preview(file: File, pageIndex: Int, widthPx: Int, scratch: File, apply: (PDDocument, Int) -> Unit): android.graphics.Bitmap? {
+        val temp = File(scratch, "preview-${System.nanoTime()}.pdf")
+        try {
+            PDDocument.load(file, com.tom_roush.pdfbox.io.MemoryUsageSetting.setupTempFileOnly()).use { document ->
+                val count = document.numberOfPages
+                val keep = pageIndex.coerceIn(0, count - 1)
+                for (i in count - 1 downTo 0) if (i != keep) document.removePage(i)
+                apply(document, count)
+                document.isAllSecurityToBeRemoved = true
+                document.save(temp)
+            }
+            return android.os.ParcelFileDescriptor.open(temp, android.os.ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
+                android.graphics.pdf.PdfRenderer(descriptor).use { renderer ->
+                    renderer.openPage(0).use { page ->
+                        val height = (widthPx.toLong() * page.height / page.width).toInt().coerceAtLeast(1)
+                        android.graphics.Bitmap.createBitmap(widthPx, height, android.graphics.Bitmap.Config.ARGB_8888).also {
+                            it.eraseColor(Color.WHITE)
+                            page.render(it, null, null, android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            return null
+        } finally {
+            temp.delete()
         }
     }
 

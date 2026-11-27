@@ -17,6 +17,7 @@ import io.pdfoundry.app.data.Ocr
 import io.pdfoundry.app.data.PdfEngine
 import io.pdfoundry.app.data.PdfSource
 import io.pdfoundry.app.data.UnlockResult
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -154,6 +155,46 @@ class OcrTest {
         assertTrue(PdfEngine.isProtected(file))
         assertEquals(UnlockResult.Full, PdfEngine.access(file, "pw"))
         assertEquals(listOf(2), Ocr.pagesNeedingText(file, "pw"))
+    }
+
+    @Test
+    fun inTheReaderItIsOneUndoStep() {
+        val file = makeMixed("Reader")
+        val before = file.readBytes()
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default)
+        val state = io.pdfoundry.app.ui.ReaderState(context.applicationContext, file, scope)
+        fun waitUntil(done: () -> Boolean) {
+            val deadline = System.currentTimeMillis() + 120_000
+            while (!done() && System.currentTimeMillis() < deadline) Thread.sleep(50)
+            assertTrue("timed out", done())
+        }
+        try {
+            state.open()
+            waitUntil { state.source != null && !state.busy }
+            // Cancelled before it starts its first page: nothing changes.
+            var result: Int? = -1
+            state.makeSearchable(listOf(0, 2)) { result = it }
+            state.cancelOcr()
+            waitUntil { result != -1 && state.ocrProgress == null }
+            assertEquals(null, result)
+            assertTrue(before.contentEquals(file.readBytes()))
+
+            result = -1
+            state.makeSearchable(listOf(0, 2)) { result = it }
+            waitUntil { result != -1 }
+            Thread.sleep(200)
+            waitUntil { !state.busy }
+            assertEquals(2, result)
+            assertEquals(listOf(0), PdfEngine.search(file, "Invoice").map { it.page })
+            state.undo()
+            Thread.sleep(200)
+            waitUntil { !state.busy }
+            assertTrue("Undo puts the file back as it was", before.contentEquals(file.readBytes()))
+        } finally {
+            state.close()
+            Thread.sleep(300)
+            scope.cancel()
+        }
     }
 
     @Test
