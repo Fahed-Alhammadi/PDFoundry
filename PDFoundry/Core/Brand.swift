@@ -6,6 +6,10 @@ enum Brand {
     static let emberLight = Color(red: 1.0, green: 0.76, blue: 0.60)
     static let graphite = Color(red: 0.07, green: 0.08, blue: 0.11)
     static let steel = Color(red: 0.17, green: 0.19, blue: 0.26)
+    /// A darker ember, for the Enhance tools.
+    static let emberDeep = Color(red: 0.62, green: 0.22, blue: 0.09)
+    /// Ember #E2511B, for drawing on pages.
+    static let emberColor = UIColor(red: 0xE2 / 255, green: 0x51 / 255, blue: 0x1B / 255, alpha: 1)
 }
 
 enum AppInfo {

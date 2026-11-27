@@ -27,9 +27,19 @@ struct PDFKitView: UIViewRepresentable {
         center.addObserver(context.coordinator, selector: #selector(Coordinator.fieldEditingEnded), name: UITextView.textDidEndEditingNotification, object: nil)
         center.addObserver(context.coordinator, selector: #selector(Coordinator.annotationHit), name: .PDFViewAnnotationHit, object: view)
 
+        center.addObserver(context.coordinator, selector: #selector(Coordinator.viewportChanged), name: .PDFViewScaleChanged, object: view)
+
         let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.tapped(_:)))
         tap.delegate = context.coordinator
         view.addGestureRecognizer(tap)
+
+        let pan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.dragged(_:)))
+        pan.maximumNumberOfTouches = 1
+        pan.delegate = context.coordinator
+        view.addGestureRecognizer(pan)
+        context.coordinator.boxPan = pan
+
+        context.coordinator.watchScrolling(of: view)
         return view
     }
 
@@ -37,6 +47,7 @@ struct PDFKitView: UIViewRepresentable {
         if view.document !== model.document {
             view.document = model.document
         }
+        context.coordinator.setDragsBoxes(model.dragsBoxes, in: view)
         let direction: PDFDisplayDirection = horizontal ? .horizontal : .vertical
         if view.displayDirection != direction {
             view.displayDirection = direction
@@ -48,9 +59,66 @@ struct PDFKitView: UIViewRepresentable {
 
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         private let model: ReaderModel
+        private var scrollObservation: NSKeyValueObservation?
 
         init(model: ReaderModel) {
             self.model = model
+        }
+
+        /// Overlays drawn over the page (a selected mark, redaction boxes) follow the page as it scrolls.
+        func watchScrolling(of view: PDFView) {
+            DispatchQueue.main.async { [weak self, weak view] in
+                guard let self, let view, let scroll = Self.scrollView(in: view) else { return }
+                scrollObservation = scroll.observe(\.contentOffset, options: [.new]) { [weak self] _, _ in
+                    MainActor.assumeIsolated { self?.viewportChanged() }
+                }
+            }
+        }
+
+        private static func scrollView(in view: UIView) -> UIScrollView? {
+            for subview in view.subviews {
+                if let scroll = subview as? UIScrollView { return scroll }
+                if let found = scrollView(in: subview) { return found }
+            }
+            return nil
+        }
+
+        @objc func viewportChanged() {
+            model.viewportTick &+= 1
+        }
+
+        weak var boxPan: UIPanGestureRecognizer?
+        private var dragStart: CGPoint?
+
+        /// While shapes or redaction boxes are drawn, one finger draws and the page scrolls with two.
+        func setDragsBoxes(_ on: Bool, in view: PDFView) {
+            boxPan?.isEnabled = on
+            Self.scrollView(in: view)?.panGestureRecognizer.minimumNumberOfTouches = on ? 2 : 1
+        }
+
+        @objc func dragged(_ recognizer: UIPanGestureRecognizer) {
+            guard let view = recognizer.view else { return }
+            let point = recognizer.location(in: view)
+            switch recognizer.state {
+            case .began:
+                // The pan begins after the finger has moved a little: start where it went down.
+                let moved = recognizer.translation(in: view)
+                let start = CGPoint(x: point.x - moved.x, y: point.y - moved.y)
+                dragStart = start
+                model.boxDraft = (start, point)
+            case .changed:
+                if let dragStart { model.boxDraft = (dragStart, point) }
+            case .ended:
+                if let dragStart { model.finishBox(from: dragStart, to: point) }
+                dragStart = nil
+            default:
+                dragStart = nil
+                model.boxDraft = nil
+            }
+        }
+
+        func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
+            recognizer === boxPan ? model.dragsBoxes : true
         }
 
         @objc func pageChanged() {

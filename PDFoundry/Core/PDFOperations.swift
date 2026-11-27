@@ -120,7 +120,7 @@ enum PDFOperations {
     /// A copy of an unlocked document that is no longer encrypted. PDFKit writes an encrypted document encrypted
     /// again whatever the options say, so taking a password off means moving everything into a new document:
     /// the pages (with their annotations and form fields), the document's information and its outline.
-    static func unencrypted(_ source: PDFDocument) -> PDFDocument {
+    nonisolated static func unencrypted(_ source: PDFDocument) -> PDFDocument {
         let result = PDFDocument()
         for index in 0..<source.pageCount {
             guard let page = source.page(at: index)?.copy() as? PDFPage else { continue }
@@ -138,7 +138,7 @@ enum PDFOperations {
         return result
     }
 
-    private static func copyOutline(_ source: PDFOutline, into target: PDFOutline, from old: PDFDocument, to new: PDFDocument) {
+    private nonisolated static func copyOutline(_ source: PDFOutline, into target: PDFOutline, from old: PDFDocument, to new: PDFDocument) {
         for index in 0..<source.numberOfChildren {
             guard let child = source.child(at: index) else { continue }
             let copy = PDFOutline()
@@ -153,6 +153,14 @@ enum PDFOperations {
             target.insertChild(copy, at: target.numberOfChildren)
             copyOutline(child, into: copy, from: old, to: new)
         }
+    }
+
+    /// The first page of a PDF made in memory, ready to be put into another document. It is copied while its own
+    /// document is still alive (as Merge does), so it never points at a document that is gone (PDFView crashes on
+    /// such a page when it is removed again).
+    nonisolated static func detachedPage(from data: Data) -> PDFPage? {
+        guard let document = PDFDocument(data: data), let page = document.page(at: 0) else { return nil }
+        return withExtendedLifetime(document) { page.copy() as? PDFPage }
     }
 
     /// Joins the given files, in order, into one new document.

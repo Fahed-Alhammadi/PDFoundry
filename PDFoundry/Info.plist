@@ -41,6 +41,8 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>PDFoundry uses the camera to scan paper documents into PDF files.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>PDFoundry saves the pages you export to your photo library.</string>
 	<key>UIFileSharingEnabled</key>
 	<true/>
 	<key>UILaunchScreen</key>
