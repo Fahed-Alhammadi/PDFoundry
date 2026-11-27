@@ -34,7 +34,7 @@ struct ReaderView: View {
             .navigationTitle(model.title)
             .navigationBarTitleDisplayMode(.inline)
             // While redaction boxes wait, the reader's own back button asks first (this also turns off swipe-back).
-            .navigationBarBackButtonHidden(model.mode != .reading || model.pendingRedactionCount > 0)
+            .navigationBarBackButtonHidden(model.mode != .reading || model.toolMode == .redact || model.pendingRedactionCount > 0)
             .toolbar(.hidden, for: .tabBar)
             .toolbar { toolbar }
             .safeAreaInset(edge: .bottom) { bottomBar }
@@ -375,7 +375,7 @@ struct ReaderView: View {
 
     @ToolbarContentBuilder
     private var readingToolbar: some ToolbarContent {
-        if model.pendingRedactionCount > 0 {
+        if model.toolMode == .redact || model.pendingRedactionCount > 0 {
             ToolbarItem(placement: .topBarLeading) {
                 Button("Back", systemImage: "chevron.backward") {
                     if !model.shouldAskBeforeLeaving() { dismiss() }

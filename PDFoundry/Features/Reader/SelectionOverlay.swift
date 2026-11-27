@@ -12,6 +12,9 @@ struct SelectionOverlay: View {
 
     private enum Corner: CaseIterable { case topLeft, topRight, bottomLeft, bottomRight }
 
+    /// Drags are measured in the overlay's own space, which stays still while the box under the finger moves.
+    private static let space = "selection-overlay"
+
     var body: some View {
         GeometryReader { proxy in
             if let selected = model.selectedAnnotation, let frame = model.selectionFrame {
@@ -44,6 +47,7 @@ struct SelectionOverlay: View {
                 }
             }
         }
+        .coordinateSpace(.named(Self.space))
     }
 
     private var handle: some View {
@@ -82,7 +86,7 @@ struct SelectionOverlay: View {
     }
 
     private func move(_ frame: CGRect) -> some Gesture {
-        DragGesture(minimumDistance: 2)
+        DragGesture(minimumDistance: 2, coordinateSpace: .named(Self.space))
             .onChanged { value in
                 let start = startFrame ?? frame
                 startFrame = start
@@ -95,7 +99,7 @@ struct SelectionOverlay: View {
     }
 
     private func resize(_ corner: Corner, frame: CGRect, keepsShape: Bool) -> some Gesture {
-        DragGesture(minimumDistance: 1)
+        DragGesture(minimumDistance: 1, coordinateSpace: .named(Self.space))
             .onChanged { value in
                 let start = startFrame ?? frame
                 startFrame = start

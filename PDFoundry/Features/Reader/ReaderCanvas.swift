@@ -101,8 +101,11 @@ struct PDFKitView: UIViewRepresentable {
             let point = recognizer.location(in: view)
             switch recognizer.state {
             case .began:
-                dragStart = point
-                model.boxDraft = (point, point)
+                // The pan begins after the finger has moved a little: start where it went down.
+                let moved = recognizer.translation(in: view)
+                let start = CGPoint(x: point.x - moved.x, y: point.y - moved.y)
+                dragStart = start
+                model.boxDraft = (start, point)
             case .changed:
                 if let dragStart { model.boxDraft = (dragStart, point) }
             case .ended:

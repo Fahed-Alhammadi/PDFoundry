@@ -649,8 +649,19 @@ final class ReaderModel {
         if let drag = dragStart, drag.annotation !== selected.annotation { finishDrag() }
         let start = dragStart?.geometry ?? AnnotationGeometry(selected.annotation)
         dragStart = (selected.annotation, start)
-        start.moved(to: pdfView.convert(viewRect, to: selected.page).standardized).apply(to: selected.annotation)
+        start.moved(to: Self.kept(pdfView.convert(viewRect, to: selected.page).standardized, inside: selected.page.bounds(for: .cropBox)))
+            .apply(to: selected.annotation)
         viewportTick &+= 1
+    }
+
+    /// `rect` moved (and if need be shrunk) so it stays on the page.
+    static func kept(_ rect: CGRect, inside page: CGRect) -> CGRect {
+        var result = rect
+        result.size.width = min(result.width, page.width)
+        result.size.height = min(result.height, page.height)
+        result.origin.x = min(max(result.minX, page.minX), page.maxX - result.width)
+        result.origin.y = min(max(result.minY, page.minY), page.maxY - result.height)
+        return result
     }
 
     /// The finger is lifted: the drag becomes one Undo step and the file is saved. The start is always cleared,

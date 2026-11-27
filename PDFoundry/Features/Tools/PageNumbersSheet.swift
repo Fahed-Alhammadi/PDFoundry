@@ -32,6 +32,7 @@ struct PagePreview<Overlay: View>: View {
         }
         .aspectRatio(size.width / max(size.height, 1), contentMode: .fit)
         .frame(maxHeight: 260)
+        .frame(maxWidth: .infinity)
         .task(id: page.map(ObjectIdentifier.init)) {
             guard let page, let rendered = PageImage.image(of: page, dpi: 48) else { return }
             image = UIImage(cgImage: rendered)
@@ -182,14 +183,14 @@ struct WatermarkSheet: View {
 
     private func watermark(in size: CGSize) -> some View {
         let angle = style.diagonal ? atan2(size.height, size.width) : 0
+        // The same size as on the page: the text is 60% of the page width.
+        let probe = (style.text as NSString).size(withAttributes: [.font: UIFont(name: "Helvetica", size: 100) ?? .systemFont(ofSize: 100)])
+        let fontSize = probe.width > 0 ? 100 * size.width * 0.6 / probe.width : 40
         return Text(style.text)
-            .font(.custom("Helvetica", fixedSize: 100))
+            .font(.custom("Helvetica", fixedSize: fontSize))
             .foregroundStyle(Color(style.color))
             .lineLimit(1)
             .fixedSize()
-            .minimumScaleFactor(0.01)
-            .frame(width: size.width * 0.6)
-            .scaleEffect(1)
             .opacity(style.opacity)
             .rotationEffect(.radians(-angle))
             .frame(width: size.width, height: size.height)
