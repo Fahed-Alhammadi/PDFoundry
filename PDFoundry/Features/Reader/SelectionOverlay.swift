@@ -32,7 +32,8 @@ struct SelectionOverlay: View {
                         .accessibilityLabel("Selected \(selected.title)")
                         .accessibilityHint(selected.isMovable ? "Drag to move." : "")
 
-                    if selected.isMovable {
+                    // A comment is a small icon: no resize handles, which would cover it.
+                    if selected.isMovable, !selected.isComment {
                         ForEach(Corner.allCases, id: \.self) { corner in
                             handle
                                 .position(point(of: corner, in: box))

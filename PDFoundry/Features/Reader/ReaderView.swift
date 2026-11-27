@@ -131,8 +131,9 @@ struct ReaderView: View {
             }
             .sheet(item: $toolSheet) { tool in
                 switch tool {
-                case .pageNumbers: PageNumbersSheet(model: model)
-                case .watermark: WatermarkSheet(model: model)
+                // Tall enough for the preview and every control without scrolling (iPad's form size is too short).
+                case .pageNumbers: PageNumbersSheet(model: model).presentationSizing(.page)
+                case .watermark: WatermarkSheet(model: model).presentationSizing(.page)
                 case .makeSearchable: OCRSheet(model: model).presentationDetents([.medium])
                 case .redact: EmptyView()
                 }
@@ -249,7 +250,7 @@ struct ReaderView: View {
         switch model.mode {
         case .drawing: "Draw on the page, then tap Done."
         case .placing: "Drag to move. Use the handle to resize."
-        case .shaping: "Drag on the page to draw a \(model.shapeKind.title.lowercased()). Scroll with two fingers."
+        case .shaping: model.shapeKind.drawHint
         case .commenting: "Tap where the comment goes."
         case .reading:
             model.hint ?? (model.toolMode == .redact && model.pendingRedactionCount == 0

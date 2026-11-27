@@ -141,12 +141,16 @@ struct WatermarkSheet: View {
                 }
 
                 Section {
-                    LabeledContent("Opacity") {
+                    // One row: the title, the slider, the value.
+                    HStack(spacing: 12) {
+                        Text("Opacity")
                         Slider(value: $style.opacity, in: 0.05...1, step: 0.05)
-                            .frame(maxWidth: 200)
+                            .accessibilityLabel("Opacity")
                         Text("\(Int((style.opacity * 100).rounded()))%")
                             .monospacedDigit()
-                            .frame(width: 44, alignment: .trailing)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 46, alignment: .trailing)
+                            .accessibilityHidden(true)
                     }
                     Picker("Direction", selection: $style.diagonal) {
                         Text("Diagonal").tag(true)

@@ -216,10 +216,28 @@ enum PDFOperations {
     @discardableResult
     static func stamp(_ image: UIImage, on page: PDFPage, bounds: CGRect) -> PDFAnnotation? {
         let upright = image.rotatedCounterClockwise(degrees: page.rotation)
-        guard let cgImage = upright.cgImage else { return nil }
+        guard let original = upright.cgImage else { return nil }
+        // PDF viewers (PDFView included) scale a stamp's picture with little smoothing, so a picture many times
+        // larger than it is shown looks jagged. It is scaled down here, smoothly, to 4 pixels per point.
+        let cgImage = smoothlySized(original, pixelsPerPoint: 4, for: bounds.size) ?? original
         let annotation = ImageStampAnnotation(image: cgImage, bounds: bounds)
         page.addAnnotation(annotation)
         return annotation
+    }
+
+    /// `image` scaled down with high-quality interpolation so it has about `pixelsPerPoint` pixels per point at
+    /// `size`; nil when it is already that small or smaller (it is never enlarged).
+    static func smoothlySized(_ image: CGImage, pixelsPerPoint: CGFloat, for size: CGSize) -> CGImage? {
+        guard size.width > 0, size.height > 0 else { return nil }
+        let scale = min(size.width * pixelsPerPoint / CGFloat(image.width), size.height * pixelsPerPoint / CGFloat(image.height))
+        guard scale < 0.9 else { return nil }
+        let width = max(1, Int((CGFloat(image.width) * scale).rounded())), height = max(1, Int((CGFloat(image.height) * scale).rounded()))
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.interpolationQuality = .high
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return context.makeImage()
     }
 
     /// The short guide placed in the library on first launch.

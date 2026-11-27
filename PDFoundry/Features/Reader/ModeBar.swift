@@ -20,12 +20,22 @@ struct ModeBar: View {
     @Namespace private var glass
 
     /// Highlight colours, the same on every platform.
+    /// Solid colours, already mixed with white: PDFKit drops a colour's transparency when it writes a highlight, so a
+    /// see-through colour looked paler when made than after the file was opened again.
     static let highlights: [(name: String, color: UIColor)] = [
-        ("Yellow", .systemYellow.withAlphaComponent(0.5)),
-        ("Green", .systemGreen.withAlphaComponent(0.4)),
-        ("Pink", .systemPink.withAlphaComponent(0.4)),
-        ("Blue", .systemBlue.withAlphaComponent(0.35)),
+        ("Yellow", onWhite(.systemYellow, 0.5)),
+        ("Green", onWhite(.systemGreen, 0.4)),
+        ("Pink", onWhite(.systemPink, 0.4)),
+        ("Blue", onWhite(.systemBlue, 0.35)),
     ]
+
+    /// `color` at `alpha` over white, as one solid colour (Light Mode values, so it doesn't change with appearance).
+    static func onWhite(_ color: UIColor, _ alpha: CGFloat) -> UIColor {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        color.resolvedColor(with: UITraitCollection(userInterfaceStyle: .light)).getRed(&r, green: &g, blue: &b, alpha: &a)
+        func mix(_ c: CGFloat) -> CGFloat { c * alpha + (1 - alpha) }
+        return UIColor(red: mix(r), green: mix(g), blue: mix(b), alpha: 1)
+    }
 
     var body: some View {
         GlassEffectContainer(spacing: 8) {
