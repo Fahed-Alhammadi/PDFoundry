@@ -92,6 +92,11 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: npm run dist:${{ matrix.target }} -- --publish never
 
+      # Make Searchable must work in the package itself: its engine files and language data, offline.
+      - name: Check OCR in the package
+        working-directory: desktop
+        run: node scripts/check-package-ocr.mjs
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: desktop-${{ matrix.target }}
@@ -168,6 +173,10 @@ jobs:
             export CSC_IDENTITY_AUTO_DISCOVERY=false # unsigned test build
           fi
           npm run dist:mac -- --publish never
+
+      - name: Check OCR in the package
+        working-directory: desktop
+        run: node scripts/check-package-ocr.mjs
 
       # Notarizing the .dmg also notarizes the app inside (Apple records every nested binary), which covers the .zip
       # used for updates too: it holds the same app as the .dmg of its architecture. Stapling is retried because
