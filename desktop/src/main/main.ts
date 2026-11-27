@@ -18,6 +18,7 @@ import type { MenuItemConstructorOptions } from 'electron';
 import { Store, cleanName } from './store.ts';
 import type { InkKind, PartExtension, Settings } from './store.ts';
 import { REPO, Updater } from './updater.ts';
+import { OcrEngine, ocrPaths } from './ocr.ts';
 import { welcomeGuide } from '../core/pdf.ts';
 
 const OUT = __dirname;
@@ -47,6 +48,8 @@ const pending: string[] = [];
 let unsaved = false;
 /** How many areas the open document has marked for redaction and not applied. Closing the window asks about them first. */
 let redactions = 0;
+/** Make Searchable's engine, started the first time it is used. */
+let ocr: OcrEngine | null = null;
 /** Set once the user has answered the "save your changes?" question, so the window may really close. */
 let closing = false;
 /** Development only (the self-test): the answer to the next save or open dialog, so no system dialog is shown. */
@@ -256,6 +259,19 @@ const handlers: Record<string, Handler> = {
     win?.close();
   },
   /** The window dealt with its redactions after the close question: closing goes on (and asks about unsaved changes). */
+  // Make Searchable: the words on one page (a PNG the window drew at 300 dpi), recognised here with the bundled
+  // English and Arabic data. Nothing goes online. ocrStop cancels a page being read (it then fails) and frees memory.
+  ocrPage: async (png: unknown) => {
+    if (!(png instanceof Uint8Array) || png.length < 24) throw new Error('There is no page to read.');
+    ocr ??= new OcrEngine(ocrPaths({ appPath: app.getAppPath(), packaged: app.isPackaged, resourcesPath: process.resourcesPath }));
+    const found = await ocr.recognize([{ index: 0, png }], () => {}, () => false);
+    return found?.[0].words ?? [];
+  },
+  ocrStop: async () => {
+    const engine = ocr;
+    ocr = null;
+    await engine?.terminate();
+  },
   closeWindow: () => {
     win?.close();
   },
@@ -551,4 +567,6 @@ if (!app.requestSingleInstanceLock()) {
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin' && !(dev && process.env.PDFOUNDRY_REOPEN)) app.quit();
   });
+  // OCR's worker thread must not keep the app from quitting.
+  app.on('will-quit', () => void handlers.ocrStop());
 }

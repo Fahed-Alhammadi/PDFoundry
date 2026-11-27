@@ -2,10 +2,12 @@
 // Save), Compress (a smaller copy; the source is never written) and the window's half of Compress, which decodes,
 // scales and JPEG-encodes pictures with its canvas. Page Numbers and Watermark show a live preview on the first page.
 import { api, title } from './api.ts';
+import type { OcrWord } from './api.ts';
 import { button, dialog, formatSize, h, message } from './dom.ts';
 import { toPng } from './images.ts';
 import { unlockSource } from './protect.ts';
 import { openPdf, renderPage } from './pdfview.ts';
+import type { PDFDocumentProxy } from './pdfview.ts';
 import { compress } from '../core/compress.ts';
 import type { CompressImage, CompressLevel, Reencoded } from '../core/compress.ts';
 import { NUMBER_FORMATS, NUMBER_POSITIONS, numberText } from '../core/pagestamps.ts';
@@ -163,6 +165,71 @@ export async function watermarkPng(style: WatermarkStyle): Promise<Uint8Array> {
   ctx.textAlign = 'center';
   ctx.fillText(style.text, canvas.width / 2, canvas.height / 2);
   return toPng(canvas);
+}
+
+/**
+ * Make Searchable: says how many pages have no text yet, then reads them one by one (each drawn at 300 dpi and
+ * recognised offline in the main process) with progress and Cancel. Resolves the words found per page, or null when
+ * cancelled, when there was nothing to do, or when no text was found (each says so; nothing changes).
+ */
+export function ocrSheet(doc: PDFDocumentProxy, pages: number[], pageCount: number): Promise<Map<number, OcrWord[]> | null> {
+  return new Promise((resolve) => {
+    let result: Map<number, OcrWord[]> | null = null;
+    let cancelled = false;
+    let running = false;
+    const status = h('p.split-status', { role: 'status' });
+    const progress = h('progress', { max: pages.length, value: 0, hidden: true, 'aria-label': 'Progress' });
+    const done = (text: string) => {
+      status.textContent = text;
+      progress.hidden = true;
+      actions.replaceChildren(button('OK', () => d.close(), 'primary'));
+    };
+    const start = button('Make Searchable', async () => {
+      running = true;
+      progress.hidden = false;
+      actions.replaceChildren(button('Cancel', () => d.close()));
+      const found = new Map<number, OcrWord[]>();
+      try {
+        for (const [n, index] of pages.entries()) {
+          status.textContent = `Reading page ${index + 1} (${n + 1} of ${pages.length})…`;
+          const canvas = document.createElement('canvas');
+          const size = (await doc.getPage(index + 1)).getViewport({ scale: 1 });
+          await (await renderPage(doc, index, canvas, (size.width * 300) / 72, 1)).promise;
+          const words = await api.ocrPage(await toPng(canvas));
+          if (cancelled) return;
+          if (words.length) found.set(index, words);
+          progress.value = n + 1;
+        }
+      } catch (e) {
+        if (!cancelled) done(message(e));
+        return;
+      } finally {
+        running = false;
+      }
+      if (!found.size) return done('No text was found on these pages.');
+      result = found;
+      d.close();
+    }, 'primary');
+    const actions = h('div.dialog-actions', button('Cancel', () => d.close()), start);
+    const d = dialog('Make Searchable', [
+      h('p.hint', pages.length
+        ? `${pages.length === pageCount ? (pageCount === 1 ? 'The page has' : `All ${pageCount} pages have`) : `${pages.length} of ${pageCount} pages have`} no text yet and will be read, in English and Arabic. The text is added invisibly over the words, so the pages look the same. Pages that already have text are skipped.`
+        : 'Every page already has text, so there is nothing to do.'),
+      progress,
+      status,
+      actions,
+    ], [], {
+      onClose: () => {
+        if (running) {
+          cancelled = true;
+          void api.ocrStop(); // the page being read stops; nothing is changed
+        }
+        resolve(result);
+      },
+    });
+    d.el.classList.add('ocr');
+    if (!pages.length) actions.replaceChildren(button('OK', () => d.close(), 'primary'));
+  });
 }
 
 /** The window's half of Compress: decodes a picture, scales it down to `maxSide`, and encodes it as a JPEG. */

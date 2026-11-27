@@ -25,7 +25,8 @@ import type { FieldInfo, FieldValue, MarkInfo, PagePoint, PageRect, Rgba, ShapeK
 import { joinBoxes } from '../core/rects.ts';
 import { redact } from '../core/redaction.ts';
 import { addPageNumbers, addWatermark } from '../core/pagestamps.ts';
-import { pageNumbersSheet, watermarkPng, watermarkSheet } from './pagetools.ts';
+import { ocrSheet, pageNumbersSheet, watermarkPng, watermarkSheet } from './pagetools.ts';
+import { addInvisibleText, pagesWithoutText } from '../core/ocrtext.ts';
 import type { TextDirection } from '../core/rects.ts';
 
 const UNDO_STEPS = 10;
@@ -1692,6 +1693,7 @@ export class Reader {
     return [
       { label: 'Organize pages', icon: 'pages', action: () => this.organize() },
       ...(this.editable ? [
+        { label: 'Make Searchable…', icon: 'searchable', action: () => void this.makeSearchable() },
         { label: 'Page Numbers…', icon: 'numbers', action: () => void this.pageNumbers() },
         { label: 'Watermark…', icon: 'watermark', action: () => void this.watermark() },
       ] : []),
@@ -1725,6 +1727,19 @@ export class Reader {
     if (!style) return false;
     const image = pdf.canEncode(style.text) ? undefined : await watermarkPng(style);
     return this.change((bytes) => addWatermark(bytes, style, image), 'The watermark was added.');
+  }
+
+  /** Make Searchable (More menu, Tools › Enhance): reads the pages with no text and adds it invisibly, as one change. */
+  async makeSearchable(): Promise<boolean> {
+    if (!(await this.readyForPageTool())) return false;
+    const doc = this.doc!;
+    const found = await ocrSheet(doc, await pagesWithoutText(doc), this.sizes.length);
+    if (!found || doc !== this.doc) return false;
+    return this.change(async (bytes) => {
+      let out = bytes;
+      for (const [index, words] of found) out = await addInvisibleText(out, index, words);
+      return out;
+    }, found.size === 1 ? 'Text was added to 1 page.' : `Text was added to ${found.size} pages.`);
   }
 
   /** Before a tool that changes every page: an editable document, nothing half placed, field changes written. */

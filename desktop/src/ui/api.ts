@@ -1,8 +1,10 @@
 // The window's typed view of the main process (handlers in src/main/main.ts).
 import type { InkKind, PartExtension, RecentFile, Settings } from '../main/store.ts';
 import type { UpdateState } from '../main/updater.ts';
+import type { OcrWord } from '../main/ocr.ts';
 
 export type { InkKind, RecentFile, Settings, UpdateState };
+export type { OcrWord };
 
 export type AppInfo = {
   version: string;
@@ -59,6 +61,10 @@ export const api = {
   setDocument: (file: string | null, edited: boolean, redactions = 0): Promise<void> => bridge.call('setDocument', file, edited, redactions),
   /** Closes the window (asking again about unsaved changes, as closing it does). */
   closeWindow: (): Promise<void> => bridge.call('closeWindow'),
+  /** Make Searchable: the words on one page drawn as a PNG (recognised in the main process, offline). */
+  ocrPage: (png: Uint8Array): Promise<OcrWord[]> => bridge.call('ocrPage', png),
+  /** Stops a page being read (it then fails) and frees the recogniser's memory. */
+  ocrStop: (): Promise<void> => bridge.call('ocrStop'),
   closeNow: (): Promise<void> => bridge.call('closeNow'),
 
   /** Saved signatures, or saved initials (kept apart). */

@@ -343,6 +343,7 @@ async function interfaceTest(checks: { name: string; pass: boolean; detail?: str
   await selectionTest(check, app);
   await redactionTest(check, app);
   await pageToolsTest(check, app);
+  await ocrTest(check, app);
   await toolsTest(check, app);
   await fillSignTest(check, app);
   await splitTest(check, app);
@@ -639,6 +640,85 @@ async function toolsTest(check: (name: string, pass: boolean, detail?: string) =
 }
 
 type Check = (name: string, pass: boolean, detail?: string) => void;
+
+/** A Letter page "scanned" at 150 dpi: a picture of text, with no text in the PDF. */
+async function scannedPage(text: string, rtl: boolean): Promise<Uint8Array> {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1275;
+  canvas.height = 1650;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#16181d';
+  ctx.font = '72px Arial, "Geeza Pro", "Noto Sans Arabic", sans-serif';
+  ctx.textBaseline = 'top';
+  ctx.direction = rtl ? 'rtl' : 'ltr';
+  ctx.textAlign = rtl ? 'right' : 'left';
+  ctx.fillText(text, rtl ? 1150 : 125, 220);
+  return toPng(canvas);
+}
+
+/** Make Searchable on a document with two scanned pages and one with text; Cancel; the pages look the same. */
+async function ocrTest(check: Check, app: App): Promise<void> {
+  const reader = document.querySelector('.reader') as HTMLElement;
+  const dock = reader.querySelector('.dock')!;
+  const settled = () => until(() => !reader.classList.contains('busy') && !!dock.querySelector('.tool'), 'the change to be applied');
+  const made = await PDFDocument.create();
+  const font = await made.embedFont(StandardFonts.Helvetica);
+  for (const scan of [await scannedPage('Invoice total 1250', false), null, await scannedPage('فاتورة الكهرباء', true)]) {
+    const page = made.addPage([612, 792]);
+    if (scan) page.drawImage(await made.embedPng(scan), { x: 0, y: 0, width: 612, height: 792 });
+    else page.drawText('This page has real text', { x: 72, y: 700, size: 24, font });
+  }
+  const file = await api.devCreate('Searchable test', await made.save());
+  await app.reader.open(file);
+  await until(() => reader.querySelectorAll('.page').length === 3, 'the scanned sample');
+  const opened = app.reader.data;
+  const sheet = () => document.querySelector<HTMLElement>('.dialog.ocr');
+  const found = async (bytes: Uint8Array, word: string) => {
+    const doc = await openPdf(bytes);
+    const matches = await search(doc, word);
+    void doc.loadingTask.destroy();
+    return matches.map((m) => m.page);
+  };
+
+  // Cancel while the first page is being read: nothing changes.
+  void app.reader.makeSearchable();
+  await until(() => !!sheet(), 'the Make Searchable sheet');
+  const said = sheet()!.querySelector('.hint')?.textContent ?? '';
+  clickButton(sheet()!, 'Make Searchable');
+  await until(() => /Reading page/.test(sheet()?.textContent ?? ''), 'the first page to be read');
+  clickButton(sheet()!, 'Cancel');
+  await wait(1500);
+  check('Make Searchable says which pages it reads, and Cancel changes nothing', /2 of 3 pages have no text yet/.test(said) && !sheet() && app.reader.data === opened && !app.reader.dirty, said);
+
+  // The whole run: English on page 1 and Arabic on page 3 can be found; page 2 is left alone.
+  void app.reader.makeSearchable();
+  await until(() => !!sheet(), 'the Make Searchable sheet');
+  clickButton(sheet()!, 'Make Searchable');
+  for (let i = 0; i < 1200 && app.reader.data === opened && !/No text|could|Error/i.test(sheet()?.querySelector('.split-status')?.textContent ?? ''); i++) await wait(100);
+  await settled();
+  const after = app.reader.data;
+  const [english, arabic, real] = [await found(after, 'Invoice'), await found(after, 'فاتورة'), await found(after, 'real text')];
+  check('after Make Searchable an English word and an Arabic word on scanned pages are found by search', english.includes(0) && arabic.includes(2) && real.join() === '1' && app.reader.dirty,
+    JSON.stringify({ english, arabic, real, status: sheet()?.textContent }));
+  // The page looks exactly as before: the text is invisible.
+  const [a, b] = [await pixels(opened, 0), await pixels(after, 0)];
+  let differ = 0;
+  let all = 0;
+  for (let x = 0; x < 1; x += 0.005) {
+    for (let y = 0; y < 1; y += 0.005) {
+      all++;
+      const [p, q] = [a.at(x, y), b.at(x, y)];
+      if (p.some((v, k) => Math.abs(v - q[k]) > 8)) differ++;
+    }
+  }
+  check('Make Searchable does not change how a page looks', differ / all <= 0.01, `${differ} of ${all} sample points differ`);
+  const closing = app.reader.close();
+  await until(() => !!document.querySelector('.dialog'), 'the save question');
+  clickButton(document.querySelector('.dialog')!, 'Don’t Save');
+  await closing;
+}
 
 /** Page Numbers and Watermark on the open document, Compress and Export as Images on a file. */
 async function pageToolsTest(check: Check, app: App): Promise<void> {
