@@ -797,6 +797,20 @@ final class ReaderModel {
         record(.added(added))
     }
 
+    // MARK: Page numbers and watermark
+
+    /// Numbers the pages, as one Undo step.
+    func addPageNumbers(_ style: PageNumberStyle) {
+        guard canEdit, let document else { return }
+        commit(PageStamps.addNumbers(document, style: style))
+    }
+
+    /// Stamps the watermark on every page, as one Undo step.
+    func addWatermark(_ style: WatermarkStyle) {
+        guard canEdit, let document else { return }
+        commit(PageStamps.addWatermark(document, style: style))
+    }
+
     // MARK: Replacing pages
 
     /// Puts each swap's new page in place of its old one, carrying the listed annotations over, as one Undo step.

@@ -311,6 +311,19 @@ final class DocumentStore {
         return destination
     }
 
+    /// Keeps a compressed copy in the library as "<name> (compressed)". The source is not touched or listed.
+    func saveCompressed(_ data: Data, named name: String) async throws -> PDFItem {
+        let destination = uniqueURL(named: name + " (compressed)")
+        do {
+            try data.write(to: destination, options: .atomic)
+        } catch {
+            throw PDFoundryError.writeFailed
+        }
+        let document = PDFDocument(data: data)
+        await refresh()
+        return item(for: destination, pageCount: document?.pageCount ?? 0, isLocked: document?.isLocked ?? false)
+    }
+
     /// The listed item for a file just written to the library.
     private func item(for url: URL, pageCount: Int, isLocked: Bool) -> PDFItem {
         items.first { $0.url.standardizedFileURL == url.standardizedFileURL } ?? PDFItem(
