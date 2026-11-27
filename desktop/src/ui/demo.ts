@@ -338,6 +338,7 @@ async function interfaceTest(checks: { name: string; pass: boolean; detail?: str
   await app.reader.close();
 
   await modesTest(check, app);
+  await selectionTest(check, app);
   await toolsTest(check, app);
   await fillSignTest(check, app);
   await splitTest(check, app);
@@ -634,6 +635,126 @@ async function toolsTest(check: (name: string, pass: boolean, detail?: string) =
 }
 
 type Check = (name: string, pass: boolean, detail?: string) => void;
+
+/** Selecting a mark (move, resize, Delete, Undo), Shapes and Comment, driven with pointer events and keys. */
+async function selectionTest(check: Check, app: App): Promise<void> {
+  const reader = document.querySelector('.reader') as HTMLElement;
+  const dock = reader.querySelector('.dock')!;
+  const page = () => reader.querySelector<HTMLElement>('.page')!;
+  const settled = () => until(() => !reader.classList.contains('busy') && !!dock.querySelector('.tool'), 'the change to be applied');
+  const blue = (c: number[]) => c[2] > 200 && c[0] < 60;
+  const isWhite = (c: number[]) => c[0] > 245 && c[1] > 245 && c[2] > 245;
+  const file = await api.devCreate('Selection test', await blank(612, 792, 1));
+  await app.reader.open(file);
+  await until(() => !!page() && page().dataset.painted !== undefined, 'the page');
+  const placedAt = { x: 0.2, y: 0.2, width: 0.2, height: 0.05 };
+  await app.reader.change(async (b) => pdf.stamp(b, 0, await solid('#0000ff', 160, 40), placedAt));
+  const marks = () => pdf.marks(app.reader.data, 0);
+  const at = (fx: number, fy: number) => {
+    const box = page().getBoundingClientRect();
+    return [box.left + box.width * fx, box.top + box.height * fy] as const;
+  };
+  const clickAt = (fx: number, fy: number) => {
+    const [x, y] = at(fx, fy);
+    page().dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 }));
+  };
+  const drag = (el: Element, from: readonly [number, number], to: readonly [number, number]) => {
+    pointer(el, 'pointerdown', ...from);
+    pointer(el, 'pointermove', (from[0] + to[0]) / 2, (from[1] + to[1]) / 2);
+    pointer(el, 'pointermove', ...to);
+    pointer(el, 'pointerup', ...to);
+  };
+  const box = () => reader.querySelector<HTMLElement>('.mark-selection');
+
+  // Click the signature: it is selected, with corner handles and Delete.
+  window.getSelection()?.removeAllRanges();
+  clickAt(0.3, 0.225);
+  await until(() => !!box(), 'the selection');
+  const original = (await marks())[0];
+  check('clicking a mark selects it, with handles and Delete', !!box()?.querySelector('.corner.se') && hasButton(box()!, 'Delete') && app.reader.selectedMark?.mark.id === original.id,
+    JSON.stringify(app.reader.selectedMark));
+
+  // Drag it down and right, then resize it from its lower-right corner.
+  let before = app.reader.data;
+  drag(box()!, at(0.3, 0.225), at(0.6, 0.625));
+  await until(() => app.reader.data !== before && !!box(), 'the move');
+  await settled();
+  const afterMove = (await marks())[0];
+  let px = await pixels(app.reader.data, 0);
+  check('dragging a selected signature moves it (the same mark, one Undo step)', afterMove.id === original.id && Math.abs(afterMove.rect.x - 0.5) < 0.01 && Math.abs(afterMove.rect.y - 0.6) < 0.01
+    && Math.abs(afterMove.rect.width - 0.2) < 1e-6 && blue(px.at(0.6, 0.625)) && isWhite(px.at(0.3, 0.225)), JSON.stringify(afterMove.rect));
+  before = app.reader.data;
+  const corner = box()!.querySelector('.corner.se')!;
+  const c = corner.getBoundingClientRect();
+  const [cx, cy] = [c.left + c.width / 2, c.top + c.height / 2];
+  drag(corner, [cx, cy], [cx + page().getBoundingClientRect().width * 0.1, cy]);
+  await until(() => app.reader.data !== before && !!box(), 'the resize');
+  await settled();
+  const afterResize = (await marks())[0];
+  check('dragging a corner resizes it and keeps its proportions', Math.abs(afterResize.rect.width - 0.3) < 0.01 && Math.abs(afterResize.rect.height / afterResize.rect.width - original.rect.height / original.rect.width) < 1e-3
+    && Math.abs(afterResize.rect.x - 0.5) < 1e-3, JSON.stringify(afterResize.rect));
+
+  // Delete with the keyboard, then Undo three times: back to the signature as it was placed.
+  before = app.reader.data;
+  box()!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true }));
+  await until(() => app.reader.data !== before, 'the delete');
+  await settled();
+  const gone = (await marks()).length === 0 && !box();
+  for (let i = 0; i < 3; i++) {
+    clickButton(dock, 'Undo');
+    await wait(300);
+    await settled();
+  }
+  const back = (await marks())[0];
+  px = await pixels(app.reader.data, 0);
+  check('Delete removes it, and Undo three times puts it back where it was placed', gone && !!back && back.id === original.id
+    && ['x', 'y', 'width', 'height'].every((k) => Math.abs(back.rect[k as 'x'] - original.rect[k as 'x']) < 1e-6) && blue(px.at(0.3, 0.225)), JSON.stringify(back?.rect));
+
+  // Shapes: a rectangle dragged on the page, and the bar stays in Shapes.
+  clickButton(dock, 'Markup');
+  const labels = [...dock.querySelectorAll('.tool')].map((b) => b.textContent?.trim() || b.getAttribute('aria-label'));
+  check('the Markup bar has Shapes and Comment', ['Highlight', 'Underline', 'Strikethrough', 'Text', 'Draw', 'Shapes', 'Comment'].every((l) => labels.includes(l)), JSON.stringify(labels));
+  clickButton(dock, 'Shapes');
+  await until(() => !!document.querySelector('.menu'), 'the shapes menu');
+  clickButton(document.querySelector('.menu')!, 'Rectangle');
+  before = app.reader.data;
+  drag(page(), at(0.1, 0.5), at(0.4, 0.7));
+  await until(() => app.reader.data !== before, 'the rectangle');
+  await settled();
+  const rectangle = (await marks()).find((m) => m.kind === 'rectangle');
+  px = await pixels(app.reader.data, 0);
+  const edge = px.at(rectangle ? rectangle.rect.x + rectangle.rect.width / 2 : 0, rectangle ? rectangle.rect.y + 1.2 / 792 : 0);
+  check('a dragged rectangle is a shape annotation drawn in graphite, and Shapes stays chosen', !!rectangle && Math.abs(rectangle.rect.x - 0.1) < 0.01 && Math.abs(rectangle.rect.y + rectangle.rect.height - 0.7) < 0.01
+    && edge[0] < 90 && isWhite(px.at(0.25, 0.6)) && findButton(dock, 'Shapes')?.getAttribute('aria-pressed') === 'true', JSON.stringify({ rect: rectangle?.rect, edge }));
+
+  // Comment: click the page, type (Arabic), Done. Then select it and open it again.
+  clickButton(dock, 'Comment');
+  const text = 'راجع هذا الرقم';
+  pointer(page(), 'pointerdown', ...at(0.7, 0.3));
+  pointer(page(), 'pointerup', ...at(0.7, 0.3));
+  await until(() => !!document.querySelector('.dialog textarea.comment-text'), 'the comment sheet');
+  (document.querySelector('.dialog textarea.comment-text') as HTMLTextAreaElement).value = text;
+  before = app.reader.data;
+  clickButton(lastDialog(), 'Done');
+  await until(() => app.reader.data !== before, 'the comment');
+  await settled();
+  const note = (await marks()).find((m) => m.kind === 'comment');
+  const saved = note ? await pdf.commentText(app.reader.data, 0, note.id) : '';
+  clickButton(dock, 'Close Markup');
+  window.getSelection()?.removeAllRanges();
+  if (note) clickAt(note.rect.x + note.rect.width / 2, note.rect.y + note.rect.height / 2);
+  await until(() => !!box(), 'the comment to be selected');
+  clickButton(box()!, 'Open');
+  await until(() => !!document.querySelector('.dialog textarea.comment-text'), 'the comment to open');
+  const shown = (document.querySelector('.dialog textarea.comment-text') as HTMLTextAreaElement).value;
+  clickButton(lastDialog(), 'Cancel');
+  check('a comment keeps its Arabic text and opens again when selected', saved === text && shown === text && Math.abs((note?.rect.x ?? 0) - 0.7) < 0.01, JSON.stringify({ saved, shown, rect: note?.rect }));
+
+  const closing = app.reader.close();
+  await until(() => !!document.querySelector('.dialog'), 'the save question');
+  clickButton(document.querySelector('.dialog')!, 'Don’t Save');
+  await closing;
+}
 
 const lastDialog = (): HTMLElement => [...document.querySelectorAll<HTMLElement>('.dialog')].pop() ?? document.createElement('div'); // none yet: an empty stand-in
 const toastText = () => document.querySelector('.toast')?.textContent ?? '';

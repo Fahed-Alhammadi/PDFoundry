@@ -78,6 +78,12 @@ const ICONS: Record<string, string> = {
   strike: 'M4 12h16 M16.5 7C15.6 5.4 14 4.5 12 4.5c-2.6 0-4.3 1.4-4.3 3.2 0 1 .5 1.8 1.4 2.4 M8 16.3c.9 1.9 2.5 3.2 4.4 3.2 2.6 0 4.3-1.4 4.3-3.3 0-.7-.2-1.3-.6-1.8',
   caret: 'M7 10l5 5 5-5',
   grid: 'M4 4h7v7H4z M13 4h7v7h-7z M4 13h7v7H4z M15 14v6 M12 17h6',
+  shapes: 'M3.5 3.5h9v9h-9z M16.5 11a4 4 0 1 1 0 8 4 4 0 0 1 0-8z M3 20l7-5',
+  comment: 'M4 4.5h16v11h-8l-5 4v-4H4z M8 8.5h8 M8 11.5h5',
+  rectangle: 'M4 6h16v12H4z',
+  ellipse: 'M12 18c4.4 0 8-2.7 8-6s-3.6-6-8-6-8 2.7-8 6 3.6 6 8 6z',
+  line: 'M5 19L19 5',
+  arrow: 'M5 19L19 5 M11 5h8v8',
 };
 
 export function icon(name: string, size = 20): SVGSVGElement {

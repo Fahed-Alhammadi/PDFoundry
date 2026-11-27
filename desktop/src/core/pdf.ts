@@ -6,12 +6,12 @@
 // fractions of the page as it is displayed (after its rotation), measured from the top-left corner (geometry.ts).
 import {
   LineCapStyle, LineJoinStyle, PDFArray, PDFCheckBox, PDFDocument, PDFDropdown, PDFHexString, PDFName, PDFOptionList, PDFPage, PDFRadioGroup, PDFRef, PDFSignature,
-  PDFStream, PDFTextField, StandardFonts, appendBezierCurve, closePath, decodePDFRawStream, degrees, drawImage, fill, lineTo, moveTo, popGraphicsState,
+  PDFStream, PDFString, PDFTextField, StandardFonts, appendBezierCurve, closePath, decodePDFRawStream, degrees, drawImage, fill, fillAndStroke, lineTo, moveTo, popGraphicsState,
   pushGraphicsState, rectangle, setFillingRgbColor, setGraphicsState, setLineCap, setLineJoin, setLineWidth, setStrokingRgbColor, stroke,
 } from '@cantoo/pdf-lib';
 import type { PDFField, PDFFont, PDFOperator, PDFRawStream } from '@cantoo/pdf-lib';
 import { Encodings } from '@cantoo/pdf-lib/standard-fonts';
-import { addAnnotation, marksOf } from './annotations.ts';
+import { addAnnotation, findMark, isMovable, marksOf, relocate, remove } from './annotations.ts';
 import type { MarkInfo } from './annotations.ts';
 import { displayedRect, displayedSize, placement, userPoint, userRect } from './geometry.ts';
 import type { PageRect, PagePoint, UserBox } from './geometry.ts';
@@ -447,6 +447,153 @@ export async function marks(bytes: Uint8Array, pageIndex: number): Promise<MarkI
   const doc = await open(bytes);
   check(doc, [pageIndex]);
   return marksOf(doc, doc.getPage(pageIndex));
+}
+
+async function markOn(bytes: Uint8Array, pageIndex: number, id: string) {
+  const doc = await open(bytes);
+  check(doc, [pageIndex]);
+  const page = doc.getPage(pageIndex);
+  const mark = findMark(doc, page, id);
+  if (!mark) throw new PdfError('That mark is no longer there.');
+  return { doc, page, mark };
+}
+
+/** Moves or resizes a mark to `rect` of the displayed page. Its appearance is kept exactly as it is. */
+export async function moveMark(bytes: Uint8Array, pageIndex: number, id: string, rect: PageRect): Promise<Uint8Array> {
+  const { doc, page, mark } = await markOn(bytes, pageIndex, id);
+  if (!isMovable(mark.dict)) throw new PdfError('This mark can’t be moved.');
+  if (!(rect.width > 0 && rect.height > 0)) throw new PdfError('A mark can’t be made that small.');
+  relocate(doc, mark.dict, userRect(page, rect));
+  return save(doc);
+}
+
+/** Deletes a mark (PDFoundry's own or another app's), with its appearance. */
+export async function deleteMark(bytes: Uint8Array, pageIndex: number, id: string): Promise<Uint8Array> {
+  const { doc, page, mark } = await markOn(bytes, pageIndex, id);
+  remove(doc, page, mark);
+  return save(doc);
+}
+
+export type ShapeKind = 'rectangle' | 'ellipse' | 'line' | 'arrow';
+/** Every shape's border, in points. */
+const SHAPE_WIDTH = 2;
+/** How long the arrow head's two strokes are, in points. */
+const ARROW = 10;
+
+/** An ellipse inside a box (four Bézier curves). */
+function ellipse(box: UserBox): PDFOperator[] {
+  const [rx, ry] = [box.width / 2, box.height / 2];
+  const [cx, cy] = [box.x + rx, box.y + ry];
+  const [kx, ky] = [0.5523 * rx, 0.5523 * ry];
+  return [
+    moveTo(cx + rx, cy),
+    appendBezierCurve(cx + rx, cy + ky, cx + kx, cy + ry, cx, cy + ry),
+    appendBezierCurve(cx - kx, cy + ry, cx - rx, cy + ky, cx - rx, cy),
+    appendBezierCurve(cx - rx, cy - ky, cx - kx, cy - ry, cx, cy - ry),
+    appendBezierCurve(cx + kx, cy - ry, cx + rx, cy - ky, cx + rx, cy),
+    closePath(),
+  ];
+}
+
+/**
+ * A shape dragged from `from` to `to` (points of the displayed page): a rectangle or ellipse in the box between them,
+ * or a line (an arrow points at `to`). A 2-point border in `rgba`, no fill. Square, Circle and Line annotations.
+ */
+export async function shape(bytes: Uint8Array, pageIndex: number, kind: ShapeKind, from: PagePoint, to: PagePoint, rgba: Rgba): Promise<Uint8Array> {
+  const doc = await open(bytes);
+  check(doc, [pageIndex]);
+  const page = doc.getPage(pageIndex);
+  const [r, g, b, alpha] = rgba;
+  const [x1, y1] = userPoint(page, from);
+  const [x2, y2] = userPoint(page, to);
+  if (Math.hypot(x2 - x1, y2 - y1) < 2) throw new PdfError('There is nothing to place.');
+  const half = SHAPE_WIDTH / 2;
+  const state = alpha < 1 ? { ExtGState: { GS: { Type: 'ExtGState', CA: alpha, ca: alpha } } } : undefined;
+  const ops: PDFOperator[] = [pushGraphicsState(), ...(state ? [setGraphicsState('GS')] : []), setStrokingRgbColor(r, g, b), setLineWidth(SHAPE_WIDTH)];
+  const entries: Record<string, unknown> = { C: [r, g, b], BS: { Type: 'Border', W: SHAPE_WIDTH, S: 'S' }, ...(alpha < 1 ? { CA: alpha } : {}) };
+  let box: UserBox;
+  let subtype: string;
+  if (kind === 'rectangle' || kind === 'ellipse') {
+    const inner = { x: Math.min(x1, x2), y: Math.min(y1, y2), width: Math.abs(x2 - x1), height: Math.abs(y2 - y1) };
+    if (inner.width < 1 || inner.height < 1) throw new PdfError('There is nothing to place.');
+    box = { x: inner.x - half, y: inner.y - half, width: inner.width + SHAPE_WIDTH, height: inner.height + SHAPE_WIDTH };
+    subtype = kind === 'rectangle' ? 'Square' : 'Circle';
+    ops.push(...(kind === 'rectangle' ? [rectangle(inner.x, inner.y, inner.width, inner.height)] : ellipse(inner)), stroke());
+  } else {
+    subtype = 'Line';
+    ops.push(setLineCap(LineCapStyle.Round), setLineJoin(LineJoinStyle.Round), moveTo(x1, y1), lineTo(x2, y2));
+    const reach = kind === 'arrow' ? ARROW + half : half;
+    if (kind === 'arrow') {
+      const angle = Math.atan2(y2 - y1, x2 - x1);
+      for (const side of [-1, 1]) {
+        const a = angle + Math.PI + (side * Math.PI) / 6;
+        ops.push(moveTo(x2, y2), lineTo(x2 + Math.cos(a) * ARROW, y2 + Math.sin(a) * ARROW));
+      }
+    }
+    ops.push(stroke());
+    box = { x: Math.min(x1, x2) - reach, y: Math.min(y1, y2) - reach, width: Math.abs(x2 - x1) + 2 * reach, height: Math.abs(y2 - y1) + 2 * reach };
+    entries.L = [x1, y1, x2, y2];
+    if (kind === 'arrow') entries.LE = ['None', 'OpenArrow'];
+  }
+  ops.push(popGraphicsState());
+  addAnnotation(doc, page, { subtype, box, draw: ops, resources: state, entries });
+  return save(doc);
+}
+
+/** A comment's note icon, in points on the displayed page. */
+const NOTE = 20;
+const NOTE_FILL: [number, number, number] = [1, 0.835, 0.29];
+const NOTE_LINE: [number, number, number] = [0.071, 0.078, 0.11];
+
+/**
+ * A comment (sticky note): the standard note icon with its top-left corner at `at` (a point of the displayed page),
+ * and `text` as its contents, shown in other apps' popups. Empty text adds nothing (the same bytes come back).
+ */
+export async function comment(bytes: Uint8Array, pageIndex: number, at: PagePoint, text: string): Promise<Uint8Array> {
+  if (!text.trim()) return bytes;
+  const doc = await open(bytes);
+  check(doc, [pageIndex]);
+  const page = doc.getPage(pageIndex);
+  const shown = displayedSize(page);
+  const [w, h] = [NOTE / shown.width, NOTE / shown.height];
+  const corner = { x: Math.min(Math.max(0, at.x), 1 - w), y: Math.min(Math.max(0, at.y), 1 - h) };
+  // The icon is drawn upright on the displayed page: each of its points (in points from the icon's top-left) is
+  // turned into page coordinates.
+  const p = (x: number, y: number) => userPoint(page, { x: corner.x + x / shown.width, y: corner.y + y / shown.height });
+  const ops: PDFOperator[] = [
+    pushGraphicsState(), setLineJoin(LineJoinStyle.Round), setLineWidth(1),
+    setFillingRgbColor(...NOTE_FILL), setStrokingRgbColor(...NOTE_LINE),
+    moveTo(...p(2, 2)), lineTo(...p(18, 2)), lineTo(...p(18, 14)), lineTo(...p(9, 14)), lineTo(...p(5, 18)), lineTo(...p(5, 14)), lineTo(...p(2, 14)), closePath(),
+    fillAndStroke(),
+  ];
+  for (const y of [5.5, 8, 10.5]) ops.push(moveTo(...p(5, y)), lineTo(...p(15, y)));
+  ops.push(stroke(), popGraphicsState());
+  addAnnotation(doc, page, {
+    subtype: 'Text',
+    box: userRect(page, { ...corner, width: w, height: h }),
+    draw: ops,
+    entries: { Contents: PDFHexString.fromText(text.trim()), Name: 'Comment', C: NOTE_FILL, Open: false },
+  });
+  return save(doc);
+}
+
+/** The text of a comment. */
+export async function commentText(bytes: Uint8Array, pageIndex: number, id: string): Promise<string> {
+  const { mark } = await markOn(bytes, pageIndex, id);
+  const value = mark.dict.lookup(PDFName.of('Contents'));
+  return value instanceof PDFString || value instanceof PDFHexString ? value.decodeText() : '';
+}
+
+/** Changes a comment's text. Emptied, the comment is deleted. */
+export async function updateComment(bytes: Uint8Array, pageIndex: number, id: string, text: string): Promise<Uint8Array> {
+  const { doc, page, mark } = await markOn(bytes, pageIndex, id);
+  if (mark.kind !== 'comment') throw new PdfError('That mark is not a comment.');
+  if (!text.trim()) remove(doc, page, mark);
+  else {
+    mark.dict.set(PDFName.of('Contents'), PDFHexString.fromText(text.trim()));
+    mark.dict.set(PDFName.of('M'), PDFString.fromDate(new Date()));
+  }
+  return save(doc);
 }
 
 /** A new document with one page per image, each page the size of its image (at most A4-like 842 points long). */

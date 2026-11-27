@@ -137,6 +137,69 @@ export function addAnnotation(doc: PDFDocument, page: PDFPage, a: NewAnnotation)
   return text(dict.lookup(NM))!;
 }
 
+/** The mark with this id on the page, or null. */
+export function findMark(doc: PDFDocument, page: PDFPage, id: string): { ref: PDFRef | undefined; dict: PDFDict; kind: MarkKind } | null {
+  return pageMarks(doc, page).find(({ ref, dict }) => markId(dict, ref) === id) ?? null;
+}
+
+function setNumbers(doc: PDFDocument, dict: PDFDict, key: string, values: number[]): void {
+  dict.set(PDFName.of(key), doc.context.obj(values));
+}
+
+/**
+ * Moves (and resizes) a mark to `box`, in page coordinates: its /Rect changes, its appearance stays exactly as it is
+ * (viewers fit it into the new box). The points other apps may draw it from (an ink drawing's strokes, a line's ends)
+ * move with it.
+ */
+export function relocate(doc: PDFDocument, dict: PDFDict, box: UserBox): void {
+  const from = rectOf(dict);
+  const sx = from.width ? box.width / from.width : 1;
+  const sy = from.height ? box.height / from.height : 1;
+  const map = (values: number[]) => values.map((v, i) => (i % 2 === 0 ? box.x + (v - from.x) * sx : box.y + (v - from.y) * sy));
+  const numbersOf = (array: PDFArray) => array.asArray().map((n) => (n instanceof PDFNumber ? n.asNumber() : 0));
+  const line = dict.lookupMaybe(PDFName.of('L'), PDFArray);
+  if (line) setNumbers(doc, dict, 'L', map(numbersOf(line)));
+  const list = dict.lookupMaybe(PDFName.of('InkList'), PDFArray);
+  if (list) {
+    dict.set(PDFName.of('InkList'), doc.context.obj(list.asArray().map((stroke) => {
+      const points = doc.context.lookup(stroke);
+      return points instanceof PDFArray ? map(numbersOf(points)) : [];
+    })));
+  }
+  setNumbers(doc, dict, 'Rect', [box.x, box.y, box.x + box.width, box.y + box.height]);
+  dict.set(PDFName.of('M'), PDFString.fromDate(new Date()));
+}
+
+/**
+ * Takes a mark off its page and out of the file. For PDFoundry's own marks its appearance (and the images in it) go
+ * too, so nothing of it is left in the saved file; for other apps' marks only the annotation and its popup, since
+ * their appearances might be shared.
+ */
+export function remove(doc: PDFDocument, page: PDFPage, mark: { ref: PDFRef | undefined; dict: PDFDict }): void {
+  const annots = page.node.lookupMaybe(PDFName.of('Annots'), PDFArray);
+  if (annots) {
+    const at = annots.asArray().findIndex((entry) => (mark.ref ? entry === mark.ref : doc.context.lookup(entry) === mark.dict));
+    if (at >= 0) annots.remove(at);
+  }
+  const popup = mark.dict.get(PDFName.of('Popup'));
+  if (popup instanceof PDFRef) {
+    const at = annots?.asArray().indexOf(popup) ?? -1;
+    if (at >= 0) annots!.remove(at);
+    doc.context.delete(popup);
+  }
+  if (isOurs(mark.dict)) {
+    const ap = mark.dict.lookupMaybe(PDFName.of('AP'), PDFDict);
+    for (const [, entry] of ap?.entries() ?? []) {
+      if (!(entry instanceof PDFRef)) continue;
+      const stream = doc.context.lookup(entry);
+      const resources = stream && 'dict' in stream ? (stream as { dict: PDFDict }).dict.lookupMaybe(PDFName.of('Resources'), PDFDict) : undefined;
+      for (const [, image] of resources?.lookupMaybe(PDFName.of('XObject'), PDFDict)?.entries() ?? []) if (image instanceof PDFRef) doc.context.delete(image);
+      doc.context.delete(entry);
+    }
+  }
+  if (mark.ref) doc.context.delete(mark.ref);
+}
+
 /** Adds an annotation to the page's /Annots, touching nothing else (pdf-lib's addAnnot also rewraps the page's drawing). */
 export function appendAnnot(doc: PDFDocument, page: PDFPage, ref: PDFRef): void {
   const annots = page.node.lookupMaybe(PDFName.of('Annots'), PDFArray);
