@@ -84,6 +84,7 @@ const ICONS: Record<string, string> = {
   ellipse: 'M12 18c4.4 0 8-2.7 8-6s-3.6-6-8-6-8 2.7-8 6 3.6 6 8 6z',
   line: 'M5 19L19 5',
   arrow: 'M5 19L19 5 M11 5h8v8',
+  redact: 'M3 6h18v5H3z M3 15h8 M14 15h7 M3 19h12',
 };
 
 export function icon(name: string, size = 20): SVGSVGElement {

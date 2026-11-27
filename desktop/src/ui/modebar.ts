@@ -33,7 +33,7 @@ export type TextTool = { mark: TextMark; rgba: Rgba };
 /** A shape tool: each drag on a page draws one. */
 export type ShapeTool = { kind: ShapeKind; rgba: Rgba };
 /** What a Markup tool is waiting for on the page, if anything. */
-export type Armed = { text: TextTool | null; shape: ShapeTool | null; comment: boolean };
+export type Armed = { text: TextTool | null; shape: ShapeTool | null; comment: boolean; redact: boolean };
 
 export type ModeBarActions = {
   setMode: (mode: ToolMode) => void;
@@ -43,6 +43,8 @@ export type ModeBarActions = {
   draw: () => void;
   shapes: (anchor: HTMLElement) => void;
   comment: () => void;
+  redact: () => void;
+  applyRedactions: () => void;
   signature: () => void;
   initials: () => void;
   date: () => void;
@@ -60,7 +62,7 @@ function tool(name: string, label: string, onclick: (e: MouseEvent) => void, opt
 }
 
 /** The buttons of the bar for `mode`. `armed` is the text tool waiting for a selection, if any. */
-export function modeBar(mode: ToolMode, state: { canUndo: boolean; armed: Armed }, actions: ModeBarActions): HTMLElement[] {
+export function modeBar(mode: ToolMode, state: { canUndo: boolean; armed: Armed; pending: number }, actions: ModeBarActions): HTMLElement[] {
   const undo = [h('span.dock-divider'), tool('undo', 'Undo', () => actions.undo(), { disabled: !state.canUndo })];
   if (mode === 'none') {
     return [
@@ -86,6 +88,11 @@ export function modeBar(mode: ToolMode, state: { canUndo: boolean; armed: Armed 
       tool('draw', 'Draw', () => actions.draw()),
       shapes,
       tool('comment', 'Comment', () => actions.comment(), { pressed: state.armed.comment }),
+      tool('redact', 'Redact', () => actions.redact(), { pressed: state.armed.redact }),
+      ...(state.pending ? [h('button.button.primary.apply-redactions', {
+        type: 'button', onclick: () => actions.applyRedactions(),
+        'aria-label': `Apply ${state.pending === 1 ? '1 redaction' : `${state.pending} redactions`}`,
+      }, `Apply (${state.pending})`)] : []),
       ...undo,
     ];
   }

@@ -339,6 +339,7 @@ async function interfaceTest(checks: { name: string; pass: boolean; detail?: str
 
   await modesTest(check, app);
   await selectionTest(check, app);
+  await redactionTest(check, app);
   await toolsTest(check, app);
   await fillSignTest(check, app);
   await splitTest(check, app);
@@ -635,6 +636,97 @@ async function toolsTest(check: (name: string, pass: boolean, detail?: string) =
 }
 
 type Check = (name: string, pass: boolean, detail?: string) => void;
+
+/** Markup › Redact: areas by dragging and by selecting text, the questions, Apply, and what is left in the file. */
+async function redactionTest(check: Check, app: App): Promise<void> {
+  const reader = document.querySelector('.reader') as HTMLElement;
+  const dock = reader.querySelector('.dock')!;
+  const pageAt = (i: number) => reader.querySelectorAll<HTMLElement>('.page')[i];
+  const settled = () => until(() => !reader.classList.contains('busy') && !!dock.querySelector('.tool'), 'the change to be applied');
+  const made = await PDFDocument.create();
+  const font = await made.embedFont(StandardFonts.Helvetica);
+  const first = made.addPage([612, 792]);
+  first.drawText('Secret Kilo word', { x: 72, y: 660, size: 36, font });
+  first.drawText('Keep Lima here', { x: 72, y: 560, size: 36, font });
+  made.addPage([612, 792]).drawText('Second page November', { x: 72, y: 660, size: 36, font });
+  const sample = await made.save();
+  const file = await api.devCreate('Redaction test', sample);
+  await app.reader.open(file);
+  await until(() => reader.querySelectorAll('.page').length === 2, 'the redaction sample');
+  const opened = app.reader.data;
+  const found = async (bytes: Uint8Array, word: string) => {
+    const doc = await openPdf(bytes);
+    const matches = await search(doc, word);
+    void doc.loadingTask.destroy();
+    return matches;
+  };
+  const kilo = (await found(sample, 'Kilo'))[0].rects[0];
+  const at = (i: number, fx: number, fy: number) => {
+    const box = pageAt(i).getBoundingClientRect();
+    return [box.left + box.width * fx, box.top + box.height * fy] as const;
+  };
+  const dragBox = (r: Box) => {
+    const [x1, y1] = at(0, r.x - 0.01, r.y - 0.01);
+    const [x2, y2] = at(0, r.x + r.width + 0.01, r.y + r.height + 0.01);
+    pointer(pageAt(0), 'pointerdown', x1, y1);
+    pointer(pageAt(0), 'pointermove', x2, y2);
+    pointer(pageAt(0), 'pointerup', x2, y2);
+  };
+
+  clickButton(dock, 'Markup');
+  clickButton(dock, 'Redact');
+  dragBox(kilo);
+  check('a dragged area is marked in red and waits for Apply; nothing is changed yet', app.reader.pendingCount === 1 && !!pageAt(0).querySelector('.redact-box')
+    && hasButton(dock, 'Apply (1)') && app.reader.data === opened && !app.reader.dirty, JSON.stringify({ pending: app.reader.pendingCount }));
+
+  // Closing Markup with areas waiting asks; Cancel keeps them, Discard drops them.
+  clickButton(dock, 'Close Markup');
+  await until(() => !!document.querySelector('.dialog'), 'the redaction question');
+  const asked = document.querySelector('.dialog h2')?.textContent;
+  clickButton(lastDialog(), 'Cancel');
+  await wait(50);
+  const kept = app.reader.pendingCount === 1 && hasButton(dock, 'Redact');
+  clickButton(dock, 'Close Markup');
+  await until(() => !!document.querySelector('.dialog'), 'the redaction question');
+  clickButton(lastDialog(), 'Discard');
+  await until(() => hasButton(dock, 'Markup'), 'the reading bar');
+  check('leaving Markup with areas waiting asks “Apply the redactions?”; Cancel keeps them, Discard drops them',
+    asked === 'Apply the redactions?' && kept && app.reader.pendingCount === 0 && !pageAt(0).querySelector('.redact-box') && app.reader.data === opened, asked ?? '');
+
+  // Selected text is marked too. Then Apply, after the warning.
+  clickButton(dock, 'Markup');
+  clickButton(dock, 'Redact');
+  await until(() => [...pageAt(0).querySelectorAll('.textLayer span')].some((s) => s.textContent?.includes('Lima')), 'the text layer');
+  const span = [...pageAt(0).querySelectorAll('.textLayer span')].find((s) => s.textContent?.includes('Lima'))!;
+  const range = document.createRange();
+  const startAt = span.textContent!.indexOf('Lima');
+  range.setStart(span.firstChild!, startAt);
+  range.setEnd(span.firstChild!, startAt + 4);
+  window.getSelection()!.removeAllRanges();
+  window.getSelection()!.addRange(range);
+  pointer(pageAt(0), 'pointerup', ...at(0, 0.5, 0.5));
+  await until(() => app.reader.pendingCount === 1, 'the selected text to be marked');
+  dragBox(kilo);
+  clickButton(dock, 'Apply (2)');
+  await until(() => !!document.querySelector('.dialog'), 'the apply warning');
+  const warning = lastDialog().textContent ?? '';
+  clickButton(lastDialog(), 'Apply');
+  await until(() => app.reader.data !== opened, 'the redaction');
+  await settled();
+  const after = app.reader.data;
+  const px = await pixels(after, 0);
+  const black = px.at(kilo.x + kilo.width / 2, kilo.y + kilo.height / 2);
+  check('Apply warns first, then the words are gone from the text and the areas are black', /Apply Redactions\?/.test(warning) && /removes everything under the boxes for good/.test(warning)
+    && (await found(after, 'Kilo')).length === 0 && (await found(after, 'Lima')).length === 0 && (await found(after, 'Secret')).length === 0
+    && black.every((v) => v < 30) && !hasButton(dock, 'Apply (1)') && app.reader.pendingCount === 0 && app.reader.dirty, JSON.stringify({ black }));
+  check('the other page keeps its text', (await found(after, 'November')).some((m) => m.page === 1));
+  clickButton(dock, 'Undo');
+  await until(() => app.reader.data !== after, 'the undo');
+  await settled();
+  check('Undo brings the redacted page back', (await found(app.reader.data, 'Kilo')).length === 1);
+
+  check('back to the file as it was, nothing to save', !app.reader.dirty && (await app.reader.close()) === true);
+}
 
 /** Selecting a mark (move, resize, Delete, Undo), Shapes and Comment, driven with pointer events and keys. */
 async function selectionTest(check: Check, app: App): Promise<void> {

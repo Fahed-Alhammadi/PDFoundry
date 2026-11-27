@@ -77,6 +77,36 @@ export function near(actual: Box, expected: Box, what: string, tolerance = 1e-3)
   }
 }
 
+/** The text of every page, as pdf.js extracts it (the engine the window uses), with the password when it has one. */
+export async function pageTexts(bytes: Uint8Array, password?: string): Promise<string[]> {
+  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const doc = await pdfjs.getDocument({ data: bytes.slice(), password, useSystemFonts: false, verbosity: 0 }).promise;
+  const out: string[] = [];
+  for (let n = 1; n <= doc.numPages; n++) {
+    const content = await (await doc.getPage(n)).getTextContent();
+    out.push(content.items.map((i) => ('str' in i ? i.str : '')).join(' ').replace(/\s+/g, ' ').trim());
+  }
+  await doc.loadingTask.destroy();
+  return out;
+}
+
+/**
+ * Where `word` can still be found in a saved file: its raw bytes, and every stream decoded, as plain text, as hex
+ * (how pdf-lib writes text with standard fonts) and as UTF-16 (how text strings are written). Empty = nowhere.
+ */
+export async function traces(bytes: Uint8Array, word: string): Promise<string[]> {
+  const hex = Buffer.from(word, 'latin1').toString('hex');
+  const utf16 = Buffer.from(word, 'utf16le').swap16().toString('hex');
+  const forms = [word, hex, hex.toUpperCase(), utf16, utf16.toUpperCase()];
+  const found: string[] = [];
+  const raw = Buffer.from(bytes).toString('latin1');
+  for (const f of forms) if (raw.includes(f)) found.push(`raw file: ${f}`);
+  (await everyStream(bytes)).forEach((text, i) => {
+    for (const f of forms) if (text.includes(f)) found.push(`stream ${i}: ${f}`);
+  });
+  return found;
+}
+
 /** Every stream in the file, decoded where it can be (Flate), as latin1 text. Includes objects nothing refers to. */
 export function everyStream(bytes: Uint8Array): Promise<string[]> {
   return PDFDocument.load(bytes, { updateMetadata: false }).then((doc) => {

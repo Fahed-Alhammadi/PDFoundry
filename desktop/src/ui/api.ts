@@ -56,7 +56,9 @@ export const api = {
   clearRecent: (): Promise<void> => bridge.call('clearRecent'),
   reveal: (file: string): Promise<void> => bridge.call('reveal', file),
   pickImages: (): Promise<PickedImage[]> => bridge.call('pickImages'),
-  setDocument: (file: string | null, edited: boolean): Promise<void> => bridge.call('setDocument', file, edited),
+  setDocument: (file: string | null, edited: boolean, redactions = 0): Promise<void> => bridge.call('setDocument', file, edited, redactions),
+  /** Closes the window (asking again about unsaved changes, as closing it does). */
+  closeWindow: (): Promise<void> => bridge.call('closeWindow'),
   closeNow: (): Promise<void> => bridge.call('closeNow'),
 
   /** Saved signatures, or saved initials (kept apart). */

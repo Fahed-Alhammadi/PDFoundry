@@ -45,6 +45,8 @@ let store: Store;
 const pending: string[] = [];
 /** Does the open document have changes that are not saved? Reported by the window. */
 let unsaved = false;
+/** How many areas the open document has marked for redaction and not applied. Closing the window asks about them first. */
+let redactions = 0;
 /** Set once the user has answered the "save your changes?" question, so the window may really close. */
 let closing = false;
 /** Development only (the self-test): the answer to the next save or open dialog, so no system dialog is shown. */
@@ -233,8 +235,9 @@ const handlers: Record<string, Handler> = {
   },
 
   // The open document, as the window reports it: shown in the title bar, and asked about before closing.
-  setDocument: (file: string | null, edited: boolean) => {
+  setDocument: (file: string | null, edited: boolean, marked?: unknown) => {
     unsaved = !!file && edited === true;
+    redactions = file && typeof marked === 'number' && Number.isInteger(marked) && marked > 0 ? marked : 0;
     store.setCurrent(file); // kept on the recent list, so it can always be saved
     if (!win) return;
     const name = typeof file === 'string' ? path.basename(file) : '';
@@ -248,6 +251,11 @@ const handlers: Record<string, Handler> = {
   closeNow: () => {
     closing = true;
     unsaved = false;
+    redactions = 0;
+    win?.close();
+  },
+  /** The window dealt with its redactions after the close question: closing goes on (and asks about unsaved changes). */
+  closeWindow: () => {
     win?.close();
   },
 
@@ -429,7 +437,22 @@ function createWindow(): void {
   win.once('ready-to-show', () => win?.show());
   // Closing the window (or quitting) with unsaved changes asks first, like any document app.
   win.on('close', (e) => {
-    if (closing || !unsaved || !win) return;
+    if (closing || !win) return;
+    if (redactions > 0) {
+      // Areas marked for redaction are only in the window: apply them (then the save question) or leave them.
+      e.preventDefault();
+      const choice = dialog.showMessageBoxSync(win, {
+        type: 'question',
+        message: 'Apply the redactions?',
+        buttons: ['Apply', 'Discard', 'Cancel'],
+        defaultId: 0,
+        cancelId: 2,
+        noLink: true,
+      });
+      if (choice < 2) send('redactionsOnClose', choice === 0 ? 'apply' : 'discard'); // the window calls closeWindow
+      return;
+    }
+    if (!unsaved) return;
     e.preventDefault();
     const answer = dialog.showMessageBoxSync(win, {
       type: 'question',

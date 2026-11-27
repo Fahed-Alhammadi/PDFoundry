@@ -33,7 +33,7 @@ export type SourceImage = { bytes: Uint8Array; type: 'png' | 'jpeg' };
 
 const LETTER: [number, number] = [612, 792];
 
-async function open(bytes: Uint8Array): Promise<PDFDocument> {
+export async function open(bytes: Uint8Array): Promise<PDFDocument> {
   try {
     return await PDFDocument.load(bytes, { updateMetadata: false });
   } catch (e) {
@@ -42,12 +42,12 @@ async function open(bytes: Uint8Array): Promise<PDFDocument> {
   }
 }
 
-function save(doc: PDFDocument): Promise<Uint8Array> {
+export function save(doc: PDFDocument): Promise<Uint8Array> {
   // Form fields are never redrawn behind the caller's back: only `fillFields` draws, and only what it filled.
   return doc.save({ useObjectStreams: true, updateFieldAppearances: false });
 }
 
-function check(doc: PDFDocument, pages: number[]): number[] {
+export function check(doc: PDFDocument, pages: number[]): number[] {
   const count = doc.getPageCount();
   const unique = [...new Set(pages)];
   for (const p of unique) if (!Number.isInteger(p) || p < 0 || p >= count) throw new PdfError(`There is no page ${p + 1}.`);
