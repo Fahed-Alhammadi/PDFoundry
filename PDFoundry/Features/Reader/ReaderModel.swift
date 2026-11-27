@@ -76,7 +76,13 @@ final class ReaderModel {
     /// Where the last item was placed, in the reader's space, so the next one doesn't start on top of it.
     @ObservationIgnored private(set) var lastPlacedRect: CGRect?
     var drawing = PKDrawing()
-    var selectedAnnotation: AnnotationSelection?
+    var selectedAnnotation: AnnotationSelection? {
+        didSet {
+            // A drag whose end never arrived (SwiftUI may not call onEnded) is finished when the selection changes,
+            // so its start can't be applied to the next mark.
+            if oldValue?.annotation !== selectedAnnotation?.annotation { finishDrag() }
+        }
+    }
     var hint: String?
     var errorMessage: String?
 
@@ -105,7 +111,7 @@ final class ReaderModel {
     }
 
     /// The selected mark as it was when the current drag began, so the finished drag is one Undo step.
-    @ObservationIgnored private var dragStart: AnnotationGeometry?
+    @ObservationIgnored private var dragStart: (annotation: PDFAnnotation, geometry: AnnotationGeometry)?
     /// Changes whenever the page view scrolls or zooms, so overlays drawn over the page follow it.
     var viewportTick = 0
 
@@ -238,7 +244,8 @@ final class ReaderModel {
     /// the document. The steps so far can't be undone one by one after that (their pages are gone).
     @discardableResult
     func removePassword() -> Bool {
-        guard canEdit, let old = password else { return false }
+        guard canEdit, let old = password, !askAboutRedactions(before: .removePassword) else { return false }
+        selectedAnnotation = nil
         syncFields()
         guard let document else { return false }
         let plain = document.isEncrypted ? PDFOperations.unencrypted(document) : document
@@ -492,7 +499,15 @@ final class ReaderModel {
     }
 
     /// What was asked for while redaction boxes are waiting: closing Redact, or leaving the document.
-    enum LeaveRequest { case closeRedact, leaveDocument }
+    enum LeaveRequest { case closeRedact, leaveDocument, revert, removePassword, undo, organizePages }
+
+    /// Before something that changes or swaps pages while redaction boxes wait: asks "Apply the redactions?" and
+    /// returns true (the caller stops; the reader carries on once the question is answered). False when no boxes wait.
+    func askAboutRedactions(before request: LeaveRequest) -> Bool {
+        guard pendingRedactionCount > 0 else { return false }
+        leaveRequest = request
+        return true
+    }
 
     /// Set while the reader asks "Apply the redactions?".
     var leaveRequest: LeaveRequest?
@@ -630,18 +645,21 @@ final class ReaderModel {
     /// until `finishDrag`.
     func dragSelected(toViewRect viewRect: CGRect) {
         guard let selected = selectedAnnotation, selected.isMovable, let pdfView else { return }
-        let start = dragStart ?? AnnotationGeometry(selected.annotation)
-        dragStart = start
+        // A start kept for another mark (its drag never ended) is finished first, as its own step.
+        if let drag = dragStart, drag.annotation !== selected.annotation { finishDrag() }
+        let start = dragStart?.geometry ?? AnnotationGeometry(selected.annotation)
+        dragStart = (selected.annotation, start)
         start.moved(to: pdfView.convert(viewRect, to: selected.page).standardized).apply(to: selected.annotation)
         viewportTick &+= 1
     }
 
-    /// The finger is lifted: the drag becomes one Undo step and the file is saved.
+    /// The finger is lifted: the drag becomes one Undo step and the file is saved. The start is always cleared,
+    /// even when nothing is selected any more.
     func finishDrag() {
-        guard let selected = selectedAnnotation, let start = dragStart else { return }
+        guard let drag = dragStart else { return }
         dragStart = nil
-        guard AnnotationGeometry(selected.annotation) != start else { return }
-        record(.changed([(selected.annotation, start)]))
+        guard AnnotationGeometry(drag.annotation) != drag.geometry else { return }
+        record(.changed([(drag.annotation, drag.geometry)]))
     }
 
     /// Moves or resizes the selected mark to `viewRect` in the page view, as one finished change.
@@ -678,9 +696,11 @@ final class ReaderModel {
     }
 
     func undo() {
+        guard !askAboutRedactions(before: .undo) else { return }
+        // Cleared first: a drag left unfinished becomes its own step, which this Undo then takes back.
+        selectedAnnotation = nil
         syncFields()
         guard let last = undoStack.popLast() else { return }
-        selectedAnnotation = nil
         switch last {
         case .added(let added):
             for (page, annotation) in added { page.removeAnnotation(annotation) }
@@ -922,7 +942,10 @@ final class ReaderModel {
     /// original contents are written with it (as on Android), so Revert never quietly unprotects a file.
     @discardableResult
     func revertToOriginal() -> Bool {
-        guard let original, canRevert, let restored = PDFDocument(data: original) else { return false }
+        guard let original, canRevert, !askAboutRedactions(before: .revert),
+              let restored = PDFDocument(data: original) else { return false }
+        // Cleared before writing: an unfinished drag must not be saved over the original afterwards.
+        selectedAnnotation = nil
         let keep = restored.isEncrypted ? nil : password
         var written = false
         var error: NSError?

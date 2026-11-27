@@ -14,7 +14,7 @@ import Vision
 enum OCR {
     static let nothingFoundMessage = "No text was found on these pages."
     /// Pages are read at this resolution.
-    static let dpi: CGFloat = 300
+    nonisolated static let dpi: CGFloat = 300
 
     /// One recognised line: its text and where it is, as a fraction of the page as shown (origin bottom left).
     struct Line: Sendable {
@@ -41,18 +41,45 @@ enum OCR {
         languages.contains { $0.hasPrefix("ar") }
     }
 
+
+    /// What the work away from the main thread needs about one page. Core Graphics reads a PDF page from any thread;
+    /// PDFKit's own objects stay on the main actor.
+    nonisolated struct PageSource: @unchecked Sendable {
+        let content: CGPDFPage
+        /// Page space to the page as shown.
+        let shown: CGAffineTransform
+        /// The page as shown, in points.
+        let size: CGSize
+        let media: CGRect
+        let crop: CGRect
+
+        @MainActor init?(_ page: PDFPage) {
+            guard let content = page.pageRef else { return nil }
+            self.content = content
+            shown = PageStamps.shownTransform(of: page)
+            size = PageImage.displayedSize(of: page)
+            media = page.bounds(for: .mediaBox)
+            crop = page.bounds(for: .cropBox)
+        }
+    }
+
     /// New pages, with invisible text, for the pages at `indexes` on which text was found. Nothing in `document`
     /// changes. Throws `CancellationError` when the task is cancelled. `progress` is told after each page.
+    /// Drawing, reading and building each page happen away from the main thread, so the progress sheet stays live.
     static func rebuild(_ document: PDFDocument, pages indexes: [Int],
                         progress: (Int, Int) -> Void) async throws -> [(index: Int, page: PDFPage)] {
         var results: [(index: Int, page: PDFPage)] = []
         for (step, index) in indexes.enumerated() {
             try Task.checkCancellation()
-            guard let page = document.page(at: index), let image = PageImage.image(of: page, dpi: dpi) else { continue }
-            let lines = try await recognize(image)
+            guard let page = document.page(at: index), let source = PageSource(page) else { continue }
+            let built = try await read(source)
             try Task.checkCancellation()
-            if !lines.isEmpty, let rebuilt = rebuilt(page, lines: lines) {
-                results.append((index, rebuilt))
+            if let built, let made = PDFOperations.detachedPage(from: built) {
+                for box in [PDFDisplayBox.cropBox, .bleedBox, .trimBox, .artBox] {
+                    made.setBounds(page.bounds(for: box), for: box)
+                }
+                made.rotation = page.rotation
+                results.append((index, made))
             }
             progress(step + 1, indexes.count)
         }
@@ -77,8 +104,36 @@ enum OCR {
         return rebuilt.count
     }
 
+    /// Draws, reads and rebuilds one page away from the main thread: the new page's PDF bytes, or nil when no text
+    /// was found.
     @concurrent
-    private nonisolated static func recognize(_ image: CGImage) async throws -> [Line] {
+    private nonisolated static func read(_ source: PageSource) async throws -> Data? {
+        guard let image = render(source, dpi: dpi) else { return nil }
+        try Task.checkCancellation()
+        let lines = try recognize(image)
+        guard !lines.isEmpty else { return nil }
+        try Task.checkCancellation()
+        return build(source, lines: lines)
+    }
+
+    /// The page's content as shown (crop box, rotation), on white, without annotations.
+    nonisolated static func render(_ source: PageSource, dpi: CGFloat) -> CGImage? {
+        let scale = dpi / 72
+        let width = max(1, Int((source.size.width * scale).rounded())), height = max(1, Int((source.size.height * scale).rounded()))
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.interpolationQuality = .high
+        context.scaleBy(x: CGFloat(width) / source.size.width, y: CGFloat(height) / source.size.height)
+        context.concatenate(source.shown)
+        context.clip(to: source.crop)
+        context.drawPDFPage(source.content)
+        return context.makeImage()
+    }
+
+    private nonisolated static func recognize(_ image: CGImage) throws -> [Line] {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true
@@ -91,25 +146,22 @@ enum OCR {
         }
     }
 
-    /// `page`'s content, unchanged, with `lines` as invisible text, on a new page of the same size, crop box and
-    /// rotation. Annotations are not drawn: they are moved over by the caller.
-    static func rebuilt(_ page: PDFPage, lines: [Line]) -> PDFPage? {
-        guard let content = page.pageRef else { return nil }
-        let media = page.bounds(for: .mediaBox)
+    /// The page's content, unchanged, with `lines` as invisible text, as the bytes of a one-page PDF of the same
+    /// media box. Annotations are not drawn: they are moved over by the caller.
+    nonisolated static func build(_ source: PageSource, lines: [Line]) -> Data? {
         let data = NSMutableData()
-        var box = media
+        var box = source.media
         guard let consumer = CGDataConsumer(data: data as CFMutableData),
               let context = CGContext(consumer: consumer, mediaBox: &box, nil) else { return nil }
-        context.beginPDFPage([kCGPDFContextMediaBox as String: NSValue(cgRect: media)] as CFDictionary)
+        context.beginPDFPage([kCGPDFContextMediaBox as String: NSValue(cgRect: source.media)] as CFDictionary)
         context.saveGState()
-        context.drawPDFPage(content)
+        context.drawPDFPage(source.content)
         context.restoreGState()
 
         // The words are placed in the page as shown, then mapped back to page space.
-        let shown = PageStamps.shownTransform(of: page)
-        let size = PageImage.displayedSize(of: page)
+        let size = source.size
         context.saveGState()
-        context.concatenate(shown.inverted())
+        context.concatenate(source.shown.inverted())
         context.setTextDrawingMode(.invisible)
         for line in lines {
             let rect = CGRect(x: line.box.minX * size.width, y: line.box.minY * size.height,
@@ -117,7 +169,7 @@ enum OCR {
             guard rect.width > 1, rect.height > 1 else { continue }
             let fontSize = rect.height * 0.85
             let font = CTFontCreateWithName("Helvetica" as CFString, fontSize, nil)
-            let attributed = NSAttributedString(string: line.text, attributes: [.font: font, .foregroundColor: UIColor.black.cgColor])
+            let attributed = NSAttributedString(string: line.text, attributes: [.font: font, .foregroundColor: CGColor(gray: 0, alpha: 1)])
             let ctLine = CTLineCreateWithAttributedString(attributed)
             let width = CTLineGetTypographicBounds(ctLine, nil, nil, nil)
             guard width > 0 else { continue }
@@ -129,12 +181,6 @@ enum OCR {
         context.restoreGState()
         context.endPDFPage()
         context.closePDF()
-
-        guard let made = PDFOperations.detachedPage(from: data as Data) else { return nil }
-        for box in [PDFDisplayBox.cropBox, .bleedBox, .trimBox, .artBox] {
-            made.setBounds(page.bounds(for: box), for: box)
-        }
-        made.rotation = page.rotation
-        return made
+        return data as Data
     }
 }

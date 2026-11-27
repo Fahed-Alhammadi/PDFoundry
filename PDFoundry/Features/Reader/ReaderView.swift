@@ -102,7 +102,8 @@ struct ReaderView: View {
                 Button("Apply") {
                     let request = model.leaveRequest
                     model.applyRedactions()
-                    finishLeaving(request)
+                    // Undo right after Apply would only take the redactions back again.
+                    if request != .undo { finishLeaving(request) }
                 }
                 Button("Discard", role: .destructive) {
                     let request = model.leaveRequest
@@ -172,6 +173,10 @@ struct ReaderView: View {
         switch request {
         case .closeRedact: model.toolMode = .none
         case .leaveDocument: dismiss()
+        case .revert: askToRevert = true
+        case .removePassword: askToRemovePassword = true
+        case .undo: model.undo()
+        case .organizePages: showPages = true
         case nil: break
         }
     }
@@ -304,7 +309,7 @@ struct ReaderView: View {
         if model.document != nil, !model.isLocked, model.mode == .reading {
             if model.canEdit {
                 ModeBar(model: model) {
-                    showPages = true
+                    if !model.askAboutRedactions(before: .organizePages) { showPages = true }
                 } onText: {
                     newText = ""
                     textPromptTitle = "Add Text"
@@ -391,12 +396,12 @@ struct ReaderView: View {
                     Button("Watermark", systemImage: "seal") { open(.watermark) }
                     Divider()
                     if model.isProtected {
-                        Button("Remove Password", systemImage: "lock.open") { askToRemovePassword = true }
+                        Button("Remove Password", systemImage: "lock.open") { if !model.askAboutRedactions(before: .removePassword) { askToRemovePassword = true } }
                     } else {
                         Button("Protect with Password", systemImage: "lock") { showProtect = true }
                     }
                     Divider()
-                    Button("Revert to Original", systemImage: "arrow.uturn.backward.circle", role: .destructive) { askToRevert = true }
+                    Button("Revert to Original", systemImage: "arrow.uturn.backward.circle", role: .destructive) { if !model.askAboutRedactions(before: .revert) { askToRevert = true } }
                         .disabled(!model.canRevert)
                 }
             }

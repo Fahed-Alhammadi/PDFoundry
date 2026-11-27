@@ -44,6 +44,19 @@ struct OCRTests {
         !(document?.findString(text, withOptions: .caseInsensitive).isEmpty ?? true)
     }
 
+    /// The page is drawn for reading away from the main thread with Core Graphics; it must match what the reader shows.
+    @Test func pageDrawnOffTheMainThreadMatchesTheReader() async throws {
+        let crop = CGRect(x: 30, y: 50, width: 520, height: 690)
+        let data = MarkupFixture.textPDF(["Turned and cropped words"], rotation: 90, crop: crop)
+        let page = try #require(PDFDocument(data: data)?.page(at: 0))
+        let source = try #require(OCR.PageSource(page))
+        let expected = try #require(PageImage.image(of: page, dpi: 72))
+        let drawn = try #require(await Task.detached { OCR.render(source, dpi: 72) }.value)
+        #expect(drawn.width == expected.width && drawn.height == expected.height)
+        #expect(MarkupFixture.difference(drawn, expected) < 0.01)
+        #expect(MarkupFixture.darkCount(drawn) > 50)
+    }
+
     @Test func pagesWithoutTextAreFound() throws {
         let document = try #require(PDFDocument(url: try mixedFile()))
         #expect(OCR.pagesNeedingText(document) == [0, 2])
