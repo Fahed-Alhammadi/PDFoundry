@@ -12,6 +12,14 @@ export type InkKind = 'signature' | 'initials';
 const DEFAULTS: Settings = { appearance: 'system', welcomed: false };
 const MAX_RECENT = 60;
 
+/** What Split and Export as Images may write into a picked folder. */
+export type PartExtension = 'pdf' | 'png' | 'jpg';
+
+function checkedExtension(extension: unknown): PartExtension {
+  if (extension === 'pdf' || extension === 'png' || extension === 'jpg') return extension;
+  throw new Error('Files of that kind can’t be saved.');
+}
+
 /** A file name without folders or reserved characters, at most 120 characters, without ".pdf". */
 export function cleanName(name: string): string {
   const base = name
@@ -187,9 +195,10 @@ export class Store {
     return this.remember(target);
   }
 
-  /** Split PDF: which of these names (without ".pdf") are already taken in `folder`. */
-  existing(folder: string, names: string[]): string[] {
-    return names.filter((name) => existsSync(path.join(path.resolve(folder), `${cleanName(name)}.pdf`)));
+  /** Split PDF and Export as Images: which of these names (without their extension) are already taken in `folder`. */
+  existing(folder: string, names: string[], extension: PartExtension = 'pdf'): string[] {
+    const ext = checkedExtension(extension);
+    return names.filter((name) => existsSync(path.join(path.resolve(folder), `${cleanName(name)}.${ext}`)));
   }
 
   /**
@@ -198,14 +207,15 @@ export class Store {
    * being replaced. Nothing is written when any part would replace a file in `keep` (the source), the open document
    * or any file on the recent list. Returns the paths written, in order.
    */
-  saveParts(folder: string, parts: { name: string; bytes: Uint8Array }[], keepBoth: boolean, keep: string[] = []): string[] {
+  saveParts(folder: string, parts: { name: string; bytes: Uint8Array }[], keepBoth: boolean, keep: string[] = [], extension: PartExtension = 'pdf'): string[] {
+    const ext = checkedExtension(extension);
     const dir = path.resolve(folder);
     if (!statSync(dir).isDirectory()) throw new Error('That folder could not be found.');
     const used = new Set<string>();
     const targets = parts.map(({ name }) => {
       const base = cleanName(name);
-      let target = path.join(dir, `${base}.pdf`);
-      for (let n = 2; keepBoth && (existsSync(target) || used.has(target.toLowerCase())); n++) target = path.join(dir, `${base} ${n}.pdf`);
+      let target = path.join(dir, `${base}.${ext}`);
+      for (let n = 2; keepBoth && (existsSync(target) || used.has(target.toLowerCase())); n++) target = path.join(dir, `${base} ${n}.${ext}`);
       used.add(target.toLowerCase());
       return target;
     });

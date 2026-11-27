@@ -29,6 +29,7 @@ async function start(): Promise<void> {
     openDocument: (file) => void reader.open(file),
     openFile: () => reader.file,
     contents: async (file) => {
+      if (file === reader.file && !(await reader.settleRedactions())) throw new Error('The redactions were neither applied nor discarded.');
       // The open document's unsaved edits of a protected file are decrypted: refuse them as merge refuses the file.
       if (reader.passwordFor(file)) throw new Error('A PDF protected with a password can’t be merged. Use More › Remove Password first.');
       return reader.unsaved(file) ?? (await api.read(file));
@@ -37,10 +38,19 @@ async function start(): Promise<void> {
   const settings = new SettingsView(info);
   const tools = new ToolsView({
     library,
+    openWith: async (file, tool) => {
+      if (!(await reader.open(file))) return;
+      show('documents');
+      if (tool === 'numbers') await reader.pageNumbers();
+      else if (tool === 'watermark') await reader.watermark();
+      else if (tool === 'ocr') await reader.makeSearchable();
+      else reader.startRedact();
+    },
     openFile: () => reader.file,
     unsaved: (file) => reader.unsaved(file),
     passwordFor: (file) => reader.passwordFor(file),
     protectOpen: () => reader.protectWithPassword(),
+    settleRedactions: () => reader.settleRedactions(),
   });
 
   const nav = (target: Route, symbol: string, label: string) =>
@@ -113,6 +123,11 @@ async function start(): Promise<void> {
     else if (event === 'opened') {
       show('documents');
       void library.refresh().then(() => library.opened(data as Opened));
+    } else if (event === 'redactionsOnClose') {
+      // Closing the window with areas marked for redaction: the user chose Apply or Discard.
+      void (data === 'apply' ? reader.applyRedactions(false) : Promise.resolve(reader.dropRedactions())).then((done) => {
+        if (done) void api.closeWindow();
+      });
     } else if (event === 'saveAndClose') {
       // The user chose Save in the "save your changes?" question on closing the window.
       void reader.save().then((saved) => {

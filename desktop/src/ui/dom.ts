@@ -78,6 +78,18 @@ const ICONS: Record<string, string> = {
   strike: 'M4 12h16 M16.5 7C15.6 5.4 14 4.5 12 4.5c-2.6 0-4.3 1.4-4.3 3.2 0 1 .5 1.8 1.4 2.4 M8 16.3c.9 1.9 2.5 3.2 4.4 3.2 2.6 0 4.3-1.4 4.3-3.3 0-.7-.2-1.3-.6-1.8',
   caret: 'M7 10l5 5 5-5',
   grid: 'M4 4h7v7H4z M13 4h7v7h-7z M4 13h7v7H4z M15 14v6 M12 17h6',
+  shapes: 'M3.5 3.5h9v9h-9z M16.5 11a4 4 0 1 1 0 8 4 4 0 0 1 0-8z M3 20l7-5',
+  comment: 'M4 4.5h16v11h-8l-5 4v-4H4z M8 8.5h8 M8 11.5h5',
+  rectangle: 'M4 6h16v12H4z',
+  ellipse: 'M12 18c4.4 0 8-2.7 8-6s-3.6-6-8-6-8 2.7-8 6 3.6 6 8 6z',
+  line: 'M5 19L19 5',
+  arrow: 'M5 19L19 5 M11 5h8v8',
+  redact: 'M3 6h18v5H3z M3 15h8 M14 15h7 M3 19h12',
+  numbers: 'M6 3h12v18H6z M10 17h4 M11 15.5l1-1v4',
+  watermark: 'M6 3h12v18H6z M8.5 15.5l7-7',
+  compress: 'M7 3h7l5 5v13H7z M10 10l2 2 2-2 M10 16l2-2 2 2',
+  exportImages: 'M4 5h11v10H4z M4 12l3-3 3 3 2-2 3 3 M18 9v10H8',
+  searchable: 'M5 4h9l5 5v11H5z M9 13h6 M9 16h4 M17.5 17.5l3 3 M15.5 18.5a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
 };
 
 export function icon(name: string, size = 20): SVGSVGElement {

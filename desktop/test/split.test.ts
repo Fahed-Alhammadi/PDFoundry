@@ -59,6 +59,24 @@ test('split makes one document per part, with the right pages', async () => {
 
 const md5 = (bytes: Uint8Array) => createHash('md5').update(bytes).digest('hex');
 
+test('exported pictures are written with their own extension, and Keep Both numbers them', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pdfoundry-export-'));
+  try {
+    const store = new Store(join(root, 'data'));
+    const pictures = [{ name: 'Report page 1', bytes: new Uint8Array([1]) }, { name: 'Report page 2', bytes: new Uint8Array([2]) }];
+    assert.deepEqual(store.existing(root, pictures.map((p) => p.name), 'png'), []);
+    const written = store.saveParts(root, pictures, false, [], 'png');
+    assert.deepEqual(written.map((f) => basename(f)), ['Report page 1.png', 'Report page 2.png']);
+    assert.deepEqual(store.existing(root, pictures.map((p) => p.name), 'png'), ['Report page 1', 'Report page 2']);
+    assert.deepEqual(store.existing(root, pictures.map((p) => p.name)), [], 'a PDF of the same name is another file');
+    assert.deepEqual(store.saveParts(root, pictures, true, [], 'jpg').map((f) => basename(f)), ['Report page 1.jpg', 'Report page 2.jpg']);
+    assert.deepEqual(store.saveParts(root, pictures, true, [], 'png').map((f) => basename(f)), ['Report page 1 2.png', 'Report page 2 2.png']);
+    assert.throws(() => store.saveParts(root, pictures, true, [], 'exe' as never), /can’t be saved/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('splitNeverWritesTheSource', async () => {
   const root = mkdtempSync(join(tmpdir(), 'pdfoundry-split-'));
   try {

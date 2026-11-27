@@ -5,6 +5,8 @@ import { PDFDocument, StandardFonts, degrees, rgb } from '@cantoo/pdf-lib';
 import { api } from './api.ts';
 import type { AppInfo } from './api.ts';
 import { placedFromPng, rasterize, textImage, toPng } from './images.ts';
+import { exportImages } from './export.ts';
+import { compressSheet } from './pagetools.ts';
 import type { Library } from './library.ts';
 import { openPdf, renderPage, search } from './pdfview.ts';
 import type { Reader } from './reader.ts';
@@ -59,6 +61,28 @@ async function pixels(bytes: Uint8Array, index: number): Promise<{ at: (x: numbe
       return [d[0], d[1], d[2]];
     },
   };
+}
+
+/** The centre of the page's pixels that are not white, in page fractions (rendered at one pixel per point). Null when there are none. */
+async function colouredCentre(bytes: Uint8Array, index: number): Promise<{ x: number; y: number } | null> {
+  const doc = await openPdf(bytes);
+  const page = await doc.getPage(index + 1);
+  const canvas = document.createElement('canvas');
+  await (await renderPage(doc, index, canvas, page.getViewport({ scale: 1 }).width, 1)).promise;
+  void doc.loadingTask.destroy();
+  const { data, width, height } = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height);
+  let sx = 0, sy = 0, n = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      if (data[i] < 235 || data[i + 1] < 235 || data[i + 2] < 235) {
+        sx += x;
+        sy += y;
+        n++;
+      }
+    }
+  }
+  return n ? { x: (sx / n + 0.5) / width, y: (sy / n + 0.5) / height } : null;
 }
 
 async function blank(width: number, height: number, pages = 1): Promise<Uint8Array> {
@@ -128,6 +152,42 @@ async function selfTest(checks: { name: string; pass: boolean; detail?: string }
     let dark = 0;
     for (let x = 0.1; x < 0.6; x += 0.004) for (let y = 0.1; y < 0.16; y += 0.004) if (px.at(x, y)[0] < 120) dark++;
     check(`typed ${label} text is drawn on the page`, dark > 20 && image.aspect > 1.5, JSON.stringify({ dark, aspect: image.aspect }));
+  }
+
+  // Marks are annotations: on a page turned 90° with a crop box, pdf.js draws each kind where it was placed (the
+  // centre of its coloured pixels within 2% of the page of the intended centre).
+  {
+    const made = await PDFDocument.create();
+    const p = made.addPage([300, 400]);
+    p.setCropBox(20, 40, 260, 320);
+    p.setRotation(degrees(90));
+    const page = await made.save();
+    const kinds: [string, (b: Uint8Array) => Promise<Uint8Array>, { x: number; y: number }][] = [
+      ['stamp', (b) => pdf.stamp(b, 0, red, { x: 0.1, y: 0.1, width: 0.2, height: 0.15 }), { x: 0.2, y: 0.175 }],
+      ['highlight', (b) => pdf.markText(b, 0, [{ x: 0.5, y: 0.1, width: 0.3, height: 0.1 }], 'highlight', [1, 0.8, 0, 0.5]), { x: 0.65, y: 0.15 }],
+      ['strikethrough', (b) => pdf.markText(b, 0, [{ x: 0.5, y: 0.4, width: 0.3, height: 0.1 }], 'strikethrough', [1, 0.23, 0.19, 1]), { x: 0.65, y: 0.45 }],
+      ['ink', (b) => pdf.ink(b, 0, [{ points: [{ x: 0.2, y: 0.6 }, { x: 0.6, y: 0.6 }], color: '#1a3fb0', width: 4 / 320 }]), { x: 0.4, y: 0.6 }],
+      ['marker', (b) => pdf.ink(b, 0, [{ points: [{ x: 0.3, y: 0.8 }, { x: 0.7, y: 0.85 }], color: '#ffe14d', width: 14 / 320 }], { multiply: true, opacity: 0.55 }), { x: 0.5, y: 0.825 }],
+    ];
+    const found: Record<string, unknown> = {};
+    let pass = true;
+    for (const [kind, make, expected] of kinds) {
+      const centre = await colouredCentre(await make(page), 0);
+      found[kind] = centre;
+      pass &&= !!centre && Math.abs(centre.x - expected.x) < 0.02 && Math.abs(centre.y - expected.y) < 0.02;
+    }
+    check('every mark kind is drawn where it was placed on a turned, cropped page', pass, JSON.stringify(found));
+  }
+
+  // A highlight over text keeps the text dark (it multiplies), and tints the paper around it.
+  {
+    const made = await PDFDocument.create();
+    made.addPage([300, 500]).drawRectangle({ x: 100, y: 240, width: 100, height: 20, color: rgb(0, 0, 0) });
+    const doc = await pdf.markText(await made.save(), 0, [{ x: 0.2, y: 0.4, width: 0.6, height: 0.2 }], 'highlight', [1, 0.8, 0, 0.5]);
+    const px = await pixels(doc, 0);
+    const bar = px.at(0.5, 0.5);
+    const paper = px.at(0.25, 0.42);
+    check('a highlight annotation multiplies: text under it stays dark', bar[0] < 40 && bar[1] < 40 && paper[0] > 200 && paper[2] < 200, JSON.stringify({ bar, paper }));
   }
 
   // The viewer agrees with the engine about page counts after merging.
@@ -280,6 +340,11 @@ async function interfaceTest(checks: { name: string; pass: boolean; detail?: str
   await app.reader.close();
 
   await modesTest(check, app);
+  await selectionTest(check, app);
+  await redactionTest(check, app);
+  await pageToolsTest(check, app);
+  await ocrTest(check, app);
+  await newTilesTest(check, app);
   await toolsTest(check, app);
   await fillSignTest(check, app);
   await splitTest(check, app);
@@ -496,8 +561,11 @@ async function toolsTest(check: (name: string, pass: boolean, detail?: string) =
 
   clickButton(rail, 'Tools');
   const sections = [...view.querySelectorAll('.tool-section h2')].map((e) => e.textContent);
-  check('the Tools view lists today’s tools in their sections', !view.hidden && JSON.stringify(sections) === '["Create","Combine & split","Protect & optimize"]'
-    && ['Create from Images', 'Merge PDFs', 'Extract Pages', 'Split PDF', 'Password-protect'].every((t) => hasButton(view, t)) && !hasButton(view, 'Scan Document'), JSON.stringify(sections));
+  const tiles = [...view.querySelectorAll('.tool-section')].map((s) => [...s.querySelectorAll('.row-title')].map((t) => t.textContent));
+  check('the Tools view lists every tool in its section, Enhance included', !view.hidden && JSON.stringify(sections) === '["Create","Combine & split","Protect & optimize","Enhance"]'
+    && JSON.stringify(tiles) === JSON.stringify([['Create from Images', 'Export as Images'], ['Merge PDFs', 'Extract Pages', 'Split PDF'],
+      ['Password-protect', 'Compress', 'Redact'], ['Make Searchable', 'Page Numbers', 'Watermark']])
+    && !hasButton(view, 'Scan Document'), JSON.stringify({ sections, tiles }));
 
   // From a recent file: pick it, tick pages 1 and 3, Extract, and say where to save.
   const extractFrom = async (choose: () => void, tick: number[], out: string) => {
@@ -576,6 +644,509 @@ async function toolsTest(check: (name: string, pass: boolean, detail?: string) =
 }
 
 type Check = (name: string, pass: boolean, detail?: string) => void;
+
+/** The new Tools tiles open the right thing; the Markup bar and the More menu have every new item. */
+async function newTilesTest(check: Check, app: App): Promise<void> {
+  const rail = document.querySelector('.rail')!;
+  const view = app.tools.el;
+  const reader = document.querySelector('.reader') as HTMLElement;
+  const dock = reader.querySelector('.dock')!;
+  const made = await PDFDocument.create();
+  made.addPage([612, 792]);
+  await api.devCreate('Tiles test', await made.save());
+  const pick = async (tile: string) => {
+    clickButton(rail, 'Tools');
+    clickButton(view, tile);
+    await until(() => !!document.querySelector('.dialog.picker .picker-row[aria-label="Tiles test"]'), `the ${tile} picker`);
+    clickButton(document.querySelector('.dialog.picker')!, 'Tiles test');
+  };
+  const sheetFor = async (tile: string, sheet: string) => {
+    await pick(tile);
+    await until(() => !!document.querySelector(`.dialog.${sheet}`), `the ${tile} sheet`);
+    const opened = app.reader.file.endsWith('Tiles test.pdf') && !reader.hidden;
+    clickButton(document.querySelector(`.dialog.${sheet}`)!, 'Cancel');
+    await wait(100);
+    return opened;
+  };
+  const results = {
+    numbers: await sheetFor('Page Numbers', 'page-numbers'),
+    watermark: await sheetFor('Watermark', 'watermark'),
+    ocr: await sheetFor('Make Searchable', 'ocr'),
+  };
+  await pick('Redact');
+  await until(() => findButton(dock, 'Redact')?.getAttribute('aria-pressed') === 'true', 'Redact to be chosen');
+  const labels = [...dock.querySelectorAll('.tool')].map((b) => b.textContent?.trim() || b.getAttribute('aria-label'));
+  check('Page Numbers, Watermark, Make Searchable and Redact open the file in the reader with their tool on top',
+    Object.values(results).every(Boolean) && app.reader.file.endsWith('Tiles test.pdf'), JSON.stringify(results));
+  check('the Markup bar has every tool, in order', JSON.stringify(labels) === JSON.stringify(['Close Markup', 'Highlight', 'Underline', 'Strikethrough', 'Text', 'Draw', 'Shapes', 'Comment', 'Redact', 'Undo']),
+    JSON.stringify(labels));
+  const more = findButton(reader.querySelector('.reader-bar')!, 'More')!;
+  more.click();
+  await until(() => !!document.querySelector('.menu'), 'the More menu');
+  const items = [...document.querySelectorAll('.menu button')].map((b) => b.textContent?.trim());
+  document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  document.querySelector('.menu')?.remove();
+  check('the More menu has Make Searchable, Page Numbers and Watermark', ['Make Searchable…', 'Page Numbers…', 'Watermark…'].every((l) => items.includes(l)), JSON.stringify(items));
+  clickButton(dock, 'Close Markup');
+  await app.reader.close();
+
+  // Compress and Export as Images read the file once and never open it.
+  const compressOpened = await (async () => {
+    await pick('Compress');
+    await until(() => !!document.querySelector('.dialog.compress'), 'the Compress sheet');
+    clickButton(document.querySelector('.dialog.compress')!, 'Cancel');
+    return !!app.reader.file;
+  })();
+  await pick('Export as Images');
+  await until(() => !!document.querySelector('.dialog.export'), 'the Export sheet');
+  clickButton(document.querySelector('.dialog.export')!, 'Cancel');
+  check('Compress and Export as Images show their sheets without opening the file', !compressOpened && !app.reader.file);
+}
+
+/** A Letter page "scanned" at 150 dpi: a picture of text, with no text in the PDF. */
+async function scannedPage(text: string, rtl: boolean): Promise<Uint8Array> {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1275;
+  canvas.height = 1650;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#16181d';
+  ctx.font = '72px Arial, "Geeza Pro", "Noto Sans Arabic", sans-serif';
+  ctx.textBaseline = 'top';
+  ctx.direction = rtl ? 'rtl' : 'ltr';
+  ctx.textAlign = rtl ? 'right' : 'left';
+  ctx.fillText(text, rtl ? 1150 : 125, 220);
+  return toPng(canvas);
+}
+
+/** Make Searchable on a document with two scanned pages and one with text; Cancel; the pages look the same. */
+async function ocrTest(check: Check, app: App): Promise<void> {
+  const reader = document.querySelector('.reader') as HTMLElement;
+  const dock = reader.querySelector('.dock')!;
+  const settled = () => until(() => !reader.classList.contains('busy') && !!dock.querySelector('.tool'), 'the change to be applied');
+  const made = await PDFDocument.create();
+  const font = await made.embedFont(StandardFonts.Helvetica);
+  for (const scan of [await scannedPage('Invoice total 1250', false), null, await scannedPage('فاتورة الكهرباء', true)]) {
+    const page = made.addPage([612, 792]);
+    if (scan) page.drawImage(await made.embedPng(scan), { x: 0, y: 0, width: 612, height: 792 });
+    else page.drawText('This page has real text', { x: 72, y: 700, size: 24, font });
+  }
+  const file = await api.devCreate('Searchable test', await made.save());
+  await app.reader.open(file);
+  await until(() => reader.querySelectorAll('.page').length === 3, 'the scanned sample');
+  const opened = app.reader.data;
+  const sheet = () => document.querySelector<HTMLElement>('.dialog.ocr');
+  const found = async (bytes: Uint8Array, word: string) => {
+    const doc = await openPdf(bytes);
+    const matches = await search(doc, word);
+    void doc.loadingTask.destroy();
+    return matches.map((m) => m.page);
+  };
+
+  // Cancel while the first page is being read: nothing changes.
+  void app.reader.makeSearchable();
+  await until(() => !!sheet(), 'the Make Searchable sheet');
+  const said = sheet()!.querySelector('.hint')?.textContent ?? '';
+  clickButton(sheet()!, 'Make Searchable');
+  await until(() => /Reading page/.test(sheet()?.textContent ?? ''), 'the first page to be read');
+  clickButton(sheet()!, 'Cancel');
+  await wait(1500);
+  check('Make Searchable says which pages it reads, and Cancel changes nothing', /2 of 3 pages have no text yet/.test(said) && !sheet() && app.reader.data === opened && !app.reader.dirty, said);
+
+  // The whole run: English on page 1 and Arabic on page 3 can be found; page 2 is left alone.
+  void app.reader.makeSearchable();
+  await until(() => !!sheet(), 'the Make Searchable sheet');
+  clickButton(sheet()!, 'Make Searchable');
+  for (let i = 0; i < 1200 && app.reader.data === opened && !/No text|could|Error/i.test(sheet()?.querySelector('.split-status')?.textContent ?? ''); i++) await wait(100);
+  await settled();
+  const after = app.reader.data;
+  const [english, arabic, real] = [await found(after, 'Invoice'), await found(after, 'فاتورة'), await found(after, 'real text')];
+  check('after Make Searchable an English word and an Arabic word on scanned pages are found by search', english.includes(0) && arabic.includes(2) && real.join() === '1' && app.reader.dirty,
+    JSON.stringify({ english, arabic, real, status: sheet()?.textContent }));
+  // The page looks exactly as before: the text is invisible.
+  const [a, b] = [await pixels(opened, 0), await pixels(after, 0)];
+  let differ = 0;
+  let all = 0;
+  for (let x = 0; x < 1; x += 0.005) {
+    for (let y = 0; y < 1; y += 0.005) {
+      all++;
+      const [p, q] = [a.at(x, y), b.at(x, y)];
+      if (p.some((v, k) => Math.abs(v - q[k]) > 8)) differ++;
+    }
+  }
+  check('Make Searchable does not change how a page looks', differ / all <= 0.01, `${differ} of ${all} sample points differ`);
+  const closing = app.reader.close();
+  await until(() => !!document.querySelector('.dialog'), 'the save question');
+  clickButton(document.querySelector('.dialog')!, 'Don’t Save');
+  await closing;
+}
+
+/** Page Numbers and Watermark on the open document, Compress and Export as Images on a file. */
+async function pageToolsTest(check: Check, app: App): Promise<void> {
+  const reader = document.querySelector('.reader') as HTMLElement;
+  const dock = reader.querySelector('.dock')!;
+  const settled = () => until(() => !reader.classList.contains('busy') && !!dock.querySelector('.tool'), 'the change to be applied');
+  const sheet = (name: string) => document.querySelector<HTMLElement>(`.dialog.${name}`);
+  const made = await PDFDocument.create();
+  made.addPage([612, 792]);
+  made.addPage([612, 792]).setRotation(degrees(90));
+  const file = await api.devCreate('Page tools test', await made.save());
+  await app.reader.open(file);
+  await until(() => reader.querySelectorAll('.page').length === 2, 'the page tools sample');
+  const opened = app.reader.data;
+
+  // Page Numbers: "Page 1 of 2" format, bottom centre, also on the turned page.
+  void app.reader.pageNumbers();
+  await until(() => !!sheet('page-numbers')?.querySelector('.preview-number'), 'the Page Numbers sheet');
+  const format = sheet('page-numbers')!.querySelector('select[aria-label="Format"]') as HTMLSelectElement;
+  format.value = 'page-n-of-total';
+  format.dispatchEvent(new Event('input', { bubbles: true }));
+  const previewed = sheet('page-numbers')!.querySelector('.preview-number')!.textContent;
+  clickButton(sheet('page-numbers')!, 'Add');
+  await until(() => app.reader.data !== opened, 'the page numbers');
+  await settled();
+  const numbered = app.reader.data;
+  let doc = await openPdf(numbered);
+  const second = (await search(doc, 'Page 2 of 2')).find((m) => m.page === 1)?.rects[0];
+  void doc.loadingTask.destroy();
+  check('Page Numbers previews and numbers every page at the foot of the page as shown', previewed === 'Page 1 of 2' && !!second && second.y > 0.9 && Math.abs(second.x + second.width / 2 - 0.5) < 0.03 && app.reader.dirty,
+    JSON.stringify({ previewed, second }));
+
+  // Watermark in Arabic: drawn by the window (shaped), see-through, in the middle of the page.
+  void app.reader.watermark();
+  await until(() => !!sheet('watermark'), 'the Watermark sheet');
+  typeInto(sheet('watermark')!.querySelector('input[aria-label="Watermark text"]') as HTMLInputElement, 'سري للغاية');
+  clickButton(sheet('watermark')!, 'Add');
+  await until(() => app.reader.data !== numbered, 'the watermark');
+  await settled();
+  const px = await pixels(app.reader.data, 0);
+  let inked = 0;
+  for (let x = 0.2; x < 0.8; x += 0.01) for (let y = 0.3; y < 0.7; y += 0.01) if (px.at(x, y)[0] < 235) inked++;
+  const corner = px.at(0.05, 0.05);
+  check('an Arabic watermark is drawn across the middle, see-through', inked > 40 && corner[0] > 245 && px.at(0.5, 0.5)[0] > 60, JSON.stringify({ inked }));
+  clickButton(dock, 'Undo');
+  await until(() => app.reader.data === numbered, 'the undo');
+  await settled();
+  clickButton(dock, 'Undo');
+  await until(() => app.reader.data === opened, 'the second undo');
+  await settled();
+  check('Undo takes the watermark and the numbers off again', !app.reader.dirty);
+  await app.reader.close();
+
+  // Compress: a file with a photo-like picture; the copy is smaller, the source is not changed.
+  const canvas = document.createElement('canvas');
+  canvas.width = 1200;
+  canvas.height = 900;
+  const ctx = canvas.getContext('2d')!;
+  const noise = ctx.createImageData(1200, 900);
+  for (let i = 0; i < noise.data.length; i++) noise.data[i] = i % 4 === 3 ? 255 : (Math.random() * 255) | 0;
+  ctx.putImageData(noise, 0, 0);
+  const photo = await pdf.imagesToPdf([{ bytes: await toPng(canvas), type: 'png' }]);
+  const source = await api.devCreate('Compress source', photo);
+  const folder = source.replace(/[\\/][^\\/]+$/, '');
+  const target = `${folder}/Compress source (compressed).pdf`;
+  await api.devAnswer({ save: target });
+  const compressing = compressSheet({ name: 'Compress source', path: source, bytes: photo });
+  await until(() => !!sheet('compress'), 'the Compress sheet');
+  clickButton(sheet('compress')!, 'Compress');
+  await until(() => /Saved|small|could/.test(sheet('compress')?.querySelector('.split-status')?.textContent ?? ''), 'the compressed copy');
+  const said = sheet('compress')!.querySelector('.split-status')!.textContent;
+  clickButton(sheet('compress')!, 'Done');
+  const savedAt = await compressing;
+  const small = savedAt ? await api.devRead(savedAt) : new Uint8Array();
+  doc = await openPdf(small);
+  const pagesThere = doc.numPages;
+  void doc.loadingTask.destroy();
+  check('Compress saves a smaller copy and leaves the source alone', savedAt === target && small.length < photo.length * 0.6 && pagesThere === 1
+    && sameBytes(await api.devRead(source), photo), JSON.stringify({ said, from: photo.length, to: small.length }));
+  const plain = await api.devCreate('Compress plain', await pdf.welcomeGuide());
+  void compressSheet({ name: 'Compress plain', path: plain, bytes: await api.devRead(plain) });
+  await until(() => !!sheet('compress'), 'the Compress sheet');
+  clickButton(sheet('compress')!, 'Compress');
+  await until(() => /small as it can be/.test(sheet('compress')?.querySelector('.split-status')?.textContent ?? ''), 'the no-gain message');
+  check('Compress says when a file is already as small as it can be', sheet('compress')!.querySelector('.split-status')!.textContent === 'This file is already as small as it can be.');
+  clickButton(sheet('compress')!, 'Cancel');
+
+  // Export as Images: three Letter pages at 300 dpi, as PNGs named so they sort.
+  const three = await blank(612, 792, 3);
+  const exportSource = await api.devCreate('Export source', three);
+  await api.devAnswer({ folder });
+  const exporting = exportImages({ name: 'Export source', path: exportSource, bytes: three });
+  await until(() => !!sheet('export'), 'the Export sheet');
+  const print = sheet('export')!.querySelector('input[value="300"]') as HTMLInputElement;
+  print.checked = true;
+  print.dispatchEvent(new Event('change', { bubbles: true }));
+  clickButton(sheet('export')!, 'Export');
+  const written = (await exporting) ?? [];
+  const first = written[0] ? await api.devRead(written[0]) : new Uint8Array(24);
+  const view = new DataView(first.buffer, first.byteOffset, first.byteLength);
+  const size = [view.getUint32(16), view.getUint32(20)];
+  check('Export as Images saves each page as a picture, named in order, at 300 dpi', written.map((f) => f.replace(/^.*[\\/]/, '')).join('|') === 'Export source page 1.png|Export source page 2.png|Export source page 3.png'
+    && size[0] === 2550 && size[1] === 3300 && sameBytes(await api.devRead(exportSource), three), JSON.stringify({ written, size }));
+}
+
+/** Markup › Redact: areas by dragging and by selecting text, the questions, Apply, and what is left in the file. */
+async function redactionTest(check: Check, app: App): Promise<void> {
+  const reader = document.querySelector('.reader') as HTMLElement;
+  const dock = reader.querySelector('.dock')!;
+  const pageAt = (i: number) => reader.querySelectorAll<HTMLElement>('.page')[i];
+  const settled = () => until(() => !reader.classList.contains('busy') && !!dock.querySelector('.tool'), 'the change to be applied');
+  const made = await PDFDocument.create();
+  const font = await made.embedFont(StandardFonts.Helvetica);
+  const first = made.addPage([612, 792]);
+  first.drawText('Secret Kilo word', { x: 72, y: 660, size: 36, font });
+  first.drawText('Keep Lima here', { x: 72, y: 560, size: 36, font });
+  made.addPage([612, 792]).drawText('Second page November', { x: 72, y: 660, size: 36, font });
+  const sample = await made.save();
+  const file = await api.devCreate('Redaction test', sample);
+  await app.reader.open(file);
+  await until(() => reader.querySelectorAll('.page').length === 2, 'the redaction sample');
+  const opened = app.reader.data;
+  const found = async (bytes: Uint8Array, word: string) => {
+    const doc = await openPdf(bytes);
+    const matches = await search(doc, word);
+    void doc.loadingTask.destroy();
+    return matches;
+  };
+  const kilo = (await found(sample, 'Kilo'))[0].rects[0];
+  const at = (i: number, fx: number, fy: number) => {
+    const box = pageAt(i).getBoundingClientRect();
+    return [box.left + box.width * fx, box.top + box.height * fy] as const;
+  };
+  const dragBox = (r: Box) => {
+    const [x1, y1] = at(0, r.x - 0.01, r.y - 0.01);
+    const [x2, y2] = at(0, r.x + r.width + 0.01, r.y + r.height + 0.01);
+    pointer(pageAt(0), 'pointerdown', x1, y1);
+    pointer(pageAt(0), 'pointermove', x2, y2);
+    pointer(pageAt(0), 'pointerup', x2, y2);
+  };
+
+  clickButton(dock, 'Markup');
+  clickButton(dock, 'Redact');
+  dragBox(kilo);
+  check('a dragged area is marked in red and waits for Apply; nothing is changed yet', app.reader.pendingCount === 1 && !!pageAt(0).querySelector('.redact-box')
+    && hasButton(dock, 'Apply (1)') && app.reader.data === opened && !app.reader.dirty, JSON.stringify({ pending: app.reader.pendingCount }));
+
+  // Closing Markup with areas waiting asks; Cancel keeps them, Discard drops them.
+  clickButton(dock, 'Close Markup');
+  await until(() => !!document.querySelector('.dialog'), 'the redaction question');
+  const asked = document.querySelector('.dialog h2')?.textContent;
+  clickButton(lastDialog(), 'Cancel');
+  await wait(50);
+  const kept = app.reader.pendingCount === 1 && hasButton(dock, 'Redact');
+  clickButton(dock, 'Close Markup');
+  await until(() => !!document.querySelector('.dialog'), 'the redaction question');
+  clickButton(lastDialog(), 'Discard');
+  await until(() => hasButton(dock, 'Markup'), 'the reading bar');
+  check('leaving Markup with areas waiting asks “Apply the redactions?”; Cancel keeps them, Discard drops them',
+    asked === 'Apply the redactions?' && kept && app.reader.pendingCount === 0 && !pageAt(0).querySelector('.redact-box') && app.reader.data === opened, asked ?? '');
+
+  // Selected text is marked too. Then Apply, after the warning.
+  clickButton(dock, 'Markup');
+  clickButton(dock, 'Redact');
+  await until(() => [...pageAt(0).querySelectorAll('.textLayer span')].some((s) => s.textContent?.includes('Lima')), 'the text layer');
+  const span = [...pageAt(0).querySelectorAll('.textLayer span')].find((s) => s.textContent?.includes('Lima'))!;
+  const range = document.createRange();
+  const startAt = span.textContent!.indexOf('Lima');
+  range.setStart(span.firstChild!, startAt);
+  range.setEnd(span.firstChild!, startAt + 4);
+  window.getSelection()!.removeAllRanges();
+  window.getSelection()!.addRange(range);
+  pointer(pageAt(0), 'pointerup', ...at(0, 0.5, 0.5));
+  await until(() => app.reader.pendingCount === 1, 'the selected text to be marked');
+  dragBox(kilo);
+  clickButton(dock, 'Apply (2)');
+  await until(() => !!document.querySelector('.dialog'), 'the apply warning');
+  const warning = lastDialog().textContent ?? '';
+  clickButton(lastDialog(), 'Apply');
+  await until(() => app.reader.data !== opened, 'the redaction');
+  await settled();
+  const after = app.reader.data;
+  const px = await pixels(after, 0);
+  const black = px.at(kilo.x + kilo.width / 2, kilo.y + kilo.height / 2);
+  check('Apply warns first, then the words are gone from the text and the areas are black', /Apply Redactions\?/.test(warning) && /removes everything under the boxes for good/.test(warning)
+    && (await found(after, 'Kilo')).length === 0 && (await found(after, 'Lima')).length === 0 && (await found(after, 'Secret')).length === 0
+    && black.every((v) => v < 30) && !hasButton(dock, 'Apply (1)') && app.reader.pendingCount === 0 && app.reader.dirty, JSON.stringify({ black }));
+  check('the other page keeps its text', (await found(after, 'November')).some((m) => m.page === 1));
+  clickButton(dock, 'Undo');
+  await until(() => app.reader.data !== after, 'the undo');
+  await settled();
+  check('Undo brings the redacted page back', (await found(app.reader.data, 'Kilo')).length === 1);
+
+  check('back to the file as it was, nothing to save', !app.reader.dirty);
+
+  // Undo with areas waiting asks first (an older version may have other pages): Discard drops them, then undoes.
+  const red = await solid('#ff0000');
+  await app.reader.change((b) => pdf.stamp(b, 1, red, { x: 0.1, y: 0.1, width: 0.2, height: 0.1 }));
+  const stamped = app.reader.data;
+  app.reader.addRedaction(0, { x: 0.1, y: 0.1, width: 0.3, height: 0.1 });
+  clickButton(dock, 'Undo');
+  await until(() => !!document.querySelector('.dialog'), 'the question on Undo');
+  const askedOnUndo = document.querySelector('.dialog h2')?.textContent;
+  clickButton(lastDialog(), 'Discard');
+  await until(() => app.reader.data !== stamped, 'the undo after Discard');
+  await settled();
+  check('Undo with areas waiting asks first; Discard drops them and then undoes', askedOnUndo === 'Apply the redactions?' && app.reader.pendingCount === 0 && sameBytes(app.reader.data, opened),
+    JSON.stringify({ askedOnUndo, pending: app.reader.pendingCount }));
+
+  // Save and Save As with areas waiting ask too; Cancel saves nothing.
+  await app.reader.change((b) => pdf.stamp(b, 1, red, { x: 0.1, y: 0.1, width: 0.2, height: 0.1 }));
+  app.reader.addRedaction(0, { x: 0.1, y: 0.1, width: 0.3, height: 0.1 });
+  const onDisk = await api.devRead(file);
+  const saving = app.reader.save();
+  await until(() => !!document.querySelector('.dialog'), 'the question on Save');
+  const askedOnSave = document.querySelector('.dialog h2')?.textContent;
+  clickButton(lastDialog(), 'Cancel');
+  const savedAnyway = await saving;
+  check('Save with areas waiting asks first, and Cancel saves nothing', askedOnSave === 'Apply the redactions?' && savedAnyway === false
+    && sameBytes(await api.devRead(file), onDisk) && app.reader.pendingCount === 1, JSON.stringify({ askedOnSave, savedAnyway }));
+
+  // Closing asks about the areas, then about the unsaved stamp.
+  const closing = app.reader.close();
+  await until(() => !!document.querySelector('.dialog'), 'the redaction question');
+  clickButton(lastDialog(), 'Discard');
+  await until(() => /Save the changes/.test(document.querySelector('.dialog h2')?.textContent ?? ''), 'the save question');
+  clickButton(lastDialog(), 'Don’t Save');
+  await closing;
+}
+
+/** Selecting a mark (move, resize, Delete, Undo), Shapes and Comment, driven with pointer events and keys. */
+async function selectionTest(check: Check, app: App): Promise<void> {
+  const reader = document.querySelector('.reader') as HTMLElement;
+  const dock = reader.querySelector('.dock')!;
+  const page = () => reader.querySelector<HTMLElement>('.page')!;
+  const settled = () => until(() => !reader.classList.contains('busy') && !!dock.querySelector('.tool'), 'the change to be applied');
+  const blue = (c: number[]) => c[2] > 200 && c[0] < 60;
+  const isWhite = (c: number[]) => c[0] > 245 && c[1] > 245 && c[2] > 245;
+  const file = await api.devCreate('Selection test', await blank(612, 792, 1));
+  await app.reader.open(file);
+  await until(() => !!page() && page().dataset.painted !== undefined, 'the page');
+  const placedAt = { x: 0.2, y: 0.2, width: 0.2, height: 0.05 };
+  await app.reader.change(async (b) => pdf.stamp(b, 0, await solid('#0000ff', 160, 40), placedAt));
+  const marks = () => pdf.marks(app.reader.data, 0);
+  const at = (fx: number, fy: number) => {
+    const box = page().getBoundingClientRect();
+    return [box.left + box.width * fx, box.top + box.height * fy] as const;
+  };
+  const clickAt = (fx: number, fy: number) => {
+    const [x, y] = at(fx, fy);
+    page().dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 }));
+  };
+  const drag = (el: Element, from: readonly [number, number], to: readonly [number, number]) => {
+    pointer(el, 'pointerdown', ...from);
+    pointer(el, 'pointermove', (from[0] + to[0]) / 2, (from[1] + to[1]) / 2);
+    pointer(el, 'pointermove', ...to);
+    pointer(el, 'pointerup', ...to);
+  };
+  const box = () => reader.querySelector<HTMLElement>('.mark-selection');
+
+  // Click the signature: it is selected, with corner handles and Delete.
+  window.getSelection()?.removeAllRanges();
+  clickAt(0.3, 0.225);
+  await until(() => !!box(), 'the selection');
+  const original = (await marks())[0];
+  check('clicking a mark selects it, with handles and Delete', !!box()?.querySelector('.corner.se') && hasButton(box()!, 'Delete') && app.reader.selectedMark?.mark.id === original.id,
+    JSON.stringify(app.reader.selectedMark));
+
+  // Drag it down and right, then resize it from its lower-right corner.
+  let before = app.reader.data;
+  drag(box()!, at(0.3, 0.225), at(0.6, 0.625));
+  await until(() => app.reader.data !== before && !!box(), 'the move');
+  await settled();
+  const afterMove = (await marks())[0];
+  let px = await pixels(app.reader.data, 0);
+  check('dragging a selected signature moves it (the same mark, one Undo step)', afterMove.id === original.id && Math.abs(afterMove.rect.x - 0.5) < 0.01 && Math.abs(afterMove.rect.y - 0.6) < 0.01
+    && Math.abs(afterMove.rect.width - 0.2) < 1e-6 && blue(px.at(0.6, 0.625)) && isWhite(px.at(0.3, 0.225)), JSON.stringify(afterMove.rect));
+  before = app.reader.data;
+  const corner = box()!.querySelector('.corner.se')!;
+  const c = corner.getBoundingClientRect();
+  const [cx, cy] = [c.left + c.width / 2, c.top + c.height / 2];
+  drag(corner, [cx, cy], [cx + page().getBoundingClientRect().width * 0.1, cy]);
+  await until(() => app.reader.data !== before && !!box(), 'the resize');
+  await settled();
+  const afterResize = (await marks())[0];
+  check('dragging a corner resizes it and keeps its proportions', Math.abs(afterResize.rect.width - 0.3) < 0.01 && Math.abs(afterResize.rect.height / afterResize.rect.width - original.rect.height / original.rect.width) < 1e-3
+    && Math.abs(afterResize.rect.x - 0.5) < 1e-3, JSON.stringify(afterResize.rect));
+
+  // Delete with the keyboard, then Undo three times: back to the signature as it was placed.
+  before = app.reader.data;
+  box()!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true }));
+  await until(() => app.reader.data !== before, 'the delete');
+  await settled();
+  const gone = (await marks()).length === 0 && !box();
+  for (let i = 0; i < 3; i++) {
+    clickButton(dock, 'Undo');
+    await wait(300);
+    await settled();
+  }
+  const back = (await marks())[0];
+  px = await pixels(app.reader.data, 0);
+  check('Delete removes it, and Undo three times puts it back where it was placed', gone && !!back && back.id === original.id
+    && ['x', 'y', 'width', 'height'].every((k) => Math.abs(back.rect[k as 'x'] - original.rect[k as 'x']) < 1e-6) && blue(px.at(0.3, 0.225)), JSON.stringify(back?.rect));
+
+  // Five quick Shift+Right nudges (10 pt each) while the first is still being written: none is dropped.
+  window.getSelection()?.removeAllRanges();
+  clickAt(0.3, 0.225);
+  await until(() => !!box(), 'the selection again');
+  for (let i = 0; i < 5; i++) box()!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', shiftKey: true, bubbles: true, cancelable: true }));
+  const expectedX = back.rect.x + 50 / 612;
+  for (let i = 0; i < 100; i++) {
+    await wait(50);
+    const now = (await marks())[0];
+    if (Math.abs(now.rect.x - expectedX) < 1e-6 && !reader.classList.contains('busy')) break;
+  }
+  const nudged = (await marks())[0];
+  check('quick arrow nudges all count: five Shift+Right move the mark 50 pt', Math.abs(nudged.rect.x - expectedX) < 1e-6 && Math.abs(nudged.rect.y - back.rect.y) < 1e-9
+    && Math.abs((box()?.getBoundingClientRect().left ?? 0) - page().getBoundingClientRect().left - expectedX * page().getBoundingClientRect().width) < 3,
+  JSON.stringify({ got: nudged.rect.x * 612, expected: expectedX * 612 }));
+  box()?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+
+  // Shapes: a rectangle dragged on the page, and the bar stays in Shapes.
+  clickButton(dock, 'Markup');
+  const labels = [...dock.querySelectorAll('.tool')].map((b) => b.textContent?.trim() || b.getAttribute('aria-label'));
+  check('the Markup bar has Shapes and Comment', ['Highlight', 'Underline', 'Strikethrough', 'Text', 'Draw', 'Shapes', 'Comment'].every((l) => labels.includes(l)), JSON.stringify(labels));
+  clickButton(dock, 'Shapes');
+  await until(() => !!document.querySelector('.menu'), 'the shapes menu');
+  clickButton(document.querySelector('.menu')!, 'Rectangle');
+  before = app.reader.data;
+  drag(page(), at(0.1, 0.5), at(0.4, 0.7));
+  await until(() => app.reader.data !== before, 'the rectangle');
+  await settled();
+  const rectangle = (await marks()).find((m) => m.kind === 'rectangle');
+  px = await pixels(app.reader.data, 0);
+  const edge = px.at(rectangle ? rectangle.rect.x + rectangle.rect.width / 2 : 0, rectangle ? rectangle.rect.y + 1.2 / 792 : 0);
+  check('a dragged rectangle is a shape annotation drawn in graphite, and Shapes stays chosen', !!rectangle && Math.abs(rectangle.rect.x - 0.1) < 0.01 && Math.abs(rectangle.rect.y + rectangle.rect.height - 0.7) < 0.01
+    && edge[0] < 90 && isWhite(px.at(0.25, 0.6)) && findButton(dock, 'Shapes')?.getAttribute('aria-pressed') === 'true', JSON.stringify({ rect: rectangle?.rect, edge }));
+
+  // Comment: click the page, type (Arabic), Done. Then select it and open it again.
+  clickButton(dock, 'Comment');
+  const text = 'راجع هذا الرقم';
+  pointer(page(), 'pointerdown', ...at(0.7, 0.3));
+  pointer(page(), 'pointerup', ...at(0.7, 0.3));
+  await until(() => !!document.querySelector('.dialog textarea.comment-text'), 'the comment sheet');
+  (document.querySelector('.dialog textarea.comment-text') as HTMLTextAreaElement).value = text;
+  before = app.reader.data;
+  clickButton(lastDialog(), 'Done');
+  await until(() => app.reader.data !== before, 'the comment');
+  await settled();
+  const note = (await marks()).find((m) => m.kind === 'comment');
+  const saved = note ? await pdf.commentText(app.reader.data, 0, note.id) : '';
+  clickButton(dock, 'Close Markup');
+  window.getSelection()?.removeAllRanges();
+  if (note) clickAt(note.rect.x + note.rect.width / 2, note.rect.y + note.rect.height / 2);
+  await until(() => !!box(), 'the comment to be selected');
+  clickButton(box()!, 'Open');
+  await until(() => !!document.querySelector('.dialog textarea.comment-text'), 'the comment to open');
+  const shown = (document.querySelector('.dialog textarea.comment-text') as HTMLTextAreaElement).value;
+  clickButton(lastDialog(), 'Cancel');
+  check('a comment keeps its Arabic text and opens again when selected', saved === text && shown === text && Math.abs((note?.rect.x ?? 0) - 0.7) < 0.01, JSON.stringify({ saved, shown, rect: note?.rect }));
+
+  const closing = app.reader.close();
+  await until(() => !!document.querySelector('.dialog'), 'the save question');
+  clickButton(document.querySelector('.dialog')!, 'Don’t Save');
+  await closing;
+}
 
 const lastDialog = (): HTMLElement => [...document.querySelectorAll<HTMLElement>('.dialog')].pop() ?? document.createElement('div'); // none yet: an empty stand-in
 const toastText = () => document.querySelector('.toast')?.textContent ?? '';
@@ -703,11 +1274,18 @@ async function fillSignTest(check: Check, app: App): Promise<void> {
   // Undo takes back the field change, as one step.
   clickButton(dock, 'Undo');
   await until(() => !reader.classList.contains('busy'), 'the undo');
-  await wait(300);
-  const undone = (await pdf.fields(app.reader.data)).find((f) => f.name === 'arabic')?.value;
+  // Undo first waits for field changes still being written, so give it time (up to 5 s) before reading the result.
+  let undone: unknown;
+  for (let i = 0; i < 50; i++) {
+    await wait(100);
+    undone = (await pdf.fields(app.reader.data)).find((f) => f.name === 'arabic')?.value;
+    if (undone === '' && !reader.classList.contains('busy')) break;
+  }
   // The page's fields are redrawn after Undo; on a slow machine the old inputs are still there for a moment, so wait
   // for the redrawn (emptied) field. If it never empties, the check below fails with the details.
   await until(() => input('arabic')?.value === '', 'the redrawn fields').catch(() => undefined);
+  // Let the page finish drawing its new form layer, so the inputs typed into below are the ones that stay.
+  await wait(300);
   check('Undo takes back a field change', undone === '' && input('arabic').value === '' && !app.reader.dirty, JSON.stringify({ undone, dirty: app.reader.dirty }));
 
   // Save (Ctrl+S) while still typing in a field: the field is written first.
@@ -716,7 +1294,7 @@ async function fillSignTest(check: Check, app: App): Promise<void> {
   const typingCounts = app.reader.dirty;
   await app.reader.save();
   check('Save while typing in a field saves that field', typingCounts && (await fieldOnDisk('name')) === 'Grace Hopper' && !app.reader.dirty,
-    JSON.stringify({ typingCounts, onDisk: await fieldOnDisk('name') }));
+    JSON.stringify({ typingCounts, onDisk: await fieldOnDisk('name'), dirty: app.reader.dirty, windowFocused: document.hasFocus() }));
 
   // Closing while still typing asks first, and Save keeps what was typed.
   await until(() => !!input('name'), 'the fields');
