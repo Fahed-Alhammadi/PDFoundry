@@ -30,6 +30,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -128,9 +129,12 @@ private fun describe(kind: FieldKind) = when (kind) {
 fun FieldTextDialog(field: FormField, onDismiss: () -> Unit, onDone: (String) -> Unit) {
     var text by remember(field) { mutableStateOf(field.value) }
     val multiline = field.kind == FieldKind.MultilineText
+    // The text box takes the focus (and the keyboard comes up) as soon as the dialog opens.
+    val focus = androidx.compose.runtime.remember { androidx.compose.ui.focus.FocusRequester() }
+    androidx.compose.runtime.LaunchedEffect(field) { runCatching { focus.requestFocus() } }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(field.name.substringAfterLast('.').ifEmpty { "Text field" }) },
+        title = { Text(field.title) },
         text = {
             Column {
                 OutlinedTextField(
@@ -140,7 +144,7 @@ fun FieldTextDialog(field: FormField, onDismiss: () -> Unit, onDone: (String) ->
                     minLines = if (multiline) 3 else 1,
                     keyboardOptions = KeyboardOptions(imeAction = if (multiline) ImeAction.Default else ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = { onDone(text) }),
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth().focusRequester(focus)
                 )
                 Spacer(Modifier.height(4.dp))
                 Text("Saved as a form field, so other apps can still change it.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -37,6 +38,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.dp
 import io.pdfoundry.app.data.MarkInfo
 import io.pdfoundry.app.data.MarkKind
@@ -141,14 +144,14 @@ private fun SelectedMark(mark: MarkInfo, w: Float, h: Float, onMove: (RectF) -> 
             .semantics { contentDescription = "Selected ${mark.kind.label().lowercase()}" + if (mark.movable) ". Drag to move." else "" }
     )
     if (resizable) {
-        val handle = 26.dp
+        val handle = 26.dp // round and this size even on a tiny mark (requiredSize below)
         val handlePx = with(density) { handle.toPx() }
         for (corner in Corner.entries) {
             val x = if (corner == Corner.TopLeft || corner == Corner.BottomLeft) left else left + width
             val y = if (corner == Corner.TopLeft || corner == Corner.TopRight) top else top + height
             Box(
                 Modifier.offset { IntOffset((x - handlePx / 2).roundToInt(), (y - handlePx / 2).roundToInt()) }
-                    .size(handle).clip(CircleShape).background(Color.White).border(3.dp, accent, CircleShape)
+                    .requiredSize(handle).clip(CircleShape).background(Color.White).border(3.dp, accent, CircleShape)
                     .pointerInput(mark, corner) {
                         detectDragGestures(
                             onDragEnd = { onMove(RectF(live)) },
@@ -162,14 +165,16 @@ private fun SelectedMark(mark: MarkInfo, w: Float, h: Float, onMove: (RectF) -> 
             )
         }
     }
-    // The menu sits above the mark, or below it near the top of the page.
-    val menuHeight = with(density) { 48.dp.toPx() }
-    val menuY = if (top > menuHeight + 8f) top - menuHeight - with(density) { 14.dp.toPx() } else top + height + with(density) { 14.dp.toPx() }
+    // The menu sits above the mark (below it when there is no room above), always fully on the page.
+    var menuSize by remember { mutableStateOf(IntSize(with(density) { 180.dp.roundToPx() }, with(density) { 48.dp.roundToPx() })) }
+    val gap = with(density) { 14.dp.toPx() }
     Surface(
         shape = RoundedCornerShape(12.dp),
         tonalElevation = 6.dp,
         shadowElevation = 4.dp,
-        modifier = Modifier.offset { IntOffset(left.roundToInt().coerceAtLeast(0), menuY.roundToInt()) }
+        modifier = Modifier
+            .onSizeChanged { menuSize = it }
+            .offset { menuPosition(left, top, left + width, top + height, menuSize.width.toFloat(), menuSize.height.toFloat(), w, h, gap) }
     ) {
         Row(Modifier.padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             if (mark.kind == MarkKind.Comment) {
@@ -184,6 +189,21 @@ private fun SelectedMark(mark: MarkInfo, w: Float, h: Float, onMove: (RectF) -> 
             }
         }
     }
+}
+
+/**
+ * Where a mark's menu goes, in pixels of the page (areaW × areaH): above the mark ([left], [top],
+ * [right], [bottom]) with [gap] between, below it when it doesn't fit above, inside the page's top when
+ * it fits neither; lined up with the mark's left edge, and moved in so it never runs off any edge.
+ */
+fun menuPosition(left: Float, top: Float, right: Float, bottom: Float, menuW: Float, menuH: Float, areaW: Float, areaH: Float, gap: Float): IntOffset {
+    val y = when {
+        top - gap - menuH >= 0f -> top - gap - menuH
+        bottom + gap + menuH <= areaH -> bottom + gap
+        else -> 0f
+    }
+    val x = left.coerceAtMost(areaW - menuW).coerceAtLeast(0f)
+    return IntOffset(x.roundToInt(), y.coerceIn(0f, (areaH - menuH).coerceAtLeast(0f)).roundToInt())
 }
 
 /**

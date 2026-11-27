@@ -901,7 +901,8 @@ object PdfEngine {
                     readOnly = field.isReadOnly,
                     widget = index,
                     labels = labels,
-                    checked = (kind == FieldKind.Checkbox || kind == FieldKind.Radio) && checkedOf(widget)
+                    checked = (kind == FieldKind.Checkbox || kind == FieldKind.Radio) && checkedOf(widget),
+                    tooltip = runCatching { field.alternateFieldName }.getOrNull()
                 )
             }
         }

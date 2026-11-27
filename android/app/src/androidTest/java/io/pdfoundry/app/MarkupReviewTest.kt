@@ -393,15 +393,17 @@ class MarkupReviewTest {
 
         val cancelled = scan()
         val bytes = cancelled.readBytes()
+        // Cancelled well into the page (Tesseract checks for Cancel while it reads words, not while it
+        // finds the layout first): without stop() it would run to the end of the page.
         val began = System.currentTimeMillis()
         try {
-            Ocr.run(cancelled, listOf(0), isCancelled = { System.currentTimeMillis() - began > 300 })
+            Ocr.run(cancelled, listOf(0), isCancelled = { System.currentTimeMillis() - began > whole * 4 / 10 })
             org.junit.Assert.fail("cancelled")
         } catch (e: CancellationException) {
             // expected
         }
         val took = System.currentTimeMillis() - began
-        assertTrue("Cancel stopped the page in $took ms (a whole page takes $whole ms)", took < whole * 6 / 10)
+        assertTrue("Cancel stopped the page in $took ms (a whole page takes $whole ms)", took < whole * 8 / 10)
         assertTrue(bytes.contentEquals(cancelled.readBytes()))
     }
 

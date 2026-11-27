@@ -133,7 +133,7 @@ fun ToolsScreen(onOpen: (PdfItem) -> Unit, onOpenWith: (PdfItem, ReaderStart) ->
         }
     }
 
-    val actions = rememberDocumentActions(snackbar) { file -> announce(file, "“${file.nameWithoutExtension}” is now in Documents.") }
+    val actions = rememberDocumentActions(snackbar, onCreated = { file -> announce(file, "“${file.nameWithoutExtension}” is now in Documents.") })
     val catalog = remember { toolCatalog(scannerAvailable(context)) }
 
     var picking by remember { mutableStateOf<PdfTool?>(null) }
