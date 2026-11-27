@@ -103,6 +103,7 @@ object PdfEngine {
     /** Copies [pages] of [source] into a new file. With [password], the source is opened with it and the new file keeps it. */
     fun extract(source: File, pages: List<Int>, destination: File, password: String? = null) {
         load(source, password).use { document ->
+            requireFullAccess(document)
             writePart(document, pages.sorted(), destination, password)
         }
     }
@@ -114,6 +115,7 @@ object PdfEngine {
     fun split(source: File, parts: List<List<Int>>, destinations: List<File>, password: String? = null) {
         require(parts.size == destinations.size)
         load(source, password).use { document ->
+            requireFullAccess(document)
             parts.zip(destinations).forEach { (pages, destination) -> writePart(document, pages, destination, password) }
         }
     }
@@ -131,6 +133,14 @@ object PdfEngine {
                 throw e
             }
         }
+    }
+
+    /**
+     * Copying pages out of a file whose protection can't be carried over (restrictions set by its author,
+     * or a password that only opens it) would drop that protection: refused, as editing it is.
+     */
+    private fun requireFullAccess(document: PDDocument) {
+        if (document.isEncrypted && !document.currentAccessPermission.isOwnerPermission) throw PdfException("Password-protected documents are read-only.")
     }
 
     private fun load(file: File, password: String?): PDDocument =
@@ -178,6 +188,23 @@ object PdfEngine {
         }
     } catch (e: InvalidPasswordException) {
         UnlockResult.Wrong
+    }
+
+    /**
+     * True when [password] is also the password that opens [file] (its user password). False when it
+     * is only the owner password: saving with it as both then changes the password that opens the file.
+     */
+    fun opensWith(file: File, password: String): Boolean = try {
+        PDDocument.load(file, password, memory()).use { document ->
+            val encryption = document.encryption ?: return@use true
+            val id = (document.document.documentID?.get(0) as? com.tom_roush.pdfbox.cos.COSString)?.bytes ?: ByteArray(0)
+            com.tom_roush.pdfbox.pdmodel.encryption.StandardSecurityHandler().isUserPassword(
+                password, encryption.userKey, encryption.ownerKey, encryption.permissions, id,
+                encryption.revision, encryption.length / 8, encryption.isEncryptMetaData
+            )
+        }
+    } catch (e: Exception) {
+        true
     }
 
     /** True when the file is encrypted: it needs a password to open, or carries restrictions. */
@@ -590,10 +617,11 @@ object PdfEngine {
                     rect = displayed(unrotated, box.width, box.height, rotation),
                     value = value,
                     options = options,
-                    onValue = if (kind == FieldKind.Checkbox || kind == FieldKind.Radio) onValueOf(widget) else null,
+                    onValue = (field as? com.tom_roush.pdfbox.pdmodel.interactive.form.PDButton)?.let { onValueOf(it, index) },
                     readOnly = field.isReadOnly,
                     widget = index,
-                    labels = labels
+                    labels = labels,
+                    checked = (kind == FieldKind.Checkbox || kind == FieldKind.Radio) && checkedOf(widget)
                 )
             }
         }
@@ -620,18 +648,46 @@ object PdfEngine {
                     field.widgets.forEach { imageAppearance(document, it, value, field.isMultiline) }
                 }
             }
-            is com.tom_roush.pdfbox.pdmodel.interactive.form.PDCheckBox -> if (value.isEmpty() || value == "Off") field.unCheck() else field.check()
-            is com.tom_roush.pdfbox.pdmodel.interactive.form.PDRadioButton -> {
-                val on = value.ifEmpty { field.widgets.getOrNull(widgetIndex)?.let { onValueOf(it) } ?: "Off" }
-                field.setValue(on)
+            is com.tom_roush.pdfbox.pdmodel.interactive.form.PDCheckBox, is com.tom_roush.pdfbox.pdmodel.interactive.form.PDRadioButton -> {
+                // Set directly, by widget: PdfBox's own setValue expects /Opt export values and appearance
+                // names to line up in ways real forms often don't.
+                val button = field as com.tom_roush.pdfbox.pdmodel.interactive.form.PDButton
+                setButton(button, widgetIndex, on = value.isNotEmpty() && value != "Off")
             }
-            is com.tom_roush.pdfbox.pdmodel.interactive.form.PDChoice -> field.setValue(value)
+            is com.tom_roush.pdfbox.pdmodel.interactive.form.PDChoice -> {
+                // /V is always the option's export value; the box shows its label.
+                val exports = runCatching { field.optionsExportValues }.getOrDefault(emptyList())
+                val labels = runCatching { field.optionsDisplayValues }.getOrDefault(emptyList())
+                val label = labels.getOrNull(exports.indexOf(value)) ?: value
+                val editable = field is com.tom_roush.pdfbox.pdmodel.interactive.form.PDComboBox && field.isEdit
+                if (exports.isNotEmpty() && value !in exports && !editable) throw PdfException("That isn't one of this list's options.")
+                val drawn = try {
+                    field.setValue(value)
+                    label == value
+                } catch (e: Exception) {
+                    // The field's font can't show it (a non-Latin option): keep the value, draw it ourselves.
+                    field.cosObject.setString(com.tom_roush.pdfbox.cos.COSName.V, value)
+                    false
+                }
+                if (!drawn) field.widgets.forEach { imageAppearance(document, it, label, multiline = false) }
+            }
             else -> throw PdfException("This field can't be filled in here.")
         }
     }
 
     // endregion
     // region Bitmaps
+
+    /** Text wrapped to [widthPx] on as many lines as it needs, at [textBitmap]'s size; right-to-left text flows from the right. */
+    fun textBlockBitmap(text: String, widthPx: Int, argb: Int = Color.BLACK): Bitmap {
+        val paint = android.text.TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = argb
+            textSize = 96f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+        }
+        val layout = android.text.StaticLayout.Builder.obtain(text, 0, text.length, paint, widthPx).build()
+        return Bitmap.createBitmap(widthPx, layout.height.coerceAtLeast(1), Bitmap.Config.ARGB_8888).also { layout.draw(Canvas(it)) }
+    }
 
     /** Typed text as a transparent bitmap. Drawn by Android, so any script (Arabic included) is shaped correctly. */
     fun textBitmap(text: String, argb: Int = Color.BLACK): Bitmap {

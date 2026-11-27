@@ -90,7 +90,7 @@ fun Context.openUrl(url: String) {
 }
 
 /** Sends the file to the system print dialog as it is. Must be called with an Activity context. */
-fun Context.printPdf(file: File) {
+fun Context.printPdf(file: File, name: String = file.name) {
     val manager = getSystemService(Context.PRINT_SERVICE) as? PrintManager ?: return
     val adapter = object : PrintDocumentAdapter() {
         override fun onLayout(old: PrintAttributes?, new: PrintAttributes?, signal: CancellationSignal?, callback: LayoutResultCallback, extras: Bundle?) {
@@ -98,7 +98,7 @@ fun Context.printPdf(file: File) {
                 callback.onLayoutCancelled()
                 return
             }
-            val info = PrintDocumentInfo.Builder(file.name).setContentType(PrintDocumentInfo.CONTENT_TYPE_DOCUMENT).build()
+            val info = PrintDocumentInfo.Builder(name).setContentType(PrintDocumentInfo.CONTENT_TYPE_DOCUMENT).build()
             callback.onLayoutFinished(info, old != new)
         }
 
@@ -113,7 +113,7 @@ fun Context.printPdf(file: File) {
             }
         }
     }
-    manager.print(file.nameWithoutExtension, adapter, null)
+    manager.print(name.removeSuffix(".pdf"), adapter, null)
 }
 
 // endregion

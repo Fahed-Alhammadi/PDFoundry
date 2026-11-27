@@ -115,11 +115,16 @@ fun DocumentPickerSheet(
             scope.launch {
                 working = true
                 try {
-                    val skipped = mutableListOf<io.pdfoundry.app.data.Skipped>()
-                    val opened = store.open(uris, skipped)
-                    if (skipped.isNotEmpty()) onError("That file isn't a PDF, or it couldn't be read.")
-                    val documents = opened.mapNotNull { file -> store.items.firstOrNull { it.file == file }?.let { PickedDocument(it, temporary = false) } }
-                    documents.firstOrNull()?.let { hand(listOf(it)) }
+                    // Only the real file, where it lives: a hand-over or a file its app won't let us change is refused.
+                    val opened = try {
+                        store.openForChange(uris.first())
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        onError(e.message ?: "PDFoundry can't change this file where it is.")
+                        null
+                    }
+                    opened?.let { file -> store.items.firstOrNull { it.file == file } }?.let { hand(listOf(PickedDocument(it, temporary = false))) }
                 } finally {
                     working = false
                 }

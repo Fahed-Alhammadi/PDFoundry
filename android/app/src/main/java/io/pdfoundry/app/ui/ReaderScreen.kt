@@ -141,7 +141,14 @@ enum class ToolMode { None, Markup, FillSign }
  * is written back to [file] protected with the same password, so the file is never saved without it.
  * The password is held in memory only, for as long as the document is open.
  */
-class ReaderState(private val context: Context, val file: File, private val scope: CoroutineScope, private val store: DocumentStore = context.app.store) {
+class ReaderState(
+    private val context: Context,
+    val file: File,
+    private val scope: CoroutineScope,
+    private val store: DocumentStore = context.app.store,
+    /** Where saves run: outlives the screen, so a change asked for just before closing is still saved. */
+    private val work: CoroutineScope = context.app.scope
+) {
     var source by mutableStateOf<PdfSource?>(null)
         private set
     /** Bumped after every change so pages re-render. */
@@ -227,7 +234,11 @@ class ReaderState(private val context: Context, val file: File, private val scop
         }
     }
 
+    /** Set by [close]: nothing is opened for display after that. */
+    @Volatile private var closed = false
+
     private suspend fun reopen() {
+        if (closed) return
         val old = source
         val opened = withContext(Dispatchers.IO) {
             try {
@@ -260,6 +271,10 @@ class ReaderState(private val context: Context, val file: File, private val scop
                     if (originalPassword == null) originalPassword = password
                     showsUnlocked = true
                     locked = false
+                    // Opened with its owner password while another one opens it: saves use the one entered.
+                    if (!readOnly && !withContext(Dispatchers.IO) { PdfEngine.opensWith(file, password) }) {
+                        message = "Saving will set this document's password to the one you entered."
+                    }
                     reopen()
                 }
                 UnlockResult.Limited -> {
@@ -336,12 +351,12 @@ class ReaderState(private val context: Context, val file: File, private val scop
     private val saving = Mutex()
     private val queued = AtomicInteger(0)
 
-    private fun queue(work: suspend () -> Unit) {
+    private fun queue(job: suspend () -> Unit) {
         queued.incrementAndGet()
         busy = true
-        scope.launch {
+        work.launch {
             try {
-                saving.withLock { work() }
+                saving.withLock { job() }
             } finally {
                 if (queued.decrementAndGet() == 0) busy = false
             }
@@ -479,7 +494,8 @@ class ReaderState(private val context: Context, val file: File, private val scop
      */
     fun setField(field: FormField, value: String) {
         if (field.readOnly || field.kind == FieldKind.Signature) return
-        if (value == field.value) return
+        val unchanged = if (field.kind == FieldKind.Checkbox || field.kind == FieldKind.Radio) (value.isNotEmpty() && value != "Off") == field.checked else value == field.value
+        if (unchanged) return
         edit { PdfEngine.setField(it, field.name, value, field.widget) }
     }
 
@@ -492,14 +508,16 @@ class ReaderState(private val context: Context, val file: File, private val scop
     }
 
     /**
-     * Puts the file back exactly as it was when it was opened (with the password it had then, if any).
-     * Undo brings the changes back.
+     * Puts the document's contents back exactly as they were when it was opened. Revert restores
+     * contents, not protection: a document given a password since then keeps it. With the password it
+     * was opened with (or none), the file is restored byte for byte. Undo brings the changes back.
      */
     fun revertToOriginal() {
         if (readOnly) return
         queue {
             try {
-                val restored = originalPassword
+                val opened = originalPassword
+                val restored = password ?: opened
                 withContext(Dispatchers.IO) {
                     val target = content
                     val snapshot = File(undoFolder, "${System.nanoTime()}.pdf")
@@ -509,9 +527,13 @@ class ReaderState(private val context: Context, val file: File, private val scop
                     try {
                         if (restored != null) {
                             unlockedCopy.parentFile?.mkdirs()
-                            if (PdfEngine.unlock(original, restored, unlockedCopy) != UnlockResult.Full) throw PdfException("The original could not be opened.")
+                            if (opened != null) {
+                                if (PdfEngine.unlock(original, opened, unlockedCopy) != UnlockResult.Full) throw PdfException("The original could not be opened.")
+                            } else {
+                                original.copyTo(unlockedCopy, overwrite = true)
+                            }
                         }
-                        original.copyTo(file, overwrite = true)
+                        if (restored == opened) original.copyTo(file, overwrite = true) else PdfEngine.protect(unlockedCopy, restored!!, file)
                         store.push(file)
                     } catch (e: Exception) {
                         before.copyTo(file, overwrite = true)
@@ -555,16 +577,26 @@ class ReaderState(private val context: Context, val file: File, private val scop
         runCatching { PdfEngine.search(viewFile, query) }.getOrDefault(emptyList())
     }
 
+    /**
+     * Closes the document. Changes still saving or waiting to be saved finish first; then the password
+     * is forgotten and the undo copies and the unlocked copy are deleted.
+     */
     fun close() {
-        val old = source
-        source = null
-        password = null
-        originalPassword = null
-        Thread {
-            old?.close()
-            undoFolder.deleteRecursively()
-            unlockedCopy.delete()
-        }.start()
+        closed = true
+        // In the same scope as the saves and after them: the lock is handed out first come, first served.
+        work.launch {
+            saving.withLock {
+                val old = source
+                source = null
+                password = null
+                originalPassword = null
+                withContext(Dispatchers.IO) {
+                    old?.close()
+                    undoFolder.deleteRecursively()
+                    unlockedCopy.delete()
+                }
+            }
+        }
     }
 }
 
@@ -654,7 +686,7 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
                             IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, "More") }
                             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                                 DropdownMenuItem(text = { Text("Share") }, leadingIcon = { Icon(Icons.Filled.Share, null) }, onClick = { menu = false; context.sharePdfs(listOf(file)) })
-                                DropdownMenuItem(text = { Text("Print") }, leadingIcon = { Icon(Icons.Filled.Print, null) }, onClick = { menu = false; context.printPdf(file) })
+                                DropdownMenuItem(text = { Text("Print") }, leadingIcon = { Icon(Icons.Filled.Print, null) }, onClick = { menu = false; context.printPdf(state.viewFile, file.name) })
                                 if (location != null) {
                                     DropdownMenuItem(text = { Text("Save a copy in PDFoundry") }, leadingIcon = { Icon(Icons.Filled.FileCopy, null) }, onClick = {
                                         menu = false

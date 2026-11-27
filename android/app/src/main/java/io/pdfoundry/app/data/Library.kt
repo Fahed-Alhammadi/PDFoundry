@@ -159,7 +159,20 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
      * one-time hand-over, or one its app doesn't let others change) is copied into the library
      * instead, as [import] does. Returns where each one can be read.
      */
-    suspend fun open(uris: List<Uri>, skipped: MutableList<Skipped>? = null): List<File> {
+    suspend fun open(uris: List<Uri>, skipped: MutableList<Skipped>? = null): List<File> = open(uris, skipped, copyHandovers = true)
+
+    /**
+     * Opens one PDF where it lives for a tool that changes the real file (Password-protect). A file that
+     * can't be kept and written where it is (a one-time hand-over, or one its app doesn't let others
+     * change) is refused rather than copied: changing a copy would leave the real file as it was.
+     */
+    suspend fun openForChange(uri: Uri): File {
+        val skipped = mutableListOf<Skipped>()
+        return open(listOf(uri), skipped, copyHandovers = false).firstOrNull()
+            ?: throw PdfException(if (skipped.isEmpty()) "PDFoundry can't change this file where it is." else if (skipped.first() == Skipped.NotPdf) "That file isn't a PDF." else "That file couldn't be read.")
+    }
+
+    private suspend fun open(uris: List<Uri>, skipped: MutableList<Skipped>?, copyHandovers: Boolean): List<File> {
         val handovers = mutableListOf<Uri>()
         val opened = withContext(Dispatchers.IO) {
             gate.withLock {
@@ -191,7 +204,7 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
                 }
             }
         }
-        val copied = if (handovers.isEmpty()) emptyList() else import(handovers, skipped = skipped)
+        val copied = if (handovers.isEmpty() || !copyHandovers) emptyList() else import(handovers, skipped = skipped)
         refresh()
         return (opened + copied).distinct()
     }
@@ -476,7 +489,8 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
      */
     suspend fun protect(file: File, password: String) {
         withContext(Dispatchers.IO) {
-            syncForReading(file)
+            // A working copy that can't be brought up to date must not be written over newer content.
+            if (!syncForReading(file)) throw PdfException("This file can't be reached right now, so it can't be protected. Try again when it can be opened.")
             if (PdfEngine.isProtected(file)) throw PdfException("This document is already protected with a password.")
             val before = File(context.cacheDir, "protect-${System.nanoTime()}.pdf")
             file.copyTo(before, overwrite = true)
@@ -527,10 +541,15 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
     private val pickedDirectory get() = File(context.cacheDir, "picked")
 
     /** Temporary files a tool was using when the app was closed. */
-    private fun clearLeftovers() {
+    internal fun clearLeftovers() {
         pickedDirectory.deleteRecursively()
-        // Unlocked copies of protected files the reader or a tool had open.
-        unlockedDirectory(context).deleteRecursively()
+        // Unlocked copies of protected files, and the reader's undo copies (plain for a protected
+        // document), left by an earlier run that ended without closing them. Anything made since this
+        // process started belongs to a document open now and is kept.
+        val started = System.currentTimeMillis() - (android.os.SystemClock.elapsedRealtime() - android.os.Process.getStartElapsedRealtime())
+        listOf(unlockedDirectory(context), File(context.cacheDir, "undo")).forEach { folder ->
+            folder.listFiles()?.filter { it.lastModified() < started }?.forEach { it.deleteRecursively() }
+        }
         // Downloads made by an earlier version's Extract Pages.
         context.cacheDir.listFiles { file -> file.name.startsWith("extract-") && file.name.endsWith(".pdf") }?.forEach { it.delete() }
     }
