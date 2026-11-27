@@ -1716,6 +1716,104 @@ async function screenshots(app: App): Promise<void> {
   await app.reader.undo();
   await app.reader.close();
 
+  // Markup on the rental agreement: a rectangle, an arrow and a comment on page 1.
+  await app.reader.open(rental);
+  const reader = document.querySelector('.reader') as HTMLElement;
+  const bar = reader.querySelector('.dock')!;
+  const pageOf = (i: number) => reader.querySelectorAll<HTMLElement>('.page')[i];
+  const at = (i: number, fx: number, fy: number) => {
+    const box = pageOf(i).getBoundingClientRect();
+    return [box.left + box.width * fx, box.top + box.height * fy] as const;
+  };
+  const drag = (i: number, from: [number, number], to: [number, number]) => {
+    pointer(pageOf(i), 'pointerdown', ...at(i, ...from));
+    pointer(pageOf(i), 'pointermove', ...at(i, (from[0] + to[0]) / 2, (from[1] + to[1]) / 2));
+    pointer(pageOf(i), 'pointermove', ...at(i, ...to));
+    pointer(pageOf(i), 'pointerup', ...at(i, ...to));
+  };
+  const applied = async (before: Uint8Array) => {
+    await until(() => app.reader.data !== before && !reader.classList.contains('busy') && !!bar.querySelector('.tool'), 'the change to be applied');
+    await wait(300);
+  };
+  await until(() => reader.querySelectorAll('.page').length === 3, 'the rental agreement');
+  app.reader.scrollToPage(0);
+  await until(() => pageOf(0).dataset.painted !== undefined, 'page 1');
+  window.getSelection()?.removeAllRanges();
+  clickButton(bar, 'Markup');
+  clickButton(bar, 'Shapes');
+  await until(() => !!document.querySelector('.menu'), 'the shapes menu');
+  clickButton(document.querySelector('.menu')!, 'Rectangle');
+  let before = app.reader.data;
+  drag(0, [0.07, 0.245], [0.93, 0.302]);
+  await applied(before);
+  clickButton(bar, 'Shapes');
+  await until(() => !!document.querySelector('.menu'), 'the shapes menu');
+  clickButton(document.querySelector('.menu')!, 'Pink');
+  clickButton(bar, 'Shapes');
+  await until(() => !!document.querySelector('.menu'), 'the shapes menu');
+  clickButton(document.querySelector('.menu')!, 'Arrow');
+  before = app.reader.data;
+  drag(0, [0.8, 0.44], [0.68, 0.31]);
+  await applied(before);
+  clickButton(bar, 'Comment');
+  pointer(pageOf(0), 'pointerdown', ...at(0, 0.83, 0.455));
+  pointer(pageOf(0), 'pointerup', ...at(0, 0.83, 0.455));
+  await until(() => !!document.querySelector('.dialog textarea.comment-text'), 'the comment sheet');
+  (document.querySelector('.dialog textarea.comment-text') as HTMLTextAreaElement).value = 'Can the notice period be thirty days?';
+  // The reader does not draw comment notes on an editable page yet, so the shot shows the comment being written.
+  await shot('16-shapes-comment');
+  before = app.reader.data;
+  clickButton(lastDialog(), 'Done');
+  await applied(before);
+  clickButton(bar, 'Close Markup');
+
+  // The signature on the last page, selected.
+  app.reader.scrollToPage(2);
+  await until(() => pageOf(2).dataset.painted !== undefined, 'page 3');
+  await wait(400);
+  window.getSelection()?.removeAllRanges();
+  const [sx, sy] = at(2, 0.25, 0.65);
+  pageOf(2).dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: sx, clientY: sy, button: 0 }));
+  await until(() => !!reader.querySelector('.mark-selection'), 'the signature to be selected');
+  reader.querySelector('.mark-selection')!.scrollIntoView({ block: 'center' });
+  await shot('17-selected-mark');
+  reader.querySelector('.mark-selection')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+
+  // Redact on page 2: two areas waiting for Apply.
+  app.reader.scrollToPage(1);
+  await until(() => pageOf(1).dataset.painted !== undefined, 'page 2');
+  clickButton(bar, 'Markup');
+  clickButton(bar, 'Redact');
+  const terms = await openPdf(app.reader.data);
+  for (const words of ['sixty days', 'thirty days']) {
+    const found = (await search(terms, words)).find((m) => m.page === 1);
+    for (const r of found?.rects ?? []) app.reader.addRedaction(1, { x: r.x - 0.004, y: r.y - 0.003, width: r.width + 0.008, height: r.height + 0.006 });
+  }
+  void terms.loadingTask.destroy();
+  await wait(300);
+  await shot('18-redact');
+  clickButton(bar, 'Close Markup');
+  await until(() => !!document.querySelector('.dialog'), 'the redaction question');
+  clickButton(lastDialog(), 'Discard');
+  await until(() => hasButton(bar, 'Markup'), 'the reading bar');
+
+  // The Watermark sheet with its preview.
+  void app.reader.watermark();
+  await until(() => !!document.querySelector('.dialog.watermark .preview-watermark'), 'the Watermark sheet');
+  await shot('20-watermark');
+  clickButton(lastDialog(), 'Cancel');
+  const closing = app.reader.close();
+  await until(() => !!document.querySelector('.dialog'), 'the save question');
+  clickButton(lastDialog(), 'Don’t Save');
+  await closing;
+
+  // Every Tools section fits in the window, so 11-tools already shows them: this one is the dark appearance.
+  await api.setAppearance('dark');
+  app.show('tools');
+  await wait(400);
+  await shot('19-tools-enhance');
+  await api.setAppearance('light');
+
   app.show('settings');
   await shot('06-settings');
   app.settings.showAbout();
