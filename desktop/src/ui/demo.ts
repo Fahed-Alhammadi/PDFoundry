@@ -858,7 +858,9 @@ async function pageToolsTest(check: Check, app: App): Promise<void> {
   doc = await openPdf(small);
   const pagesThere = doc.numPages;
   void doc.loadingTask.destroy();
-  check('Compress saves a smaller copy and leaves the source alone', savedAt === target && small.length < photo.length * 0.6 && pagesThere === 1
+  // Windows gives the saved path with backslashes; compare the paths, not their separators.
+  const samePath = (a: string | null | undefined, b: string) => a?.replace(/\\/g, '/') === b.replace(/\\/g, '/');
+  check('Compress saves a smaller copy and leaves the source alone', samePath(savedAt, target) &&small.length < photo.length * 0.6 && pagesThere === 1
     && sameBytes(await api.devRead(source), photo), JSON.stringify({ said, from: photo.length, to: small.length }));
   const plain = await api.devCreate('Compress plain', await pdf.welcomeGuide());
   void compressSheet({ name: 'Compress plain', path: plain, bytes: await api.devRead(plain) });
