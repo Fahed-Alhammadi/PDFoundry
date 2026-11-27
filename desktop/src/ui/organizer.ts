@@ -78,7 +78,10 @@ export function organizer(reader: Reader): void {
 
   const extract = async (picked: number[]) => {
     try {
-      const saved = await api.saveAs(`${title(reader.file)} pages`, await pdf.extract(reader.data, picked), reader.file);
+      // A protected document's pages stay protected, with the same password.
+      const password = reader.passwordFor(reader.file);
+      const bytes = await pdf.extract(reader.data, picked);
+      const saved = await api.saveAs(`${title(reader.file)} pages`, password ? await pdf.protect(bytes, password) : bytes, reader.file, [reader.file]);
       if (saved) toast(`Saved ${pages(picked.length)} as “${title(saved)}”.`);
     } catch (e) {
       toast(message(e), true);

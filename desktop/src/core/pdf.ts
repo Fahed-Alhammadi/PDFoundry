@@ -5,9 +5,12 @@
 // the page as it is displayed (after its rotation), measured from the top-left corner: the same convention as the
 // Android app's PdfEngine.
 import {
-  BlendMode, PDFArray, PDFDocument, PDFPage, decodePDFRawStream, degrees, fill, popGraphicsState, pushGraphicsState, rectangle, setFillingRgbColor, setGraphicsState,
+  BlendMode, PDFArray, PDFCheckBox, PDFDocument, PDFDropdown, PDFHexString, PDFName, PDFOptionList, PDFPage, PDFRadioGroup, PDFRef, PDFSignature, PDFStream, PDFTextField,
+  StandardFonts, decodePDFRawStream, degrees, fill, popGraphicsState, pushGraphicsState, rectangle, setFillingRgbColor, setGraphicsState,
 } from '@cantoo/pdf-lib';
-import type { PDFRawStream } from '@cantoo/pdf-lib';
+import type { PDFField, PDFFont, PDFRawStream } from '@cantoo/pdf-lib';
+import { Encodings } from '@cantoo/pdf-lib/standard-fonts';
+import { encryptionOf, isOwnerPassword, isUserPassword } from './security.ts';
 
 export class PdfError extends Error {}
 
@@ -34,7 +37,8 @@ async function open(bytes: Uint8Array): Promise<PDFDocument> {
 }
 
 function save(doc: PDFDocument): Promise<Uint8Array> {
-  return doc.save({ useObjectStreams: true });
+  // Form fields are never redrawn behind the caller's back: only `fillFields` draws, and only what it filled.
+  return doc.save({ useObjectStreams: true, updateFieldAppearances: false });
 }
 
 function check(doc: PDFDocument, pages: number[]): number[] {
@@ -58,11 +62,12 @@ export async function pageCount(bytes: Uint8Array): Promise<number> {
   return (await open(bytes)).getPageCount();
 }
 
-/** Joins documents, in the order given, into one. */
+/** Joins documents, in the order given, into one. Protected documents are refused: the result would have no obvious password. */
 export async function merge(sources: Uint8Array[]): Promise<Uint8Array> {
   if (sources.length < 2) throw new PdfError('Choose two or more documents to merge.');
   const out = await PDFDocument.create();
   for (const bytes of sources) {
+    if (await isProtected(bytes)) throw new PdfError('A PDF protected with a password can’t be merged. Use More › Remove Password first.');
     const doc = await open(bytes);
     for (const page of await out.copyPages(doc, doc.getPageIndices())) out.addPage(page);
   }
@@ -77,6 +82,106 @@ export async function extract(bytes: Uint8Array, pages: number[]): Promise<Uint8
   const out = await PDFDocument.create();
   for (const page of await out.copyPages(doc, chosen)) out.addPage(page);
   return save(out);
+}
+
+/** One new document per part (each a list of pages, in order), as Split PDF makes them. The source is only read. */
+export async function split(bytes: Uint8Array, parts: number[][]): Promise<Uint8Array[]> {
+  if (!parts.length || parts.some((p) => !p.length)) throw new PdfError('There is nothing to split.');
+  const doc = await open(bytes);
+  const out: Uint8Array[] = [];
+  for (const part of parts) {
+    for (const p of part) if (!Number.isInteger(p) || p < 0 || p >= doc.getPageCount()) throw new PdfError(`There is no page ${p + 1}.`);
+    const piece = await PDFDocument.create();
+    for (const page of await piece.copyPages(doc, part)) piece.addPage(page);
+    out.push(await save(piece));
+  }
+  return out;
+}
+
+// Passwords. A protected document is decrypted once, when its password is entered; every change works on the
+// decrypted bytes, and every write encrypts them again with the same password (`protect`). The password is never
+// stored here.
+
+/** Is the file encrypted (an open password, or restrictions only)? */
+export async function isProtected(bytes: Uint8Array): Promise<boolean> {
+  try {
+    return (await PDFDocument.load(bytes, { ignoreEncryption: true, updateMetadata: false })).isEncrypted;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Decrypts a protected file with its password. Null when the password is wrong. `full`: the password is the owner
+ * password (or the same as the open password), which is what allows changing the file; a password that only opens
+ * it gives `full: false`, and the document must stay read-only. `opens`: the password is also the open password, so
+ * saving with it as both passwords leaves the way the file opens unchanged (false: saving changes it to this one).
+ * A file that is not protected comes back as it is.
+ */
+export async function unlock(bytes: Uint8Array, password: string): Promise<{ bytes: Uint8Array; full: boolean; opens: boolean } | null> {
+  let probe: PDFDocument;
+  try {
+    probe = await PDFDocument.load(bytes, { ignoreEncryption: true, updateMetadata: false });
+  } catch {
+    throw new PdfError('This file is not a PDF that PDFoundry can read.');
+  }
+  const encryption = encryptionOf(probe);
+  if (!probe.isEncrypted || !encryption) return { bytes, full: true, opens: true };
+  let doc: PDFDocument;
+  try {
+    doc = await PDFDocument.load(bytes, { password, updateMetadata: false });
+  } catch (e) {
+    if (/password/i.test(e instanceof Error ? e.message : String(e))) return null;
+    throw new PdfError('This PDF is protected in a way PDFoundry can’t open for changes.');
+  }
+  const full = await isOwnerPassword(encryption, password);
+  const opens = await isUserPassword(encryption, password);
+  // pdf-lib drops the trailer's /Encrypt but keeps the dictionary itself and the old cross-reference streams (which
+  // still name it): a reader finding either would take the decrypted file for an encrypted one.
+  const ref = probe.context.trailerInfo.Encrypt;
+  if (ref instanceof PDFRef) doc.context.delete(ref);
+  for (const [at, object] of doc.context.enumerateIndirectObjects()) {
+    if (object instanceof PDFStream && object.dict.get(PDFName.of('Type')) === PDFName.of('XRef')) doc.context.delete(at);
+  }
+  return { bytes: await save(doc), full, opens };
+}
+
+/** How a document can be worked on, once opened: see `access`. */
+export type Access = { bytes: Uint8Array; editable: boolean; password: string | null; changesPassword: boolean };
+
+/**
+ * What the reader does with a file it has just opened for display, with the password pdf.js was given (null when it
+ * asked none). Editable and decrypted when the password gives full access; otherwise read-only, as it is, including
+ * a protected file PDFoundry can show but not decrypt itself. Never throws for a protected file.
+ * `changesPassword`: saving will make the entered password the open password too (it was only the owner password).
+ */
+export async function access(bytes: Uint8Array, password: string | null): Promise<Access> {
+  const readOnly: Access = { bytes, editable: false, password: null, changesPassword: false };
+  if (!(await isProtected(bytes))) return { ...readOnly, editable: await isEditable(bytes) };
+  if (password === null) return readOnly;
+  try {
+    const unlocked = await unlock(bytes, password);
+    if (!unlocked?.full) return readOnly;
+    return { bytes: unlocked.bytes, editable: true, password, changesPassword: !unlocked.opens };
+  } catch {
+    return readOnly;
+  }
+}
+
+/**
+ * Encrypts a document with AES-256. The password is both the open (user) and the owner password, and everything is
+ * allowed, so whoever has the password can do anything with the file.
+ */
+export async function protect(bytes: Uint8Array, password: string): Promise<Uint8Array> {
+  if (!password) throw new PdfError('Enter a password.');
+  const doc = await open(bytes);
+  doc.encrypt({
+    userPassword: password,
+    ownerPassword: password,
+    algorithm: 'AES-256',
+    permissions: { printing: 'highResolution', modifying: true, copying: true, annotating: true, fillingForms: true, contentAccessibility: true, documentAssembly: true },
+  });
+  return save(doc);
 }
 
 export async function movePage(bytes: Uint8Array, from: number, to: number): Promise<Uint8Array> {
@@ -326,5 +431,153 @@ export async function welcomeGuide(): Promise<Uint8Array> {
   page.drawText('Try it: sign on the line below.', { x: 56, y: 190, size: 11.5, font: regular, color: rgb(0.2, 0.22, 0.27) });
   page.drawLine({ start: { x: 56, y: 130 }, end: { x: 300, y: 130 }, thickness: 1, color: rgb(0.2, 0.22, 0.27) });
   page.drawText('Signature', { x: 56, y: 114, size: 9, font: regular, color: rgb(0.45, 0.47, 0.52) });
+  return save(doc);
+}
+
+// Form fields. Values are written as the fields' own values (/V), with appearances so that every reader shows them,
+// and the fields stay fields: other apps can still read and change them. Nothing is flattened.
+
+export type FieldKind = 'text' | 'multiline' | 'checkbox' | 'radio' | 'choice' | 'signature';
+export type FieldValue = string | boolean | string[];
+/** One widget of a field: where it is on its page (displayed, fractions from the top-left) and the field's value. */
+export type FieldInfo = { name: string; kind: FieldKind; page: number; rect: PageRect; value: FieldValue; options: string[]; readOnly: boolean };
+
+/** `box` (page coordinates, unrotated) as a rectangle of the displayed page: the reverse of `userRect`. */
+export function displayedRect(page: PDFPage, box: { x: number; y: number; width: number; height: number }): PageRect {
+  const crop = page.getCropBox();
+  const turns = quarterTurns(page);
+  const shown = displayedSize(page);
+  const toShown = (px: number, py: number): [number, number] => {
+    const [x, y] = [px - crop.x, py - crop.y];
+    return turns === 0 ? [x, crop.height - y] : turns === 1 ? [y, x] : turns === 2 ? [crop.width - x, y] : [crop.height - y, crop.width - x];
+  };
+  const [x1, y1] = toShown(box.x, box.y);
+  const [x2, y2] = toShown(box.x + box.width, box.y + box.height);
+  return {
+    x: Math.min(x1, x2) / shown.width,
+    y: Math.min(y1, y2) / shown.height,
+    width: Math.abs(x2 - x1) / shown.width,
+    height: Math.abs(y2 - y1) / shown.height,
+  };
+}
+
+function kindOf(field: PDFField): FieldKind | null {
+  if (field instanceof PDFTextField) return field.isMultiline() ? 'multiline' : 'text';
+  if (field instanceof PDFCheckBox) return 'checkbox';
+  if (field instanceof PDFRadioGroup) return 'radio';
+  if (field instanceof PDFDropdown || field instanceof PDFOptionList) return 'choice';
+  if (field instanceof PDFSignature) return 'signature';
+  return null; // push buttons: nothing to fill
+}
+
+function valueOf(field: PDFField): FieldValue {
+  if (field instanceof PDFTextField) return field.getText() ?? '';
+  if (field instanceof PDFCheckBox) return field.isChecked();
+  if (field instanceof PDFRadioGroup) return field.getSelected() ?? '';
+  if (field instanceof PDFDropdown || field instanceof PDFOptionList) {
+    const selected = field.getSelected();
+    return selected.length > 1 ? selected : selected[0] ?? '';
+  }
+  return '';
+}
+
+/** The fillable fields of a document, one entry per widget, in page order. Empty without a form (or with an XFA-only one). */
+export async function fields(bytes: Uint8Array): Promise<FieldInfo[]> {
+  const doc = await open(bytes);
+  if (!doc.catalog.getAcroForm()) return [];
+  const pageOf = new Map<string, number>();
+  doc.getPages().forEach((page, index) => {
+    for (const ref of page.node.Annots()?.asArray() ?? []) if (ref instanceof PDFRef) pageOf.set(ref.toString(), index);
+  });
+  const out: FieldInfo[] = [];
+  for (const field of doc.getForm().getFields()) {
+    const kind = kindOf(field);
+    if (!kind) continue;
+    for (const widget of field.acroField.getWidgets()) {
+      const ref = doc.context.getObjectRef(widget.dict);
+      const owner = widget.P();
+      const page = (ref ? pageOf.get(ref.toString()) : undefined) ?? (owner ? doc.getPages().findIndex((p) => p.ref === owner) : -1);
+      if (page < 0) continue;
+      out.push({
+        name: field.getName(),
+        kind,
+        page,
+        rect: displayedRect(doc.getPage(page), widget.getRectangle()),
+        value: valueOf(field),
+        options: field instanceof PDFRadioGroup || field instanceof PDFDropdown || field instanceof PDFOptionList ? field.getOptions() : [],
+        readOnly: field.isReadOnly(),
+      });
+    }
+  }
+  return out.sort((a, b) => a.page - b.page || a.rect.y - b.rect.y || a.rect.x - b.rect.x);
+}
+
+/**
+ * Can a field show this text with the standard font (Helvetica, Windows Latin)? When not (Arabic, say), the window
+ * draws the text itself and the drawing becomes the field's appearance (`fillFields` `images`). pdf-lib would
+ * otherwise draw "?" for every letter it cannot encode.
+ */
+export function canEncode(text: string): boolean {
+  return Array.from(text.replace(/\s/g, ' ')).every((ch) => Encodings.WinAnsi.canEncodeUnicodeCodePoint(ch.codePointAt(0)!));
+}
+
+/**
+ * Fills fields by name: text and choices take strings (an option list may take several), checkboxes true or false,
+ * radio groups the chosen option ('' clears). `images`: for a text field whose text the standard font cannot show,
+ * a PNG of the text drawn by the window, used as the field's appearance; its value is still the real text. Refuses
+ * read-only fields and names that are not fields.
+ *
+ * Only the fields given here get new appearances: the others are left exactly as they are (a form that asks readers
+ * to draw its fields, with NeedAppearances, keeps asking). A radio button may be named by its option or by its
+ * on-state name (what pdf.js reports); a choice by its export value or the text shown, and its export value is what
+ * is written.
+ */
+export async function fillFields(bytes: Uint8Array, values: Record<string, FieldValue>, images: Record<string, Uint8Array> = {}): Promise<Uint8Array> {
+  const doc = await open(bytes);
+  const form = doc.getForm();
+  let font: PDFFont | null = null;
+  for (const [name, value] of Object.entries(values)) {
+    const field = form.getFieldMaybe(name);
+    if (!field || !kindOf(field) || field instanceof PDFSignature) throw new PdfError(`This form has no field “${name}” to fill.`);
+    if (field.isReadOnly()) throw new PdfError('That field can’t be changed.');
+    try {
+      let exports: string[] | null = null; // a choice whose export values differ from the text shown
+      if (field instanceof PDFTextField) {
+        const text = Array.isArray(value) ? value.join(' ') : value === false ? '' : String(value);
+        field.setText(text === '' ? undefined : text);
+        if (images[name] && text !== '') field.setImage(await doc.embedPng(images[name]));
+        else if (text !== '' && !canEncode(text)) throw new PdfError('This text needs to be drawn by the window first.');
+      } else if (field instanceof PDFCheckBox) {
+        if (value === true || value === 'true') field.check();
+        else field.uncheck();
+      } else if (field instanceof PDFRadioGroup) {
+        if (value === '' || value === false) field.clear();
+        else {
+          const options = field.getOptions();
+          let option = String(value);
+          if (!options.includes(option)) {
+            const at = field.acroField.getOnValues().map((n) => n.decodeText()).indexOf(option);
+            if (at >= 0 && at < options.length) option = options[at];
+          }
+          field.select(option);
+        }
+      } else if (field instanceof PDFDropdown || field instanceof PDFOptionList) {
+        const entries = field.acroField.getOptions().map((o) => ({ value: o.value.decodeText(), shown: (o.display ?? o.value).decodeText() }));
+        const chosen = (Array.isArray(value) ? value : [String(value)]).filter((v) => v !== '')
+          .map((v) => entries.find((e) => e.value === v) ?? entries.find((e) => e.shown === v) ?? { value: v, shown: v });
+        if (!chosen.length) field.clear();
+        else field.select(chosen.map((c) => c.shown));
+        if (chosen.some((c) => c.value !== c.shown)) exports = chosen.map((c) => c.value);
+      }
+      if (field.needsAppearancesUpdate()) field.defaultUpdateAppearances((font ??= await doc.embedFont(StandardFonts.Helvetica)));
+      if (exports) {
+        // Drawn with the text shown; the value is the export value, as the form defines it.
+        const v = exports.length === 1 ? PDFHexString.fromText(exports[0]) : doc.context.obj(exports.map((e) => PDFHexString.fromText(e)));
+        field.acroField.dict.set(PDFName.of('V'), v);
+      }
+    } catch (e) {
+      throw e instanceof PdfError ? e : new PdfError(`“${name}” can’t take that value.`);
+    }
+  }
   return save(doc);
 }

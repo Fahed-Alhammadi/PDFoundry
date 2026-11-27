@@ -28,10 +28,20 @@ async function start(): Promise<void> {
   const library = new Library({
     openDocument: (file) => void reader.open(file),
     openFile: () => reader.file,
-    contents: async (file) => reader.unsaved(file) ?? (await api.read(file)),
+    contents: async (file) => {
+      // The open document's unsaved edits of a protected file are decrypted: refuse them as merge refuses the file.
+      if (reader.passwordFor(file)) throw new Error('A PDF protected with a password can’t be merged. Use More › Remove Password first.');
+      return reader.unsaved(file) ?? (await api.read(file));
+    },
   });
   const settings = new SettingsView(info);
-  const tools = new ToolsView({ library, openFile: () => reader.file, unsaved: (file) => reader.unsaved(file) });
+  const tools = new ToolsView({
+    library,
+    openFile: () => reader.file,
+    unsaved: (file) => reader.unsaved(file),
+    passwordFor: (file) => reader.passwordFor(file),
+    protectOpen: () => reader.protectWithPassword(),
+  });
 
   const nav = (target: Route, symbol: string, label: string) =>
     h('button.nav', { type: 'button', dataset: { route: target }, onclick: () => (target === 'documents' && route === 'documents' && reader.file ? void reader.close() : show(target)) }, icon(symbol, 20), label);

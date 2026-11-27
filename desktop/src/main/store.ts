@@ -6,6 +6,8 @@ import path from 'node:path';
 
 export type RecentFile = { path: string; name: string; folder: string; size: number; modified: number; opened: number };
 export type Settings = { appearance: 'system' | 'light' | 'dark'; welcomed: boolean };
+/** Saved signatures and saved initials are kept apart, the same way. */
+export type InkKind = 'signature' | 'initials';
 
 const DEFAULTS: Settings = { appearance: 'system', welcomed: false };
 const MAX_RECENT = 60;
@@ -52,16 +54,19 @@ export class Store {
   /** Where the welcome guide lives, and where documents of versions before 1.1 were kept. */
   readonly ownFolder: string;
   private readonly signatures: string;
+  private readonly initials: string;
   private readonly settingsFile: string;
   private readonly recentFile: string;
 
   constructor(root: string) {
     this.ownFolder = path.join(root, 'Documents');
     this.signatures = path.join(root, 'Signatures');
+    this.initials = path.join(root, 'Initials');
     this.settingsFile = path.join(root, 'settings.json');
     this.recentFile = path.join(root, 'recent.json');
     mkdirSync(this.ownFolder, { recursive: true });
     mkdirSync(this.signatures, { recursive: true });
+    mkdirSync(this.initials, { recursive: true });
     this.adoptOldLibrary();
   }
 
@@ -77,8 +82,19 @@ export class Store {
     }
   }
 
+  /** The document open in the window: it stays on the list (so it can still be saved) however long the list gets. */
+  private current: string | null = null;
+
+  /** Tells the store which document the window has open (null: none). Only a file on the list can be the current one. */
+  setCurrent(file: string | null): void {
+    this.current = typeof file === 'string' && this.knows(file) ? path.resolve(file) : null;
+  }
+
   private write(list: { path: string; opened: number }[]): void {
-    writeFileSync(this.recentFile, JSON.stringify(list.slice(0, MAX_RECENT), null, 2));
+    const kept = list.slice(0, MAX_RECENT);
+    const current = this.current && !kept.some((e) => e.path === this.current) ? list.find((e) => e.path === this.current) : undefined;
+    if (current) kept.push(current);
+    writeFileSync(this.recentFile, JSON.stringify(kept, null, 2));
   }
 
   /** Versions before 1.1 copied every document into the app's folder. Those copies are listed as recent files. */
@@ -171,6 +187,36 @@ export class Store {
     return this.remember(target);
   }
 
+  /** Split PDF: which of these names (without ".pdf") are already taken in `folder`. */
+  existing(folder: string, names: string[]): string[] {
+    return names.filter((name) => existsSync(path.join(path.resolve(folder), `${cleanName(name)}.pdf`)));
+  }
+
+  /**
+   * Split PDF: writes each part into `folder` as "<name>.pdf". The parts are not listed as recent (a split of a long
+   * document would push everything else off the list). `keepBoth`: a name that is taken gets " 2", " 3"… instead of
+   * being replaced. Nothing is written when any part would replace a file in `keep` (the source), the open document
+   * or any file on the recent list. Returns the paths written, in order.
+   */
+  saveParts(folder: string, parts: { name: string; bytes: Uint8Array }[], keepBoth: boolean, keep: string[] = []): string[] {
+    const dir = path.resolve(folder);
+    if (!statSync(dir).isDirectory()) throw new Error('That folder could not be found.');
+    const used = new Set<string>();
+    const targets = parts.map(({ name }) => {
+      const base = cleanName(name);
+      let target = path.join(dir, `${base}.pdf`);
+      for (let n = 2; keepBoth && (existsSync(target) || used.has(target.toLowerCase())); n++) target = path.join(dir, `${base} ${n}.pdf`);
+      used.add(target.toLowerCase());
+      return target;
+    });
+    const protectedFiles = [...keep, ...(this.current ? [this.current] : []), ...this.saved.map((e) => e.path)];
+    if (targets.some((t) => protectedFiles.some((k) => typeof k === 'string' && k !== '' && sameFile(t, k)))) {
+      throw new Error('A part would replace the file it is made from, the open document or one of your recent files. Choose Keep Both or another folder.');
+    }
+    targets.forEach((target, i) => this.writeFile(target, parts[i].bytes));
+    return targets;
+  }
+
   private writeFile(target: string, bytes: Uint8Array): void {
     const partial = path.join(path.dirname(target), `.${path.basename(target)}.${randomUUID()}.part`);
     try {
@@ -185,26 +231,31 @@ export class Store {
     }
   }
 
-  // Signatures: PNG files named by a random id.
+  // Signatures and initials: PNG files named by a random id, each kind in its own folder.
 
-  listSignatures(): { id: string; png: Uint8Array }[] {
-    return readdirSync(this.signatures)
+  private inkFolder(kind: InkKind = 'signature'): string {
+    return kind === 'initials' ? this.initials : this.signatures;
+  }
+
+  listSignatures(kind: InkKind = 'signature'): { id: string; png: Uint8Array }[] {
+    const folder = this.inkFolder(kind);
+    return readdirSync(folder)
       .filter((f) => /^[0-9a-f-]{36}\.png$/.test(f))
-      .map((f) => ({ id: f.slice(0, -4), file: path.join(this.signatures, f) }))
+      .map((f) => ({ id: f.slice(0, -4), file: path.join(folder, f) }))
       .sort((a, b) => statSync(b.file).mtimeMs - statSync(a.file).mtimeMs)
       .map(({ id, file }) => ({ id, png: readFileSync(file) }));
   }
 
-  addSignature(png: Uint8Array): string {
+  addSignature(png: Uint8Array, kind: InkKind = 'signature'): string {
     if (png.length > 4_000_000 || Buffer.from(png.subarray(0, 8)).toString('hex') !== '89504e470d0a1a0a') throw new Error('That signature could not be saved.');
     const id = randomUUID();
-    writeFileSync(path.join(this.signatures, `${id}.png`), png, { mode: 0o600 });
+    writeFileSync(path.join(this.inkFolder(kind), `${id}.png`), png, { mode: 0o600 });
     return id;
   }
 
-  removeSignature(id: string): void {
+  removeSignature(id: string, kind: InkKind = 'signature'): void {
     if (!/^[0-9a-f-]{36}$/.test(id)) throw new Error('That signature does not exist.');
-    rmSync(path.join(this.signatures, `${id}.png`), { force: true });
+    rmSync(path.join(this.inkFolder(kind), `${id}.png`), { force: true });
   }
 
   // Settings

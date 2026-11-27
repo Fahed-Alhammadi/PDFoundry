@@ -30,7 +30,7 @@ export class SettingsView {
 
   async render(): Promise<void> {
     if (this.showingAbout) return this.renderAbout();
-    const [recent, signatures] = await Promise.all([api.recent(), api.signatures()]);
+    const [recent, signatures, initials] = await Promise.all([api.recent(), api.signatures(), api.signatures('initials')]);
     const appearance = h('div.segmented', { role: 'radiogroup', 'aria-label': 'Appearance' },
       ...(['system', 'light', 'dark'] as const).map((value) =>
         h('button', {
@@ -49,6 +49,8 @@ export class SettingsView {
         h('div.group',
           row('sign', 'tile-ember', 'Signatures', signatures.length === 1 ? '1 saved' : `${signatures.length} saved`, null,
             () => void signatureDialog().then(() => this.render())),
+          row('initials', 'tile-ember', 'Initials', initials.length === 1 ? '1 saved' : `${initials.length} saved`, null,
+            () => void signatureDialog(undefined, 'initials').then(() => this.render())),
           row('documents', 'tile-grey', 'Recent files', recent.length === 1 ? '1 file on the list' : `${recent.length} files on the list`,
             h('button.button', { type: 'button', disabled: !recent.length, onclick: () => void api.clearRecent().then(() => this.render()) }, 'Clear list')),
         ),

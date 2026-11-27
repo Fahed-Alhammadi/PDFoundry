@@ -4,12 +4,14 @@ import { api, title } from './api.ts';
 import type { PickedPdf, RecentFile } from './api.ts';
 import { button, dialog, h, icon, message, pages, toast } from './dom.ts';
 import { openPdf, renderPage } from './pdfview.ts';
+import { unlockSource } from './protect.ts';
 import * as pdf from '../core/pdf.ts';
 
 /**
  * Lists the recent files to pick from, with "Browse…" at the top. Single: resolves the file clicked. Multiple: files
  * are ticked in the order wanted and confirmed with `action`. `browse` opens the system dialog; what it returns is
- * either picked at once (a PickedPdf, single only) or added to the list and ticked (paths). Null when cancelled.
+ * either picked at once (a PickedPdf, or in single mode the first path) or added to the list and ticked (paths).
+ * Null when cancelled.
  */
 export function pickDocuments<T extends 'one' | 'several'>(options: {
   title: string;
@@ -42,6 +44,7 @@ export function pickDocuments<T extends 'one' | 'several'>(options: {
               const got = await options.browse();
               if (!got) return;
               if (!Array.isArray(got)) return finish(got as Result);
+              if (options.mode === 'one') return got.length ? finish(got[0] as Result) : undefined; // opened in place: picked
               for (const file of got) if (!ticked.includes(file)) ticked.push(file);
               files = await api.recent();
               draw();
@@ -82,12 +85,12 @@ export function pickDocuments<T extends 'one' | 'several'>(options: {
  * Extract Pages: page thumbnails to tick and one Extract button. Saves the chosen pages as a new file (asking where)
  * and resolves its path, or null when cancelled. The source is only read.
  */
-export async function extractPages(source: { name: string; path: string; bytes: Uint8Array; unsaved?: boolean }, keep: string[] = []): Promise<string | null> {
-  if (!(await pdf.isEditable(source.bytes))) {
-    toast('This PDF is protected, so its pages cannot be extracted.', true);
-    return null;
-  }
-  const doc = await openPdf(source.bytes);
+export async function extractPages(source: { name: string; path: string; bytes: Uint8Array; unsaved?: boolean; password?: string | null }, keep: string[] = []): Promise<string | null> {
+  // A protected source needs its password (full access); the new file is protected with the same one.
+  const unlocked = await unlockSource(source, 'extracted');
+  if (!unlocked) return null;
+  const { bytes: plain, password } = unlocked;
+  const doc = await openPdf(plain);
   return new Promise((resolve) => {
     let saved: string | null = null;
     const chosen = new Set<number>();
@@ -102,7 +105,8 @@ export async function extractPages(source: { name: string; path: string; bytes: 
       extract.disabled = true;
       try {
         const picked = [...chosen].sort((a, b) => a - b);
-        const bytes = await pdf.extract(source.bytes, picked);
+        let bytes = await pdf.extract(plain, picked);
+        if (password) bytes = await pdf.protect(bytes, password);
         saved = await api.saveAs(`${title(source.name)} pages`, bytes, source.path, [source.path, ...keep]);
         if (saved) {
           toast(`Saved ${pages(picked.length)} as “${title(saved)}”.`);
@@ -157,6 +161,6 @@ export async function extractPages(source: { name: string; path: string; bytes: 
 }
 
 /** The last two parts of a folder path. */
-function folderName(folder: string): string {
+export function folderName(folder: string): string {
   return folder.split(/[\\/]/).filter(Boolean).slice(-2).join(' › ');
 }

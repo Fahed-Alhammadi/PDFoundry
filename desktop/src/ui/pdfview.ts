@@ -50,8 +50,12 @@ export async function pageSizes(doc: PDFDocumentProxy): Promise<Size[]> {
   return sizes;
 }
 
-/** Draws page `index` (0-based) into `canvas`, `width` CSS pixels wide. Returns the task so it can be cancelled. */
-export async function renderPage(doc: PDFDocumentProxy, index: number, canvas: HTMLCanvasElement, width: number, pixelRatio = window.devicePixelRatio || 1): Promise<RenderTask> {
+/**
+ * Draws page `index` (0-based) into `canvas`, `width` CSS pixels wide. Returns the task so it can be cancelled.
+ * Form fields are drawn as they are saved (their appearances), unless `forms` is given: then they are left to the
+ * form layer (`renderFormLayer`), and `forms` collects the pictures of checkboxes and radio buttons it needs.
+ */
+export async function renderPage(doc: PDFDocumentProxy, index: number, canvas: HTMLCanvasElement, width: number, pixelRatio = window.devicePixelRatio || 1, forms?: Map<string, HTMLCanvasElement>): Promise<RenderTask> {
   const page = await doc.getPage(index + 1);
   const base = page.getViewport({ scale: 1 });
   // Sharp on high-density screens, but never more than ~16 megapixels per page.
@@ -59,8 +63,61 @@ export async function renderPage(doc: PDFDocumentProxy, index: number, canvas: H
   const viewport = page.getViewport({ scale });
   canvas.width = Math.round(viewport.width);
   canvas.height = Math.round(viewport.height);
-  const task = page.render({ canvas, viewport, background: '#ffffff' });
+  const task = page.render({
+    canvas, viewport, background: '#ffffff',
+    annotationMode: forms ? pdfjs.AnnotationMode.ENABLE_FORMS : pdfjs.AnnotationMode.ENABLE,
+    annotationCanvasMap: forms,
+  });
   return task;
+}
+
+/** A form widget as pdf.js describes it (the parts the reader uses). */
+export type Widget = {
+  id: string;
+  fieldName: string;
+  fieldType: 'Tx' | 'Btn' | 'Ch' | 'Sig';
+  rect: [number, number, number, number];
+  multiLine?: boolean;
+  checkBox?: boolean;
+  radioButton?: boolean;
+  buttonValue?: string | null;
+  exportValue?: string;
+  options?: { exportValue: string; displayValue: string }[];
+  readOnly?: boolean;
+};
+
+// Links in a form layer are not followed (the window never navigates); only the fields are put in it.
+const noLinks = {
+  externalLinkEnabled: false,
+  addLinkAttributes: () => {},
+  getDestinationHash: () => '',
+  getAnchorUrl: () => '',
+  goToDestination: () => {},
+  executeNamedAction: () => {},
+  executeSetOCGState: () => {},
+};
+
+/**
+ * Lays the page's form fields over its picture as real inputs (pdf.js's annotation layer, form widgets only), so
+ * they can be filled in. What is typed is kept in the document's annotation storage until the reader writes it into
+ * the file. `container` gets the class "annotationLayer"; `forms` is the map the page was rendered with. Returns the
+ * page's widgets (none: the layer stays empty).
+ */
+export async function renderFormLayer(doc: PDFDocumentProxy, index: number, container: HTMLElement, forms: Map<string, HTMLCanvasElement>): Promise<Widget[]> {
+  const page = await doc.getPage(index + 1);
+  const annotations = (await page.getAnnotations({ intent: 'display' })).filter((a) => a.annotationType === pdfjs.AnnotationType.WIDGET);
+  container.classList.add('annotationLayer');
+  if (!annotations.length) return [];
+  const viewport = page.getViewport({ scale: 1 }).clone({ dontFlip: true });
+  const layer = new pdfjs.AnnotationLayer({
+    div: container, page, viewport, annotationCanvasMap: forms, annotationStorage: doc.annotationStorage,
+    accessibilityManager: null, annotationEditorUIManager: null, structTreeLayer: null, commentManager: null, linkService: noLinks,
+  } as unknown as ConstructorParameters<typeof pdfjs.AnnotationLayer>[0]);
+  await layer.render({
+    annotations, page, viewport, linkService: noLinks, renderForms: true, enableScripting: false, hasJSActions: false, fieldObjects: null,
+    imageResourcesPath: '', downloadManager: null,
+  } as unknown as Parameters<typeof layer.render>[0]);
+  return annotations as unknown as Widget[];
 }
 
 /**

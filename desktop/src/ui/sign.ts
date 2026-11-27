@@ -1,5 +1,7 @@
-// Signatures: the saved ones, and the pad for drawing a new one.
+// Signatures and initials: the saved ones, and the pad for drawing a new one. Both work the same way and are saved
+// apart, so the Initials button never offers a full signature.
 import { api } from './api.ts';
+import type { InkKind } from './api.ts';
 import { button, confirm, dialog, h, iconButton, message, toast } from './dom.ts';
 import { placedFromPng, pngUrl, toPng, trim } from './images.ts';
 import type { Placed } from './images.ts';
@@ -13,18 +15,24 @@ const INKS = [
  * Shows the saved signatures and the pad. With `onUse`, picking or drawing one hands it over for placing;
  * without it (from Settings) the dialog only manages what is saved.
  */
-export async function signatureDialog(onUse?: (signature: Placed) => void): Promise<void> {
+export async function signatureDialog(onUse?: (signature: Placed) => void, kind: InkKind = 'signature'): Promise<void> {
+  const initials = kind === 'initials';
+  const thing = initials ? 'initials' : 'signature';
   const list = h('div.signature-list');
-  const pad = h('canvas.signature-pad', { width: 1200, height: 420, 'aria-label': 'Signature pad. Draw your signature here.', tabIndex: 0 });
+  const pad = h('canvas.signature-pad', { width: 1200, height: 420, 'aria-label': initials ? 'Initials pad. Draw your initials here.' : 'Signature pad. Draw your signature here.', tabIndex: 0 });
   const ctx = pad.getContext('2d')!;
   let ink = INKS[0].color;
   let drawn = false;
   const save = h('input', { type: 'checkbox', checked: true, id: 'save-signature' });
 
   const refresh = async () => {
-    const saved = await api.signatures();
+    const saved = await api.signatures(kind);
     list.replaceChildren();
-    if (!saved.length) return void list.append(h('p.hint', onUse ? 'No saved signatures yet. Draw one below.' : 'No saved signatures. Draw one below to save it.'));
+    if (!saved.length) {
+      return void list.append(h('p.hint', initials
+        ? (onUse ? 'No saved initials yet. Draw them below.' : 'No saved initials. Draw them below to save them.')
+        : (onUse ? 'No saved signatures yet. Draw one below.' : 'No saved signatures. Draw one below to save it.')));
+    }
     for (const signature of saved) {
       const use = async () => {
         if (!onUse) return;
@@ -33,10 +41,11 @@ export async function signatureDialog(onUse?: (signature: Placed) => void): Prom
       };
       list.append(
         h('div.signature-item',
-          h('button.signature-use', { type: 'button', disabled: !onUse, 'aria-label': 'Use this signature', onclick: use }, h('img', { src: pngUrl(signature.png), alt: 'Saved signature' })),
-          iconButton('trash', 'Delete signature', async () => {
-            if (!(await confirm('Delete this signature?', 'Documents you already signed keep it.', 'Delete'))) return;
-            await api.removeSignature(signature.id);
+          h('button.signature-use', { type: 'button', disabled: !onUse, 'aria-label': initials ? 'Use these initials' : 'Use this signature', onclick: use },
+            h('img', { src: pngUrl(signature.png), alt: initials ? 'Saved initials' : 'Saved signature' })),
+          iconButton('trash', initials ? 'Delete initials' : 'Delete signature', async () => {
+            if (!(await confirm(initials ? 'Delete these initials?' : 'Delete this signature?', 'Documents you already signed keep it.', 'Delete'))) return;
+            await api.removeSignature(signature.id, kind);
             await refresh();
           }),
         ),
@@ -97,20 +106,20 @@ export async function signatureDialog(onUse?: (signature: Placed) => void): Prom
     }, h('span', { class: `ink-${option.name.toLowerCase()}` })),
   );
 
-  const useButton = button(onUse ? 'Use signature' : 'Save signature', async () => {
+  const useButton = button(onUse ? `Use ${thing}` : `Save ${thing}`, async () => {
     if (!drawn) return;
     try {
       const trimmed = trim(pad);
       if (!trimmed) return;
       const png = await toPng(trimmed);
-      if (!onUse || save.checked) await api.addSignature(png);
+      if (!onUse || save.checked) await api.addSignature(png, kind);
       if (onUse) {
         d.close();
         onUse(await placedFromPng(png));
       } else {
         clear();
         await refresh();
-        toast('Signature saved.');
+        toast(initials ? 'Initials saved.' : 'Signature saved.');
       }
     } catch (e) {
       toast(message(e), true);
@@ -118,7 +127,7 @@ export async function signatureDialog(onUse?: (signature: Placed) => void): Prom
   }, 'primary');
   useButton.disabled = true;
 
-  const d = dialog(onUse ? 'Sign' : 'Signatures', [
+  const d = dialog(initials ? 'Initials' : onUse ? 'Sign' : 'Signatures', [
     list,
     h('div.pad-wrap', pad, h('span.pad-line')),
     h('div.pad-tools', h('span.hint', 'Ink'), ...inkButtons, h('span.spacer'), button('Clear', clear),

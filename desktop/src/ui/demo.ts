@@ -11,6 +11,7 @@ import type { Reader } from './reader.ts';
 import type { SettingsView } from './settings.ts';
 import type { ToolsView } from './tools.ts';
 import type { Route } from './app.ts';
+import { todayText } from '../core/dates.ts';
 import * as pdf from '../core/pdf.ts';
 
 type App = { library: Library; reader: Reader; settings: SettingsView; tools: ToolsView; show: (route: Route) => void };
@@ -280,6 +281,9 @@ async function interfaceTest(checks: { name: string; pass: boolean; detail?: str
 
   await modesTest(check, app);
   await toolsTest(check, app);
+  await fillSignTest(check, app);
+  await splitTest(check, app);
+  await passwordTest(check, app);
 
   // The window may touch only files the user opened, and cannot reach the network.
   let refused = false;
@@ -492,8 +496,8 @@ async function toolsTest(check: (name: string, pass: boolean, detail?: string) =
 
   clickButton(rail, 'Tools');
   const sections = [...view.querySelectorAll('.tool-section h2')].map((e) => e.textContent);
-  check('the Tools view lists today’s tools in their sections', !view.hidden && JSON.stringify(sections) === '["Create","Combine & split"]'
-    && ['Create from Images', 'Merge PDFs', 'Extract Pages'].every((t) => hasButton(view, t)) && !hasButton(view, 'Scan Document'), JSON.stringify(sections));
+  check('the Tools view lists today’s tools in their sections', !view.hidden && JSON.stringify(sections) === '["Create","Combine & split","Protect & optimize"]'
+    && ['Create from Images', 'Merge PDFs', 'Extract Pages', 'Split PDF', 'Password-protect'].every((t) => hasButton(view, t)) && !hasButton(view, 'Scan Document'), JSON.stringify(sections));
 
   // From a recent file: pick it, tick pages 1 and 3, Extract, and say where to save.
   const extractFrom = async (choose: () => void, tick: number[], out: string) => {
@@ -571,6 +575,340 @@ async function toolsTest(check: (name: string, pass: boolean, detail?: string) =
   app.show('documents');
 }
 
+type Check = (name: string, pass: boolean, detail?: string) => void;
+
+const lastDialog = (): HTMLElement => [...document.querySelectorAll<HTMLElement>('.dialog')].pop() ?? document.createElement('div'); // none yet: an empty stand-in
+const toastText = () => document.querySelector('.toast')?.textContent ?? '';
+/** How many pixels inside `box` are dark (text), counted one by one. */
+function darkCount(px: Px, box: Box): number {
+  let n = 0;
+  for (let x = box.x * px.width + 2; x < (box.x + box.width) * px.width - 2; x++) {
+    for (let y = box.y * px.height + 2; y < (box.y + box.height) * px.height - 2; y++) {
+      const c = px.at(x / px.width, y / px.height);
+      if (c[0] < 120 && c[1] < 120 && c[2] < 120) n++;
+    }
+  }
+  return n;
+}
+
+/** Types into an input as a person would: the value, then the events pdf.js and the reader listen to. */
+function typeInto(input: HTMLInputElement | HTMLTextAreaElement, value: string, commit = false): void {
+  input.focus();
+  input.value = value;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  if (commit) input.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+/** One page with two text fields and a checkbox, and room for stamps below them. */
+async function formSample(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([612, 792]);
+  const form = doc.getForm();
+  for (const [name, y] of [['name', 680], ['arabic', 620]] as const) {
+    form.createTextField(name).addToPage(page, { x: 72, y, width: 300, height: 28, borderWidth: 0, backgroundColor: rgb(1, 1, 1) });
+  }
+  form.createCheckBox('agree').addToPage(page, { x: 72, y: 570, width: 20, height: 20 });
+  return doc.save();
+}
+
+/** Fill & Sign's new items (Initials, Date, ✓, ✗) and the document's own form fields. */
+async function fillSignTest(check: Check, app: App): Promise<void> {
+  const reader = document.querySelector('.reader') as HTMLElement;
+  const dock = reader.querySelector('.dock')!;
+  const pageAt = (i: number) => reader.querySelectorAll<HTMLElement>('.page')[i];
+  const settled = () => until(() => !reader.classList.contains('busy') && !!dock.querySelector('.tool'), 'the change to be applied');
+  const sample = await formSample();
+  const file = await api.devCreate('Form test', sample);
+  await app.reader.open(file);
+  await until(() => !!pageAt(0)?.querySelector('.annotationLayer input'), 'the form fields');
+
+  app.reader.setMode('fillSign');
+  const labels = [...dock.querySelectorAll('.tool')].map((b) => b.textContent?.trim() || b.getAttribute('aria-label'));
+  check('the Fill & Sign bar has Signature, Initials, Text, Date, Check and Cross', JSON.stringify(labels) === JSON.stringify(['Close Fill & Sign', 'Signature', 'Initials', 'Text', 'Date', 'Check', 'Cross', 'Undo']),
+    JSON.stringify(labels));
+
+  // Drags what is being placed so its middle is at (x, y) of page 1, places it, and returns where it landed.
+  const placeAt = async (x: number, y: number): Promise<Box> => {
+    await until(() => !!document.querySelector('.placement'), 'the item to place');
+    const placed = document.querySelector('.placement') as HTMLElement;
+    const page = pageAt(0).getBoundingClientRect();
+    const at = placed.getBoundingClientRect();
+    pointer(placed, 'pointerdown', at.left + at.width / 2, at.top + at.height / 2);
+    pointer(placed, 'pointermove', page.left + page.width * x, page.top + page.height * y);
+    pointer(placed, 'pointerup', page.left + page.width * x, page.top + page.height * y);
+    const r = placed.getBoundingClientRect();
+    clickButton(dock, 'Place');
+    await settled();
+    return { x: (r.left - page.left) / page.width, y: (r.top - page.top) / page.height, width: r.width / page.width, height: r.height / page.height };
+  };
+
+  // Initials: saved apart from signatures, placed like one.
+  const signaturesBefore = (await api.signatures()).length;
+  await api.addSignature(await solid('#00a000', 60, 40), 'initials');
+  clickButton(dock, 'Initials');
+  await until(() => !!document.querySelector('.signature-use'), 'the saved initials');
+  const titled = lastDialog().querySelector('h2')?.textContent;
+  (document.querySelector('.signature-use') as HTMLElement).click();
+  const initialsAt = await placeAt(0.2, 0.85);
+  let px = await pixels(app.reader.data, 0);
+  const green = px.at(initialsAt.x + initialsAt.width / 2, initialsAt.y + initialsAt.height / 2);
+  check('Initials are kept apart from signatures and placed on the page', titled === 'Initials' && (await api.signatures()).length === signaturesBefore
+    && (await api.signatures('initials')).length === 1 && green[1] > 120 && green[0] < 60 && hasButton(dock, 'Close Fill & Sign'), JSON.stringify({ titled, green }));
+
+  // Date: today's date, editable before it is placed.
+  clickButton(dock, 'Date');
+  await until(() => !!document.querySelector('.dialog textarea'), 'the date');
+  const dated = (document.querySelector('.dialog textarea') as HTMLTextAreaElement).value;
+  clickButton(lastDialog(), 'Add');
+  const dateAt = await placeAt(0.6, 0.85);
+  px = await pixels(app.reader.data, 0);
+  const inked = share(px, dateAt, [0, 0], [1, 1], (c) => c[0] < 120);
+  check('Date places today’s date as text', dated === todayText() && inked > 0.03 && hasButton(dock, 'Date'), JSON.stringify({ dated, inked }));
+
+  // ✓: while it is being placed, the form fields take no clicks (the tool wins); placed, it is ink on the page.
+  clickButton(dock, 'Check');
+  await until(() => !!document.querySelector('.placement'), 'the check mark');
+  const section = pageAt(0).querySelector('.annotationLayer section') as HTMLElement;
+  const fieldsWhilePlacing = getComputedStyle(section).pointerEvents;
+  const markAt = await placeAt(0.5, 0.7);
+  px = await pixels(app.reader.data, 0);
+  const ink = share(px, markAt, [0, 0], [1, 1], (c) => c[0] < 90 && c[1] < 90 && c[2] < 110);
+  const around = share(px, { ...markAt, x: markAt.x + markAt.width * 2 }, [0, 0], [1, 1], (c) => c[0] < 200);
+  check('a check mark is drawn where it is placed', ink > 0.08 && around === 0 && markAt.width > 0.02, JSON.stringify({ ink, around, markAt }));
+  check('while a tool is placing, form fields take no clicks', fieldsWhilePlacing === 'none' && getComputedStyle(section).pointerEvents !== 'none',
+    JSON.stringify({ fieldsWhilePlacing, after: getComputedStyle(section).pointerEvents }));
+  clickButton(dock, 'Close Fill & Sign');
+
+  // A text field: typed, then Save. The file keeps it as a field with that value.
+  const fieldRect = async (name: string) => (await pdf.fields(app.reader.data)).find((f) => f.name === name)!.rect;
+  const input = (name: string) => pageAt(0).querySelector(`.annotationLayer input[name="${name}"]`) as HTMLInputElement;
+  typeInto(input('name'), 'Ada Lovelace', true);
+  await app.reader.settle();
+  await app.reader.save();
+  const saved = await PDFDocument.load(await api.devRead(file));
+  const kept = saved.getForm().getFields().map((f) => f.getName()).sort();
+  check('a typed form field is saved as a field with its value', saved.getForm().getTextField('name').getText() === 'Ada Lovelace' && !app.reader.dirty
+    && JSON.stringify(kept) === '["agree","arabic","name"]', JSON.stringify({ kept, dirty: app.reader.dirty }));
+
+  // Arabic in a field: the value is the text itself, and the field shows it (drawn by the window).
+  const arabic = 'مرحبا بالعالم';
+  const box = await fieldRect('arabic');
+  const blankBefore = darkCount(await pixels(app.reader.data, 0), box);
+  typeInto(input('arabic'), arabic, true);
+  await app.reader.settle();
+  const filled = (await pdf.fields(app.reader.data)).find((f) => f.name === 'arabic')?.value;
+  const shown = darkCount(await pixels(app.reader.data, 0), box);
+  check('an Arabic field value is kept as text and shown on the page', filled === arabic && blankBefore === 0 && shown > 60, JSON.stringify({ filled, blankBefore, shown }));
+
+  // Undo takes back the field change, as one step.
+  clickButton(dock, 'Undo');
+  await until(() => !reader.classList.contains('busy'), 'the undo');
+  await wait(300);
+  const undone = (await pdf.fields(app.reader.data)).find((f) => f.name === 'arabic')?.value;
+  await until(() => !!input('arabic'), 'the fields again');
+  check('Undo takes back a field change', undone === '' && input('arabic').value === '' && !app.reader.dirty, JSON.stringify({ undone, dirty: app.reader.dirty }));
+
+  // Save (Ctrl+S) while still typing in a field: the field is written first.
+  const fieldOnDisk = async (name: string) => (await PDFDocument.load(await api.devRead(file))).getForm().getTextField(name).getText();
+  typeInto(input('name'), 'Grace Hopper'); // no change event: the field still has the focus
+  const typingCounts = app.reader.dirty;
+  await app.reader.save();
+  check('Save while typing in a field saves that field', typingCounts && (await fieldOnDisk('name')) === 'Grace Hopper' && !app.reader.dirty,
+    JSON.stringify({ typingCounts, onDisk: await fieldOnDisk('name') }));
+
+  // Closing while still typing asks first, and Save keeps what was typed.
+  await until(() => !!input('name'), 'the fields');
+  typeInto(input('name'), 'Katherine Johnson');
+  const closing = app.reader.close();
+  await until(() => /Save the changes to/.test(lastDialog()?.querySelector('h2')?.textContent ?? ''), 'the save question');
+  clickButton(lastDialog(), 'Save');
+  check('closing while typing in a field asks, and Save keeps it', (await closing) === true && (await fieldOnDisk('name')) === 'Katherine Johnson' && !app.reader.file);
+}
+
+/** Split PDF: bad ranges disable Split and say why; good ones write the parts beside the source, which is left alone. */
+async function splitTest(check: Check, app: App): Promise<void> {
+  const rail = document.querySelector('.rail')!;
+  const view = app.tools.el;
+  const made = await PDFDocument.create();
+  for (const width of [200, 300, 400]) made.addPage([width, 500]);
+  const bytes = await made.save();
+  const source = await api.devCreate('Split source', bytes);
+  const folder = source.replace(/[\\/][^\\/]+$/, '');
+  clickButton(rail, 'Tools');
+  clickButton(view, 'Split PDF');
+  await until(() => document.querySelectorAll('.dialog.picker .picker-row').length > 1, 'the recent files');
+  clickButton(document.querySelector('.dialog.picker')!, 'Split source');
+  await until(() => !!document.querySelector('.dialog.split'), 'the split sheet');
+  const sheet = document.querySelector('.dialog.split') as HTMLElement;
+  const status = () => sheet.querySelector('.split-status')?.textContent ?? '';
+  const disabled = () => findButton(sheet, 'Split')!.disabled;
+  const everyPage = [disabled(), status()];
+  const radio = sheet.querySelector('input[value="ranges"]') as HTMLInputElement;
+  radio.checked = true;
+  radio.dispatchEvent(new Event('change', { bubbles: true }));
+  const field = sheet.querySelector('input[aria-label="Page ranges"]') as HTMLInputElement;
+  const bad = ['', '0', '3-2', '1-11', 'a'].map((text) => {
+    typeInto(field, text);
+    return [text, disabled(), status()];
+  });
+  const expected = ['Enter page ranges, such as 1-3, 4-6.', "Page 0 doesn't exist. This PDF has 3 pages.", 'Write ranges from low to high, such as 3-5.',
+    "Page 11 doesn't exist. This PDF has 3 pages.", 'Use numbers, dashes and commas, such as 1-3, 4-6.'];
+  check('bad page ranges disable Split and say what is wrong', bad.every(([, off, said], i) => off === true && said === expected[i])
+    && everyPage[0] === false && everyPage[1] === 'Makes 3 files.', JSON.stringify({ everyPage, bad }));
+
+  typeInto(field, '1, 2-3');
+  const ready = [disabled(), status()];
+  await api.devAnswer({ folder });
+  clickButton(sheet, 'Split');
+  await until(() => !document.querySelector('.dialog.split') && /^Made/.test(toastText()), 'the parts');
+  const widths = async (f: string) => (await PDFDocument.load(await api.devRead(f))).getPages().map((p) => p.getWidth());
+  const part = (n: number) => source.replace(/[^\\/]+$/, `Split source (part ${n}).pdf`);
+  let third = true;
+  await api.devRead(part(3)).catch(() => (third = false));
+  check('Split PDF writes the parts and leaves the source alone', ready[0] === false && ready[1] === 'Makes 2 files.'
+    && JSON.stringify([await widths(part(1)), await widths(part(2))]) === '[[200],[300,400]]' && !third
+    && sameBytes(await api.devRead(source), bytes) && !app.reader.file, JSON.stringify({ ready, toast: toastText(), third }));
+  app.show('documents');
+}
+
+/** Password-protect and editing protected files: every write keeps the password, until it is removed. */
+async function passwordTest(check: Check, app: App): Promise<void> {
+  const bar = document.querySelector('.reader-bar') as HTMLElement;
+  const dock = document.querySelector('.reader .dock') as HTMLElement;
+  const password = 'open sesame';
+  const red = await solid('#ff0000');
+  const blue = await solid('#0000ff');
+  const isRed = (c: number[]) => c[0] > 200 && c[1] < 70 && c[2] < 70;
+  const isBlue = (c: number[]) => c[2] > 200 && c[0] < 70;
+  const plainOf = async (bytes: Uint8Array) => (await pdf.unlock(bytes, password))?.bytes ?? null;
+  const menu = async (label: string) => {
+    clickButton(bar, 'More');
+    await until(() => !!document.querySelector('.menu'), 'the More menu');
+    clickButton(document.querySelector('.menu')!, label);
+  };
+  const file = await api.devCreate('Protect me', await blank(300, 500, 2));
+  await app.reader.open(file);
+  await until(() => document.querySelectorAll('.reader .page').length === 2, 'the document');
+  await app.reader.change((b) => pdf.stamp(b, 0, red, { x: 0.1, y: 0.1, width: 0.2, height: 0.1 })); // not saved yet
+
+  // More › Protect with Password, with an unsaved change: Save and Protect, then the sheet.
+  await menu('Protect with Password');
+  await until(() => !!findButton(lastDialog(), 'Save and Protect'), 'the save question');
+  clickButton(lastDialog(), 'Save and Protect');
+  await until(() => !!document.querySelector('.dialog.protect'), 'the protect sheet');
+  const sheet = document.querySelector('.dialog.protect') as HTMLElement;
+  const [pw, again] = [...sheet.querySelectorAll<HTMLInputElement>('input[type="password"]')];
+  const states: boolean[] = [findButton(sheet, 'Protect')!.disabled];
+  typeInto(pw, password);
+  states.push(findButton(sheet, 'Protect')!.disabled);
+  typeInto(again, 'open sesamx');
+  states.push(findButton(sheet, 'Protect')!.disabled);
+  typeInto(again, password);
+  states.push(findButton(sheet, 'Protect')!.disabled);
+  const warned = sheet.textContent?.includes("If you forget the password, the file can't be opened, and it can't be recovered.");
+  check('Protect stays disabled until both passwords match, under the warning', JSON.stringify(states) === '[true,true,true,false]' && !!warned, JSON.stringify(states));
+  clickButton(sheet, 'Protect');
+  await until(() => /now protected/.test(toastText()), 'the protected file');
+  let disk = await api.devRead(file);
+  let plain = await plainOf(disk);
+  check('protecting the open document saves it, changes included, with the password', await pdf.isProtected(disk) && !!plain && (await pdf.unlock(disk, 'wrong')) === null
+    && isRed((await pixels(plain!, 0)).at(0.2, 0.15)) && !app.reader.dirty && !(bar.querySelector('.locked') as HTMLElement).hidden);
+
+  // The next edit, saved: still protected with the same password (the reader took the password at once).
+  await app.reader.change((b) => pdf.stamp(b, 1, blue, { x: 0.5, y: 0.5, width: 0.2, height: 0.1 }));
+  await app.reader.save();
+  disk = await api.devRead(file);
+  plain = await plainOf(disk);
+  check('an edit saved after protecting keeps the password', await pdf.isProtected(disk) && !!plain && isBlue((await pixels(plain!, 1)).at(0.6, 0.55)));
+
+  // Undo, saved: still protected, the edit gone.
+  clickButton(dock, 'Undo');
+  await until(() => app.reader.dirty, 'the undo');
+  await app.reader.save();
+  disk = await api.devRead(file);
+  plain = await plainOf(disk);
+  check('Undo and Save keep the password', await pdf.isProtected(disk) && !!plain && !isBlue((await pixels(plain!, 1)).at(0.6, 0.55)) && isRed((await pixels(plain!, 0)).at(0.2, 0.15)));
+  await app.reader.close();
+
+  // Opening it again asks for the password (a wrong one is refused) and gives full access.
+  const opening = app.reader.open(file);
+  await until(() => /This PDF is protected/.test(lastDialog()?.querySelector('h2')?.textContent ?? ''), 'the password question');
+  typeInto(lastDialog().querySelector('input')!, 'wrong');
+  clickButton(lastDialog(), 'Unlock');
+  await until(() => /didn’t work/.test(lastDialog()?.querySelector('h2')?.textContent ?? ''), 'the second try');
+  typeInto(lastDialog().querySelector('input')!, password);
+  clickButton(lastDialog(), 'Unlock');
+  const opened = await opening;
+  check('a protected file asks for its password and can be edited with it', opened && app.reader.file === file && !dock.hidden && hasButton(dock, 'Fill & Sign'),
+    JSON.stringify({ opened, file: app.reader.file, dock: dock.hidden }));
+
+  // Save As writes the copy protected too; Remove Password on it writes it plain.
+  const copy = file.replace(/[^\\/]+$/, 'Protect me copy.pdf');
+  await api.devAnswer({ save: copy });
+  await app.reader.saveAs();
+  const copied = await api.devRead(copy);
+  check('Save As keeps the password', app.reader.file === copy && await pdf.isProtected(copied) && !!(await plainOf(copied)));
+  await menu('Remove Password');
+  await until(() => !!findButton(lastDialog(), 'Remove Password'), 'the remove question');
+  clickButton(lastDialog(), 'Remove Password');
+  await until(() => /password was removed/.test(toastText()), 'the password to go');
+  const freed = await api.devRead(copy);
+  check('Remove Password writes the file without a password', !(await pdf.isProtected(freed)) && await pdf.isEditable(freed) && await pdf.isProtected(await api.devRead(file))
+    && (bar.querySelector('.locked') as HTMLElement).hidden === true);
+  await app.reader.close();
+
+  // A file made elsewhere with separate passwords, opened with the owner one: editable, with a note that saving
+  // makes that password the one it opens with.
+  const elsewhere = await PDFDocument.load(await blank(200, 200));
+  elsewhere.encrypt({ userPassword: 'reader', ownerPassword: 'owner', permissions: { modifying: false } });
+  const ownerFile = await api.devCreate('Owner only', await elsewhere.save());
+  const openingOwner = app.reader.open(ownerFile);
+  await until(() => /This PDF is protected/.test(lastDialog()?.querySelector('h2')?.textContent ?? ''), 'the password question');
+  typeInto(lastDialog().querySelector('input')!, 'owner');
+  clickButton(lastDialog(), 'Unlock');
+  await openingOwner;
+  const note = document.querySelector('.reader .notice') as HTMLElement;
+  check('opened with an owner password, it says saving sets the password', !note.hidden && /Saving will set this document’s password/.test(note.textContent ?? '') && !dock.hidden,
+    note.textContent ?? '');
+  await app.reader.close();
+
+  // A file with restrictions only (opens without a password): Extract asks for the owner password, and without it
+  // makes nothing, so no copy without the restrictions can come out.
+  const restrictedDoc = await PDFDocument.load(await blank(200, 200, 2));
+  restrictedDoc.encrypt({ userPassword: '', ownerPassword: 'o', permissions: { modifying: false } });
+  await api.devCreate('Restricted', await restrictedDoc.save());
+  clickButton(document.querySelector('.rail')!, 'Tools');
+  clickButton(app.tools.el, 'Extract Pages');
+  await until(() => document.querySelectorAll('.dialog.picker .picker-row').length > 1, 'the recent files');
+  clickButton(document.querySelector('.dialog.picker')!, 'Restricted');
+  await until(() => /can only be read/.test(lastDialog()?.querySelector('h2')?.textContent ?? ''), 'the owner password question');
+  clickButton(lastDialog(), 'Cancel');
+  await until(() => /only be read/.test(toastText()), 'the read-only message');
+  check('a restrictions-only file is not extracted without its owner password', !document.querySelector('.dialog.extract') && !document.querySelector('.dialog'), toastText());
+
+  // Tools › Password-protect on a file that is not open; a second time it says it already is.
+  const other = await api.devCreate('Tools protect', await blank(200, 200));
+  const rail = document.querySelector('.rail')!;
+  clickButton(rail, 'Tools');
+  const pick = async () => {
+    clickButton(app.tools.el, 'Password-protect');
+    await until(() => document.querySelectorAll('.dialog.picker .picker-row').length > 1, 'the recent files');
+    clickButton(document.querySelector('.dialog.picker')!, 'Tools protect');
+  };
+  await pick();
+  await until(() => !!document.querySelector('.dialog.protect'), 'the protect sheet');
+  const fields = [...document.querySelectorAll<HTMLInputElement>('.dialog.protect input[type="password"]')];
+  fields.forEach((f) => typeInto(f, password));
+  clickButton(document.querySelector('.dialog.protect')!, 'Protect');
+  await until(() => /now protected/.test(toastText()), 'the protected file');
+  const toolsProtected = await pdf.isProtected(await api.devRead(other)) && !!(await plainOf(await api.devRead(other)));
+  await pick();
+  await until(() => /Already protected/.test(lastDialog()?.querySelector('h2')?.textContent ?? ''), 'the already-protected note');
+  clickButton(lastDialog(), 'OK');
+  check('Tools › Password-protect protects the file itself, and says when it already is', toolsProtected && !app.reader.file);
+  app.show('documents');
+}
+
 // Screenshots
 
 async function sampleDocument(heading: string, color: [number, number, number], pages: string[][], signLine = false): Promise<Uint8Array> {
@@ -603,6 +941,40 @@ async function sampleDocument(heading: string, color: [number, number, number], 
 }
 
 /** A handwriting-like signature, drawn as a path. */
+/** A one-page application form with labelled fields, for the screenshots. */
+async function applicationForm(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const bold = await doc.embedFont(StandardFonts.HelveticaBold);
+  const regular = await doc.embedFont(StandardFonts.Helvetica);
+  const page = doc.addPage([612, 792]);
+  const ink = rgb(0.2, 0.22, 0.27);
+  page.drawRectangle({ x: 0, y: 742, width: 612, height: 50, color: rgb(0.13, 0.33, 0.56) });
+  page.drawText('MEMBERSHIP APPLICATION', { x: 56, y: 762, size: 10, font: bold, color: rgb(1, 1, 1) });
+  page.drawText('Membership Application', { x: 56, y: 690, size: 22, font: bold, color: rgb(0.09, 0.1, 0.13) });
+  const form = doc.getForm();
+  let y = 620;
+  for (const [name, label] of [['full_name', 'Full name'], ['email', 'Email'], ['city', 'City']]) {
+    page.drawText(label, { x: 56, y: y + 32, size: 10, font: regular, color: ink });
+    form.createTextField(name).addToPage(page, { x: 56, y, width: 360, height: 24, borderWidth: 0.6, borderColor: rgb(0.7, 0.72, 0.76) });
+    y -= 64;
+  }
+  page.drawText('Membership', { x: 56, y: y + 32, size: 10, font: regular, color: ink });
+  const plan = form.createRadioGroup('plan');
+  for (const [option, x] of [['Monthly', 56], ['Yearly', 176]] as const) {
+    plan.addOptionToPage(option, page, { x, y: y + 6, width: 14, height: 14 });
+    page.drawText(option, { x: x + 20, y: y + 9, size: 10, font: regular, color: ink });
+  }
+  plan.select('Yearly');
+  y -= 50;
+  form.createCheckBox('terms').addToPage(page, { x: 56, y, width: 14, height: 14 });
+  page.drawText('I agree to the terms of membership.', { x: 78, y: y + 3, size: 10, font: regular, color: ink });
+  page.drawText('Signature', { x: 56, y: 236, size: 10, font: regular, color: ink });
+  page.drawLine({ start: { x: 56, y: 200 }, end: { x: 300, y: 200 }, thickness: 0.8, color: ink });
+  page.drawText('Date', { x: 340, y: 236, size: 10, font: regular, color: ink });
+  page.drawLine({ start: { x: 340, y: 200 }, end: { x: 520, y: 200 }, thickness: 0.8, color: ink });
+  return doc.save();
+}
+
 async function sampleSignature(): Promise<Uint8Array> {
   const canvas = document.createElement('canvas');
   canvas.width = 600;
@@ -724,6 +1096,43 @@ async function screenshots(app: App): Promise<void> {
   await wait(600);
   await shot('12-extract');
   clickButton([...document.querySelectorAll('.dialog')].pop()!, 'Cancel');
+
+  // Split PDF with custom ranges, and the Password-protect sheet.
+  void app.tools.run('split');
+  await until(() => !!document.querySelector('.dialog.picker [aria-label="Rental Agreement"]'), 'the document picker');
+  clickButton(document.querySelector('.dialog.picker')!, 'Rental Agreement');
+  await until(() => !!document.querySelector('.dialog.split'), 'the split sheet');
+  const ranges = document.querySelector('.dialog.split input[value="ranges"]') as HTMLInputElement;
+  ranges.checked = true;
+  ranges.dispatchEvent(new Event('change', { bubbles: true }));
+  typeInto(document.querySelector('.dialog.split input[aria-label="Page ranges"]') as HTMLInputElement, '1-2, 3');
+  await shot('13-split');
+  clickButton(lastDialog(), 'Cancel');
+  void app.tools.run('protect');
+  await until(() => !!document.querySelector('.dialog.picker [aria-label="Invoice 2041"]'), 'the document picker');
+  clickButton(document.querySelector('.dialog.picker')!, 'Invoice 2041');
+  await until(() => !!document.querySelector('.dialog.protect'), 'the protect sheet');
+  document.querySelectorAll<HTMLInputElement>('.dialog.protect input[type="password"]').forEach((f) => typeInto(f, 'example'));
+  await shot('14-protect');
+  clickButton(lastDialog(), 'Cancel');
+
+  // A form being filled in, with the Fill & Sign bar.
+  const form = await api.devCreate('Application Form', await applicationForm());
+  await app.reader.open(form);
+  await until(() => !!document.querySelector('.annotationLayer input'), 'the form fields');
+  app.reader.setMode('fillSign');
+  for (const [name, value] of [['full_name', 'Ada Lovelace'], ['email', 'ada@example.com'], ['city', 'دبي']] as const) {
+    const input = document.querySelector(`.annotationLayer input[name="${name}"]`) as HTMLInputElement | null;
+    if (input) typeInto(input, value, true);
+  }
+  (document.querySelector('.annotationLayer input[type="checkbox"]') as HTMLInputElement | null)?.click();
+  await app.reader.settle();
+  await shot('15-form');
+  await app.reader.undo();
+  await app.reader.undo();
+  await app.reader.undo();
+  await app.reader.undo();
+  await app.reader.close();
 
   app.show('settings');
   await shot('06-settings');

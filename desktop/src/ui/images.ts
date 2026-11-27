@@ -117,7 +117,7 @@ export async function textImage(text: string, color: string, points: number): Pr
   ctx.font = font;
   ctx.fillStyle = color;
   ctx.textBaseline = 'top';
-  const rtl = /[֐-ࣿ]/.test(text);
+  const rtl = /[\u0590-\u08ff]/.test(text);
   ctx.direction = rtl ? 'rtl' : 'ltr';
   ctx.textAlign = rtl ? 'right' : 'left';
   lines.forEach((line, i) => ctx.fillText(line, rtl ? canvas.width - 4 * scale : 4 * scale, 2 * scale + i * lineHeight + points * scale * 0.12));
@@ -131,4 +131,79 @@ export async function placedFromPng(png: Uint8Array): Promise<Placed> {
   image.src = url;
   await image.decode();
   return { png, url, aspect: image.naturalWidth / image.naturalHeight };
+}
+
+/** The ink of typed text, dates, ✓ and ✗: the brand graphite. */
+export const TEXT_INK = '#12141C';
+
+/** Fill & Sign's ✓ and ✗: a square image, drawn large so it stays sharp when placed small and zoomed in. */
+export function markPng(mark: 'check' | 'cross', side = 512): Promise<Uint8Array> {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = side;
+  const ctx = canvas.getContext('2d')!;
+  ctx.strokeStyle = TEXT_INK;
+  ctx.lineWidth = side * 0.12;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  const at = (x: number, y: number) => [x * side, y * side] as const;
+  if (mark === 'check') {
+    ctx.moveTo(...at(0.16, 0.54));
+    ctx.lineTo(...at(0.4, 0.78));
+    ctx.lineTo(...at(0.86, 0.22));
+  } else {
+    ctx.moveTo(...at(0.2, 0.2));
+    ctx.lineTo(...at(0.8, 0.8));
+    ctx.moveTo(...at(0.8, 0.2));
+    ctx.lineTo(...at(0.2, 0.8));
+  }
+  ctx.stroke();
+  return toPng(canvas);
+}
+
+/**
+ * A form field's text drawn by the window, for text the standard PDF font cannot show (Arabic, say): the image is the
+ * field's size (`size` in points), so it can be its appearance. One line is sized to the field's height and shrunk
+ * to fit its width; several lines wrap at 11 points from the top. Right-to-left text is aligned to the right.
+ */
+export function fieldTextPng(text: string, size: { width: number; height: number }, multiline: boolean): Promise<Uint8Array> {
+  const scale = Math.min(4, 4000 / Math.max(size.width, size.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(size.width * scale));
+  canvas.height = Math.max(1, Math.round(size.height * scale));
+  const ctx = canvas.getContext('2d')!;
+  const rtl = /[\u0590-\u08ff\ufb50-\ufdff\ufe70-\ufefe]/.test(text);
+  const pad = 2 * scale;
+  const family = '-apple-system, "Segoe UI", "Helvetica Neue", Arial, "Noto Sans", "Noto Sans Arabic", sans-serif';
+  ctx.fillStyle = TEXT_INK;
+  ctx.direction = rtl ? 'rtl' : 'ltr';
+  ctx.textAlign = rtl ? 'right' : 'left';
+  const x = rtl ? canvas.width - pad : pad;
+  if (!multiline) {
+    let points = Math.max(6, Math.min(size.height * 0.62, 14));
+    ctx.font = `${points * scale}px ${family}`;
+    const wide = ctx.measureText(text).width;
+    if (wide > canvas.width - 2 * pad) points = Math.max(4, (points * (canvas.width - 2 * pad)) / wide);
+    ctx.font = `${points * scale}px ${family}`;
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, x, canvas.height / 2);
+  } else {
+    const points = Math.min(11, size.height * 0.62);
+    ctx.font = `${points * scale}px ${family}`;
+    ctx.textBaseline = 'top';
+    const lines: string[] = [];
+    for (const paragraph of text.replace(/\r/g, '').split('\n')) {
+      let line = '';
+      for (const word of paragraph.split(' ')) {
+        const next = line ? `${line} ${word}` : word;
+        if (line && ctx.measureText(next).width > canvas.width - 2 * pad) {
+          lines.push(line);
+          line = word;
+        } else line = next;
+      }
+      lines.push(line);
+    }
+    lines.forEach((line, i) => ctx.fillText(line, x, pad + i * points * scale * 1.25));
+  }
+  return toPng(canvas);
 }
