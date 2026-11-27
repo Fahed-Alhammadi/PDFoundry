@@ -551,6 +551,86 @@ object PdfEngine {
     }
 
     // endregion
+    // region Form fields
+
+    /**
+     * The form fields on every page, one entry per widget, with where each is on the displayed page.
+     * A document without a form, or with an XFA-only (dynamic) form, has none.
+     */
+    fun fields(file: File): List<FormField> = PDDocument.load(file, memory()).use { document ->
+        val form = document.documentCatalog.acroForm ?: return@use emptyList()
+        if (form.xfaIsDynamic()) return@use emptyList()
+        // Which page each widget is on: a widget's own /P entry is optional, so look at every page.
+        val pageOf = HashMap<Any, Int>()
+        document.pages.forEachIndexed { index, page ->
+            runCatching { page.annotations }.getOrDefault(emptyList()).forEach { pageOf[it.cosObject] = index }
+        }
+        val found = mutableListOf<FormField>()
+        for (field in form.fieldTree) {
+            val kind = kindOf(field) ?: continue
+            val terminal = field as? com.tom_roush.pdfbox.pdmodel.interactive.form.PDTerminalField ?: continue
+            val value = runCatching { valueOf(field) }.getOrDefault("")
+            val choice = field as? com.tom_roush.pdfbox.pdmodel.interactive.form.PDChoice
+            val options = choice?.let { runCatching { it.optionsExportValues }.getOrNull() }.orEmpty()
+            val labels = choice?.let { runCatching { it.optionsDisplayValues }.getOrNull() }?.takeIf { it.size == options.size } ?: options
+            terminal.widgets.forEachIndexed { index, widget ->
+                val pageIndex = pageOf[widget.cosObject] ?: widget.page?.let { document.pages.indexOf(it) }?.takeIf { it >= 0 } ?: return@forEachIndexed
+                if (widget.isHidden || widget.isNoView) return@forEachIndexed
+                val r = widget.rectangle ?: return@forEachIndexed
+                if (r.width <= 0f || r.height <= 0f) return@forEachIndexed
+                val page = document.getPage(pageIndex)
+                val box = page.cropBox
+                val rotation = ((page.rotation % 360) + 360) % 360
+                // To the unrotated crop box measured from its top-left, then to the page as displayed.
+                val unrotated = RectF(r.lowerLeftX - box.lowerLeftX, box.upperRightY - r.upperRightY, r.upperRightX - box.lowerLeftX, box.upperRightY - r.lowerLeftY)
+                found += FormField(
+                    name = field.fullyQualifiedName,
+                    kind = kind,
+                    page = pageIndex,
+                    rect = displayed(unrotated, box.width, box.height, rotation),
+                    value = value,
+                    options = options,
+                    onValue = if (kind == FieldKind.Checkbox || kind == FieldKind.Radio) onValueOf(widget) else null,
+                    readOnly = field.isReadOnly,
+                    widget = index,
+                    labels = labels
+                )
+            }
+        }
+        found
+    }
+
+    /**
+     * Sets a form field's value and saves it as a field value (nothing is flattened), with appearances
+     * so viewers that don't draw their own show it. Text: the new text. Checkbox: its on name to tick
+     * it, "Off" (or empty) to clear it. Radio: the on name of the button chosen. Choice: an option.
+     * A text value the field's font can't show (Arabic in Helvetica) gets an appearance drawn by Android.
+     */
+    fun setField(file: File, name: String, value: String, widgetIndex: Int = 0) = edit(file) { document ->
+        val form = document.documentCatalog.acroForm ?: throw PdfException("This document has no form.")
+        val field = form.getField(name) ?: throw PdfException("This field is no longer in the document.")
+        if (field.isReadOnly) throw PdfException("This field can't be changed.")
+        when (field) {
+            is com.tom_roush.pdfbox.pdmodel.interactive.form.PDTextField -> {
+                try {
+                    field.setValue(value)
+                } catch (e: Exception) {
+                    // The field's font can't encode the text: keep it as the field's value, and draw it ourselves.
+                    field.cosObject.setString(com.tom_roush.pdfbox.cos.COSName.V, value)
+                    field.widgets.forEach { imageAppearance(document, it, value, field.isMultiline) }
+                }
+            }
+            is com.tom_roush.pdfbox.pdmodel.interactive.form.PDCheckBox -> if (value.isEmpty() || value == "Off") field.unCheck() else field.check()
+            is com.tom_roush.pdfbox.pdmodel.interactive.form.PDRadioButton -> {
+                val on = value.ifEmpty { field.widgets.getOrNull(widgetIndex)?.let { onValueOf(it) } ?: "Off" }
+                field.setValue(on)
+            }
+            is com.tom_roush.pdfbox.pdmodel.interactive.form.PDChoice -> field.setValue(value)
+            else -> throw PdfException("This field can't be filled in here.")
+        }
+    }
+
+    // endregion
     // region Bitmaps
 
     /** Typed text as a transparent bitmap. Drawn by Android, so any script (Arabic included) is shaped correctly. */

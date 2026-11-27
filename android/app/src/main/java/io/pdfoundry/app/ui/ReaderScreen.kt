@@ -96,6 +96,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.pdfoundry.app.app
 import io.pdfoundry.app.data.DocumentStore
+import io.pdfoundry.app.data.FieldKind
+import io.pdfoundry.app.data.FormField
 import io.pdfoundry.app.data.InkStroke
 import io.pdfoundry.app.data.bitmap
 import io.pdfoundry.app.data.todayText
@@ -169,6 +171,9 @@ class ReaderState(private val context: Context, val file: File, private val scop
     /** True while the document has a password that every save applies (it was unlocked, or protected here). */
     var hasPassword by mutableStateOf(false)
         private set
+    /** The document's form fields, one per widget. Read again after every change. */
+    var fields by mutableStateOf<List<FormField>>(emptyList())
+        private set
 
     /** The bar's mode. Using a tool and finishing or cancelling it returns to this mode, not to reading. */
     var toolMode by mutableStateOf(ToolMode.None)
@@ -234,6 +239,7 @@ class ReaderState(private val context: Context, val file: File, private val scop
                 null
             }
         }
+        fields = if (opened == null) emptyList() else withContext(Dispatchers.IO) { runCatching { PdfEngine.fields(viewFile) }.getOrDefault(emptyList()) }
         source = opened
         version++
         withContext(Dispatchers.IO) { old?.close() }
@@ -467,6 +473,24 @@ class ReaderState(private val context: Context, val file: File, private val scop
     }
 
     /**
+     * Fills in a form field (one Undo step), saved as the field's value. Nothing happens when the value
+     * is unchanged or the field can't be changed.
+     */
+    fun setField(field: FormField, value: String) {
+        if (field.readOnly || field.kind == FieldKind.Signature) return
+        if (value == field.value) return
+        edit { PdfEngine.setField(it, field.name, value, field.widget) }
+    }
+
+    /** Signs a signature field: the image is stamped into the field's box, centred, keeping its shape. */
+    fun signField(field: FormField, image: Bitmap) {
+        val size = sizes.getOrNull(field.page) ?: return
+        val rect = fitted(field.rect, image.width.toFloat() / image.height, size.width.toFloat() / size.height)
+        val page = field.page
+        edit { PdfEngine.stamp(it, page, image, rect) }
+    }
+
+    /**
      * Puts the file back exactly as it was when it was opened (with the password it had then, if any).
      * Undo brings the changes back.
      */
@@ -554,6 +578,9 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
 
     var showPages by remember { mutableStateOf(false) }
     var picking by remember { mutableStateOf<SignatureKind?>(null) }
+    // A form field being typed into, or a signature field waiting for its signature.
+    var typingField by remember { mutableStateOf<FormField?>(null) }
+    var signingField by remember { mutableStateOf<FormField?>(null) }
     // The text dialog: null when closed, otherwise what it starts with ("" for Text, today's date for Date).
     var textDraft by remember { mutableStateOf<TextDraft?>(null) }
     var showSearch by remember { mutableStateOf(false) }
@@ -684,7 +711,7 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
                 }
                 source == null -> CircularProgressIndicator(Modifier.align(Alignment.Center))
                 else -> {
-                    PageList(state, source, listState)
+                    PageList(state, source, listState, onFieldText = { typingField = it }, onFieldSign = { signingField = it })
                     Surface(shape = RoundedCornerShape(50), tonalElevation = 6.dp, shadowElevation = 2.dp, modifier = Modifier.align(Alignment.BottomStart).padding(12.dp)) {
                         Text("${currentPage + 1} of ${state.pageCount}", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
                     }
@@ -731,6 +758,22 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
         )
     }
 
+    typingField?.let { field ->
+        FieldTextDialog(field, onDismiss = { typingField = null }) { text ->
+            typingField = null
+            state.setField(field, text)
+        }
+    }
+
+    signingField?.let { field ->
+        ModalBottomSheet(onDismissRequest = { signingField = null }) {
+            SignaturePicker(SignatureKind.Signature, onPick = { image ->
+                signingField = null
+                state.signField(field, image)
+            })
+        }
+    }
+
     picking?.let { kind ->
         ModalBottomSheet(onDismissRequest = { picking = null }) {
             SignaturePicker(kind, onPick = { image ->
@@ -748,12 +791,33 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
     }
 }
 
+/**
+ * The largest rect with [imageAspect] (width / height, in points) that fits centred in [box] (page
+ * fractions) on a page with [pageAspect].
+ */
+fun fitted(box: RectF, imageAspect: Float, pageAspect: Float): RectF {
+    // In units where the page is pageAspect wide and 1 tall.
+    val boxWidth = box.width() * pageAspect
+    val boxHeight = box.height()
+    val width: Float
+    val height: Float
+    if (boxWidth / boxHeight > imageAspect) {
+        height = boxHeight
+        width = height * imageAspect
+    } else {
+        width = boxWidth
+        height = width / imageAspect
+    }
+    val w = width / pageAspect
+    return RectF(box.centerX() - w / 2, box.centerY() - height / 2, box.centerX() + w / 2, box.centerY() + height / 2)
+}
+
 /** The text dialog's title and starting text. */
 private data class TextDraft(val title: String, val text: String)
 
 /** All pages in a column. Pinch to zoom; when zoomed, the page scrolls sideways too. */
 @Composable
-private fun PageList(state: ReaderState, source: PdfSource, listState: androidx.compose.foundation.lazy.LazyListState) {
+private fun PageList(state: ReaderState, source: PdfSource, listState: androidx.compose.foundation.lazy.LazyListState, onFieldText: (FormField) -> Unit, onFieldSign: (FormField) -> Unit) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val baseWidthPx = constraints.maxWidth
         val baseWidth = maxWidth
@@ -794,6 +858,13 @@ private fun PageList(state: ReaderState, source: PdfSource, listState: androidx.
                     val bitmap by produceState<Bitmap?>(null, index, widthPx, state.version) { value = source.render(index, widthPx) }
                     Box(Modifier.fillMaxWidth().aspectRatio(size.width.toFloat() / size.height).background(Color.White)) {
                         bitmap?.let { Image(it.asImageBitmap(), "Page ${index + 1}", Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds) }
+                        FieldLayer(
+                            fields = state.fields.filter { it.page == index },
+                            enabled = !state.readOnly,
+                            onText = onFieldText,
+                            onSet = { field, value -> state.setField(field, value) },
+                            onSign = onFieldSign
+                        )
                     }
                 }
             }
