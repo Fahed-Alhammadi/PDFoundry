@@ -15,7 +15,9 @@ import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.pdmodel.PDPage
 import com.tom_roush.pdfbox.pdmodel.PDPageContentStream
 import com.tom_roush.pdfbox.pdmodel.common.PDRectangle
+import com.tom_roush.pdfbox.pdmodel.encryption.AccessPermission
 import com.tom_roush.pdfbox.pdmodel.encryption.InvalidPasswordException
+import com.tom_roush.pdfbox.pdmodel.encryption.StandardProtectionPolicy
 import com.tom_roush.pdfbox.pdmodel.graphics.blend.BlendMode
 import com.tom_roush.pdfbox.pdmodel.graphics.image.JPEGFactory
 import com.tom_roush.pdfbox.pdmodel.graphics.image.LosslessFactory
@@ -48,6 +50,9 @@ data class TextWord(val text: String, val rect: RectF, val lower: Edge = Edge.Bo
 enum class TextMark { Highlight, Underline, Strikethrough }
 
 class PdfException(message: String) : IOException(message)
+
+/** What a password opens. [Full]: it is the owner password (or user and owner are the same), so the file can be changed. */
+enum class UnlockResult { Full, Limited, Wrong }
 
 /**
  * Every change to a PDF goes through here. Positions are given the way the user sees the page
@@ -88,25 +93,50 @@ object PdfEngine {
             }
         } catch (e: InvalidPasswordException) {
             destination.delete()
-            throw PdfException("One of the documents is password protected. Remove it from the merge.")
+            throw PdfException("One of the documents is password protected. Use More › Remove Password first.")
         } catch (e: IOException) {
             destination.delete()
             throw PdfException("One of the documents could not be read. It may be damaged.")
         }
     }
 
-    fun extract(source: File, pages: List<Int>, destination: File) {
-        PDDocument.load(source, memory()).use { document ->
-            PDDocument().use { result ->
-                pages.sorted().filter { it in 0 until document.numberOfPages }.forEach { result.importPage(document.getPage(it)) }
-                if (result.numberOfPages == 0) throw PdfException("There are no pages to save.")
-                // Saved while the source is still open: imported pages read their content from it.
+    /** Copies [pages] of [source] into a new file. With [password], the source is opened with it and the new file keeps it. */
+    fun extract(source: File, pages: List<Int>, destination: File, password: String? = null) {
+        load(source, password).use { document ->
+            writePart(document, pages.sorted(), destination, password)
+        }
+    }
+
+    /**
+     * Writes each list of [parts] (0-based pages, in order) to the matching file in [destinations]. The
+     * source is only read. With [password], the source is opened with it and every part keeps it.
+     */
+    fun split(source: File, parts: List<List<Int>>, destinations: List<File>, password: String? = null) {
+        require(parts.size == destinations.size)
+        load(source, password).use { document ->
+            parts.zip(destinations).forEach { (pages, destination) -> writePart(document, pages, destination, password) }
+        }
+    }
+
+    private fun writePart(document: PDDocument, pages: List<Int>, destination: File, password: String?) {
+        PDDocument().use { result ->
+            pages.filter { it in 0 until document.numberOfPages }.forEach { result.importPage(document.getPage(it)) }
+            if (result.numberOfPages == 0) throw PdfException("There are no pages to save.")
+            if (password != null) result.protect(policy(password))
+            // Saved while the source is still open: imported pages read their content from it.
+            try {
                 result.save(destination)
+            } catch (e: Exception) {
+                destination.delete()
+                throw e
             }
         }
     }
 
-    /** One page per image, sized to the image with A4 width. */
+    private fun load(file: File, password: String?): PDDocument =
+        if (password == null) PDDocument.load(file, memory()) else PDDocument.load(file, password, memory())
+
+        /** One page per image, sized to the image with A4 width. */
     fun imagesToPdf(images: List<Bitmap>, destination: File) {
         if (images.isEmpty()) throw PdfException("There are no pages to save.")
         PDDocument().use { document ->
@@ -123,15 +153,71 @@ object PdfEngine {
         }
     }
 
-    /** Writes an unprotected copy of a password-protected file, for viewing. Returns false if the password is wrong. */
-    fun unlock(source: File, password: String, destination: File): Boolean = try {
+    /**
+     * Writes an unprotected copy of a password-protected file. [UnlockResult.Full] when the password may
+     * change the file, [UnlockResult.Limited] when it only opens it (nothing is written then unless
+     * [evenIfLimited]), [UnlockResult.Wrong] when it opens nothing.
+     */
+    fun unlock(source: File, password: String, destination: File, evenIfLimited: Boolean = true): UnlockResult = try {
         PDDocument.load(source, password, memory()).use { document ->
-            document.isAllSecurityToBeRemoved = true
-            document.save(destination)
+            val result = if (document.currentAccessPermission.isOwnerPermission) UnlockResult.Full else UnlockResult.Limited
+            if (result == UnlockResult.Full || evenIfLimited) {
+                document.isAllSecurityToBeRemoved = true
+                saveReplacing(document, destination)
+            }
+            result
         }
-        true
     } catch (e: InvalidPasswordException) {
-        false
+        UnlockResult.Wrong
+    }
+
+    /** What [password] opens in [file], without writing anything. An unprotected file is [UnlockResult.Full]. */
+    fun access(file: File, password: String): UnlockResult = try {
+        PDDocument.load(file, password, memory()).use { document ->
+            if (!document.isEncrypted || document.currentAccessPermission.isOwnerPermission) UnlockResult.Full else UnlockResult.Limited
+        }
+    } catch (e: InvalidPasswordException) {
+        UnlockResult.Wrong
+    }
+
+    /** True when the file is encrypted: it needs a password to open, or carries restrictions. */
+    fun isProtected(file: File): Boolean = try {
+        PDDocument.load(file, memory()).use { it.isEncrypted }
+    } catch (e: InvalidPasswordException) {
+        true
+    }
+
+    fun pageCount(file: File, password: String? = null): Int = load(file, password).use { it.numberOfPages }
+
+    /**
+     * Writes [source] (an unprotected PDF) to [destination] protected with [password]: AES-256, the same
+     * password to open it and to change it, nothing restricted. [destination] is replaced only once the
+     * protected copy is complete; it may be [source] itself.
+     */
+    fun protect(source: File, password: String, destination: File) {
+        if (password.isEmpty()) throw PdfException("Enter a password.")
+        PDDocument.load(source, memory()).use { document ->
+            if (document.isEncrypted) throw PdfException("This document is already protected with a password.")
+            document.protect(policy(password))
+            saveReplacing(document, destination)
+        }
+    }
+
+    private fun policy(password: String) = StandardProtectionPolicy(password, password, AccessPermission()).apply {
+        encryptionKeyLength = 256
+    }
+
+    /** Saves to a temporary file next to [destination], then puts it in place: [destination] is never half-written. */
+    private fun saveReplacing(document: PDDocument, destination: File) {
+        val temp = File(destination.parentFile, "${destination.name}.${System.nanoTime()}.tmp")
+        try {
+            document.save(temp)
+            if (!temp.renameTo(destination)) {
+                temp.copyTo(destination, overwrite = true)
+            }
+        } finally {
+            temp.delete()
+        }
     }
 
     fun search(file: File, query: String): List<SearchHit> {

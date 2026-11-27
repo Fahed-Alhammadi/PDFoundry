@@ -392,9 +392,10 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
         return destination
     }
 
-    suspend fun extract(source: File, pages: List<Int>): File {
+    /** From the reader's page organizer. With [password] (a protected document), the new file keeps it. */
+    suspend fun extract(source: File, pages: List<Int>, password: String? = null): File {
         val destination = withContext(Dispatchers.IO) {
-            uniqueFile("${source.nameWithoutExtension} extract").also { PdfEngine.extract(source, pages, it) }
+            uniqueFile("${source.nameWithoutExtension} extract").also { PdfEngine.extract(source, pages, it, password) }
         }
         refresh()
         return destination
@@ -433,14 +434,39 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
      * Extract Pages from the Tools tab: copies the chosen pages of [source] into a new library document,
      * "<name> (pages)". [source] is the file shown in the page picker: a library document, the working
      * copy of a file opened in place (brought up to date by [syncForReading] first), or a temporary copy.
-     * It is only read.
+     * It is only read. A protected source is opened with [password] and the new document keeps it.
      */
-    suspend fun extractPages(source: File, pages: List<Int>): File {
+    suspend fun extractPages(source: File, pages: List<Int>, password: String? = null): File {
         val destination = withContext(Dispatchers.IO) {
-            uniqueFile("${source.nameWithoutExtension} (pages)").also { PdfEngine.extract(source, pages, it) }
+            uniqueFile("${source.nameWithoutExtension} (pages)").also { PdfEngine.extract(source, pages, it, password) }
         }
         refresh()
         return destination
+    }
+
+    /**
+     * Split PDF from the Tools tab: each of [parts] (0-based pages) becomes a new library document,
+     * "<name> (part 1)", "(part 2)"… [source] is read the same way as for [extractPages] and never
+     * written. A protected source is opened with [password] and every part keeps it.
+     */
+    suspend fun split(source: File, parts: List<List<Int>>, password: String?): List<File> {
+        if (parts.isEmpty()) throw PdfException("There are no pages to save.")
+        val made = withContext(Dispatchers.IO) {
+            val destinations = mutableListOf<File>()
+            try {
+                parts.indices.forEach { index ->
+                    // Reserved one by one, so two parts never get the same name.
+                    destinations += uniqueFile("${source.nameWithoutExtension} (part ${index + 1})").also { it.createNewFile() }
+                }
+                PdfEngine.split(source, parts, destinations, password)
+            } catch (e: Exception) {
+                destinations.forEach { it.delete() }
+                throw e
+            }
+            destinations.toList()
+        }
+        refresh()
+        return made
     }
 
     /**
@@ -479,6 +505,8 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
     /** Temporary files a tool was using when the app was closed. */
     private fun clearLeftovers() {
         pickedDirectory.deleteRecursively()
+        // Unlocked copies of protected files the reader or a tool had open.
+        unlockedDirectory(context).deleteRecursively()
         // Downloads made by an earlier version's Extract Pages.
         context.cacheDir.listFiles { file -> file.name.startsWith("extract-") && file.name.endsWith(".pdf") }?.forEach { it.delete() }
     }
@@ -522,6 +550,12 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
     }.getOrNull()
 
     companion object {
+        /**
+         * Where unprotected working copies of password-protected files live while they are open: the
+         * app's private cache, never the library or the real file's location. Each is deleted on close.
+         */
+        fun unlockedDirectory(context: Context) = File(context.cacheDir, "unlocked")
+
         /** A safe file name: no path separators, no leading dots, no ".pdf" suffix. */
         fun sanitized(name: String): String {
             var clean = name.replace('/', '-').replace('\\', '-').replace(':', '-').trim()

@@ -201,7 +201,7 @@ class ReaderState(private val context: Context, val file: File, private val scop
         scope.launch {
             busy = true
             val copy = File(context.cacheDir, "unlocked-${file.path.hashCode()}.pdf")
-            val ok = withContext(Dispatchers.IO) { runCatching { PdfEngine.unlock(file, password, copy) }.getOrDefault(false) }
+            val ok = withContext(Dispatchers.IO) { runCatching { PdfEngine.unlock(file, password, copy) != io.pdfoundry.app.data.UnlockResult.Wrong }.getOrDefault(false) }
             busy = false
             if (ok) {
                 viewFile = copy
