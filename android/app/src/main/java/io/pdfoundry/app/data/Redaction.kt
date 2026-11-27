@@ -64,8 +64,8 @@ object Redaction {
                                 var scale = DPI / 72f
                                 val pixels = page.width.toLong() * page.height * scale * scale
                                 if (pixels > MAX_PIXELS) scale *= kotlin.math.sqrt(MAX_PIXELS.toDouble() / pixels).toFloat()
-                                val w = (page.width * scale).toInt().coerceAtLeast(1)
-                                val h = (page.height * scale).toInt().coerceAtLeast(1)
+                                val w = Math.round(page.width * scale).coerceAtLeast(1)
+                                val h = Math.round(page.height * scale).coerceAtLeast(1)
                                 val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
                                 bitmap.eraseColor(Color.WHITE)
                                 page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)

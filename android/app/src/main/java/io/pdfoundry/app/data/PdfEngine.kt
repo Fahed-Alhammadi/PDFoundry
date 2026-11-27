@@ -314,28 +314,11 @@ object PdfEngine {
     // endregion
     // region Drawing onto a page
 
-    /**
-     * Opens a content stream whose coordinates match what the user sees: origin at the bottom-left
-     * of the displayed page, in points, whatever the page's rotation or crop box.
-     */
-    private fun PDDocument.overlay(pageIndex: Int, draw: (PDPageContentStream, width: Float, height: Float) -> Unit) {
-        val page = getPage(pageIndex)
-        val box = page.cropBox
-        val rotation = ((page.rotation % 360) + 360) % 360
-        val sideways = rotation == 90 || rotation == 270
-        val width = if (sideways) box.height else box.width
-        val height = if (sideways) box.width else box.height
-        val toPage = when (rotation) {
-            90 -> Matrix(0f, 1f, -1f, 0f, box.lowerLeftX + box.width, box.lowerLeftY)
-            180 -> Matrix(-1f, 0f, 0f, -1f, box.lowerLeftX + box.width, box.lowerLeftY + box.height)
-            270 -> Matrix(0f, -1f, 1f, 0f, box.lowerLeftX, box.lowerLeftY + box.height)
-            else -> Matrix(1f, 0f, 0f, 1f, box.lowerLeftX, box.lowerLeftY)
-        }
-        PDPageContentStream(this, page, PDPageContentStream.AppendMode.APPEND, true, true).use { stream ->
-            stream.transform(toPage)
-            draw(stream, width, height)
-        }
-    }
+    /** Adds page numbers to every page's content (one change). */
+    fun addPageNumbers(file: File, style: PageNumberStyle) = PageStamps.addPageNumbers(file, style)
+
+    /** Adds a watermark on top of every page's content (one change). */
+    fun addWatermark(file: File, style: WatermarkStyle) = PageStamps.addWatermark(file, style)
 
     /**
      * Places an image (a signature, initials, a mark, or typed text rendered to a bitmap) as a `Stamp`

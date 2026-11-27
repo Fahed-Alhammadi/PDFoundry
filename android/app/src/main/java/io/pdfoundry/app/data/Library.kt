@@ -483,6 +483,20 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
     }
 
     /**
+     * Compress from the Tools tab: a smaller copy of [source], "<name> (compressed)", in the library.
+     * Null when it would not be at least 5% smaller (nothing is kept then). [source] is only read; a
+     * protected one is opened with [password] and the copy keeps it.
+     */
+    suspend fun compress(source: File, level: CompressLevel, password: String?, baseName: String = source.nameWithoutExtension): File? {
+        val made = withContext(Dispatchers.IO) {
+            val destination = uniqueFile("$baseName (compressed)")
+            if (Compress.run(source, level, password, destination)) destination else null
+        }
+        if (made != null) refresh()
+        return made
+    }
+
+    /**
      * Password-protect from the Tools tab: replaces [file] (a library document, or the working copy of a
      * file opened in place, whose real file is then written too) with its protected version. If saving
      * fails, the file keeps what it had. Refuses a file that is already protected.
