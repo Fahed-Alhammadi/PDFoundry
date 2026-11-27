@@ -57,7 +57,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.pdfoundry.app.app
+import io.pdfoundry.app.data.DocumentStore
+import io.pdfoundry.app.data.PdfEngine
 import io.pdfoundry.app.data.PdfSource
+import io.pdfoundry.app.data.UnlockResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.launch
@@ -69,11 +72,13 @@ import java.io.File
  * change it: no delete, rotate or reorder), and the new document goes into the library. A file opened
  * in place is first brought up to date, so the pages shown are the pages extracted. This screen owns a
  * [PickedDocument.temporary] copy: it is discarded when the screen goes, or, once Extract was tapped,
- * when the extraction has finished.
+ * when the extraction has finished. A protected document comes with its [password]: its pages are shown
+ * from an unlocked copy in the private cache (deleted when the screen goes) and the new document keeps
+ * the password.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ExtractPagesScreen(document: PickedDocument, onCancel: () -> Unit, onExtracted: (File, Int) -> Unit) {
+fun ExtractPagesScreen(document: PickedDocument, password: String? = null, onCancel: () -> Unit, onExtracted: (File, Int) -> Unit) {
     val app = LocalContext.current.app
     val store = app.store
     val file = document.file
@@ -96,11 +101,16 @@ fun ExtractPagesScreen(document: PickedDocument, onCancel: () -> Unit, onExtract
     // null while opening; failure leaves it null and says why. Closed when the screen goes, even mid-open.
     val source by produceState<PdfSource?>(null, file) {
         var opened: PdfSource? = null
+        val unlocked = password?.let { File(DocumentStore.unlockedDirectory(app), "${java.util.UUID.randomUUID()}.pdf") }
         try {
             withContext(Dispatchers.IO) {
                 if (!document.temporary && !store.syncForReading(file)) notice = "This file can't be reached right now. It is shown as last seen."
                 try {
-                    opened = PdfSource(file)
+                    if (unlocked != null) {
+                        unlocked.parentFile?.mkdirs()
+                        if (PdfEngine.unlock(file, password, unlocked) == UnlockResult.Wrong) throw SecurityException()
+                    }
+                    opened = PdfSource(unlocked ?: file)
                 } catch (e: Exception) {
                     problem = if (e is SecurityException) "Pages can't be extracted from a password-protected document." else "This file isn't a readable PDF."
                 }
@@ -108,7 +118,8 @@ fun ExtractPagesScreen(document: PickedDocument, onCancel: () -> Unit, onExtract
             value = opened
             awaitCancellation()
         } finally {
-            opened?.let { Thread { it.close() }.start() }
+            val toClose = opened
+            Thread { toClose?.close(); unlocked?.delete() }.start()
         }
     }
     val count = source?.pageCount ?: 0
@@ -143,7 +154,7 @@ fun ExtractPagesScreen(document: PickedDocument, onCancel: () -> Unit, onExtract
                             // In the app's scope: finishes, and cleans up, even if the screen goes meanwhile.
                             app.scope.launch {
                                 try {
-                                    val result = store.extractPages(file, pages)
+                                    val result = store.extractPages(file, pages, password)
                                     store.release(listOf(document))
                                     onExtracted(result, pages.size)
                                 } catch (e: Exception) {

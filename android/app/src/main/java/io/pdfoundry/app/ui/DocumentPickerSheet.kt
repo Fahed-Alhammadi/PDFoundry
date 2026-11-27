@@ -72,6 +72,10 @@ fun DocumentStore.release(documents: List<PickedDocument>) = documents.filter { 
  * A file picked from Files is used for this job only, as on iOS: it is read from a temporary copy and
  * is neither opened in place nor listed. Copies not handed over in [onPick] are discarded when the
  * sheet closes.
+ *
+ * With [openInPlace] (Password-protect), a file picked from Files is opened where it lives instead, as
+ * `+ › Open PDF` does, and listed: the tool then works on the real file, never on a copy. With
+ * [allowLocked], password-protected documents can be chosen too (the tool asks for the password).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -80,7 +84,9 @@ fun DocumentPickerSheet(
     multiple: Boolean,
     onDismiss: () -> Unit,
     onPick: (List<PickedDocument>) -> Unit,
-    onError: (String) -> Unit
+    onError: (String) -> Unit,
+    allowLocked: Boolean = false,
+    openInPlace: Boolean = false
 ) {
     val context = LocalContext.current
     val store = context.app.store
@@ -105,6 +111,21 @@ fun DocumentPickerSheet(
 
     fun picked(uris: List<Uri>) {
         if (uris.isEmpty()) return
+        if (openInPlace) {
+            scope.launch {
+                working = true
+                try {
+                    val skipped = mutableListOf<io.pdfoundry.app.data.Skipped>()
+                    val opened = store.open(uris, skipped)
+                    if (skipped.isNotEmpty()) onError("That file isn't a PDF, or it couldn't be read.")
+                    val documents = opened.mapNotNull { file -> store.items.firstOrNull { it.file == file }?.let { PickedDocument(it, temporary = false) } }
+                    documents.firstOrNull()?.let { hand(listOf(it)) }
+                } finally {
+                    working = false
+                }
+            }
+            return
+        }
         scope.launch {
             working = true
             try {
@@ -161,7 +182,7 @@ fun DocumentPickerSheet(
                 items(all, key = { it.file.path }) { document ->
                     val item = document.item
                     val isChosen = item.file.path in chosen
-                    val enabled = !item.locked && !working
+                    val enabled = (allowLocked || !item.locked) && !working
                     val rowModifier = if (multiple) {
                         Modifier.toggleable(value = isChosen, enabled = enabled, role = Role.Checkbox) { on ->
                             chosen = if (on) chosen + item.file.path else chosen - item.file.path

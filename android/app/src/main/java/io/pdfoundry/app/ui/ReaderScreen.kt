@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.Draw
 import androidx.compose.material.icons.filled.FileCopy
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Restore
@@ -586,6 +587,8 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
     var showSearch by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
     var confirmRevert by remember { mutableStateOf(false) }
+    var askPassword by remember { mutableStateOf(false) }
+    var confirmRemovePassword by remember { mutableStateOf(false) }
     val store = context.app.store
     val location = store.location(file)
 
@@ -660,6 +663,12 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
                                             snackbar.showSnackbar(if (saved) "A copy is now in your documents." else "The copy could not be saved.")
                                         }
                                     })
+                                }
+                                if (!state.readOnly && !state.hasPassword) {
+                                    DropdownMenuItem(text = { Text("Protect with Password") }, leadingIcon = { Icon(Icons.Filled.Lock, null) }, enabled = !state.busy, onClick = { menu = false; askPassword = true })
+                                }
+                                if (!state.readOnly && state.hasPassword) {
+                                    DropdownMenuItem(text = { Text("Remove Password") }, leadingIcon = { Icon(Icons.Filled.LockOpen, null) }, enabled = !state.busy, onClick = { menu = false; confirmRemovePassword = true })
                                 }
                                 if (!state.readOnly) {
                                     DropdownMenuItem(text = { Text("Revert to original") }, leadingIcon = { Icon(Icons.Filled.Restore, null) }, enabled = state.canRevert && !state.busy, onClick = { menu = false; confirmRevert = true })
@@ -755,6 +764,28 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
                 }) { Text("Add") }
             },
             dismissButton = { TextButton(onClick = { textDraft = null }) { Text("Cancel") } }
+        )
+    }
+
+    if (askPassword) {
+        ProtectDialog(file.nameWithoutExtension, onDismiss = { askPassword = false }) { password ->
+            askPassword = false
+            state.protect(password)
+        }
+    }
+
+    if (confirmRemovePassword) {
+        AlertDialog(
+            onDismissRequest = { confirmRemovePassword = false },
+            title = { Text("Remove the password?") },
+            text = { Text(if (location != null) "The file in $location is saved without a password. Anyone who has it can open it." else "The document is saved without a password. Anyone who has it can open it.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmRemovePassword = false
+                    state.removePassword()
+                }) { Text("Remove Password", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { confirmRemovePassword = false }) { Text("Cancel") } }
         )
     }
 
