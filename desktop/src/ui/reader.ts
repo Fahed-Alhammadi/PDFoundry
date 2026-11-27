@@ -315,7 +315,11 @@ export class Reader {
   /** Writes the field being typed in (by leaving it) and waits for every field change to be in `bytes`. */
   private async commitFields(): Promise<void> {
     const active = document.activeElement;
-    if (active instanceof HTMLElement && active.closest('.annotationLayer')) active.blur(); // fires its change
+    if (active instanceof HTMLElement && active.closest('.annotationLayer')) {
+      active.blur(); // fires its change
+      // While the window itself doesn't have the focus, leaving a field fires no events: write it directly.
+      if (this.typing) this.fieldChanged({ target: active } as unknown as Event);
+    }
     await this.fieldWork;
   }
 

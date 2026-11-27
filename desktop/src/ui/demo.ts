@@ -1233,6 +1233,8 @@ async function fillSignTest(check: Check, app: App): Promise<void> {
   // The page's fields are redrawn after Undo; on a slow machine the old inputs are still there for a moment, so wait
   // for the redrawn (emptied) field. If it never empties, the check below fails with the details.
   await until(() => input('arabic')?.value === '', 'the redrawn fields').catch(() => undefined);
+  // Let the page finish drawing its new form layer, so the inputs typed into below are the ones that stay.
+  await wait(300);
   check('Undo takes back a field change', undone === '' && input('arabic').value === '' && !app.reader.dirty, JSON.stringify({ undone, dirty: app.reader.dirty }));
 
   // Save (Ctrl+S) while still typing in a field: the field is written first.
@@ -1241,7 +1243,7 @@ async function fillSignTest(check: Check, app: App): Promise<void> {
   const typingCounts = app.reader.dirty;
   await app.reader.save();
   check('Save while typing in a field saves that field', typingCounts && (await fieldOnDisk('name')) === 'Grace Hopper' && !app.reader.dirty,
-    JSON.stringify({ typingCounts, onDisk: await fieldOnDisk('name') }));
+    JSON.stringify({ typingCounts, onDisk: await fieldOnDisk('name'), dirty: app.reader.dirty, windowFocused: document.hasFocus() }));
 
   // Closing while still typing asks first, and Save keeps what was typed.
   await until(() => !!input('name'), 'the fields');
