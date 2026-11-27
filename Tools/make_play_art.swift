@@ -97,9 +97,9 @@ do {
 let captions: [(file: String, caption: String)] = [
     ("01-library", "Your documents in one place"),
     ("02-fill-sign", "Fill in and sign forms"),
-    ("03-merge", "Merge documents"),
-    ("04-pages", "Reorder, rotate and delete pages"),
-    ("05-settings", "Private: no account, no ads"),
+    ("11-shapes-comment", "Highlight, draw and comment"),
+    ("13-redact", "Black out private details"),
+    ("07-tools", "Every PDF tool you need"),
 ]
 for (index, item) in captions.enumerated() {
     let shot = load(shots.appendingPathComponent("\(item.file).png"))
