@@ -41,6 +41,8 @@ cpSync('assets/logo.png', 'out/ui/logo.png');
 const pdfjs = 'node_modules/pdfjs-dist';
 cpSync(`${pdfjs}/build/pdf.worker.min.mjs`, 'out/ui/pdf.worker.min.mjs');
 for (const dir of ['cmaps', 'standard_fonts', 'wasm']) cpSync(`${pdfjs}/${dir}`, `out/ui/pdfjs/${dir}`, { recursive: true });
+// The note icons pdf.js's annotation layer asks for while it lays out comments (the reader shows their appearance).
+cpSync(`${pdfjs}/web/images`, 'out/ui/pdfjs/images', { recursive: true, filter: (f) => f.endsWith('images') || /annotation-[a-z]+\.svg$/.test(f) });
 // Make Searchable's English and Arabic data (resources/ocr in the packaged app).
 copyOcrData('out/ocr');
 console.log('Built to out/');

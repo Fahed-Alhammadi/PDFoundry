@@ -233,6 +233,10 @@ textarea { width: 100%; resize: vertical; }
   border: 0; border-radius: 50%; background: #d70015; color: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 .apply-redactions { white-space: nowrap; }
+/* Comments (and other marks pdf.js draws on their own canvas) are shown by the form layer, as pictures only: clicks
+   go through to the page, where the reader selects them; pdf.js's own popups are not used. */
+.annotationLayer .mark-picture, .annotationLayer .mark-picture * { pointer-events: none !important; }
+.annotationLayer .popupAnnotation, .annotationLayer .popup { display: none !important; }
 .shape-preview { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
 
 /* A selected mark: its box, corner handles (marks that can be resized) and a small menu above it. */
