@@ -2,8 +2,12 @@
 // password that only opens it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PDFDocument, StandardFonts } from '@cantoo/pdf-lib';
+import { PDFDict, PDFDocument, PDFName, StandardFonts } from '@cantoo/pdf-lib';
 import type { EncryptionAlgorithm } from '@cantoo/pdf-lib';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Store } from '../src/main/store.ts';
 import * as pdf from '../src/core/pdf.ts';
 
 async function sample(pages = 2): Promise<Uint8Array> {
@@ -68,18 +72,76 @@ test('unlock: the right password gives the decrypted document with full access',
 });
 
 test('unlock: a user password opens with limited access, the owner password with full access', async () => {
-  for (const algorithm of ['AES-256', 'AES-128', 'RC4-128'] as EncryptionAlgorithm[]) {
+  // RC4-40 is revision 2, RC4-128 revision 3, AES-128 revision 4, AES-256 revision 6.
+  for (const algorithm of ['AES-256', 'AES-128', 'RC4-128', 'RC4-40'] as EncryptionAlgorithm[]) {
     const bytes = await locked('u', 'o', algorithm);
     const user = await pdf.unlock(bytes, 'u');
     const owner = await pdf.unlock(bytes, 'o');
-    assert.equal(user?.full, false, `${algorithm}: user password`);
-    assert.equal(owner?.full, true, `${algorithm}: owner password`);
+    assert.deepEqual([user?.full, user?.opens], [false, true], `${algorithm}: user password`);
+    assert.deepEqual([owner?.full, owner?.opens], [true, false], `${algorithm}: owner password`);
     assert.equal(await pdf.unlock(bytes, 'x'), null, `${algorithm}: wrong password`);
     assert.equal(await pdf.pageCount(owner!.bytes), 2);
   }
-  // The same password for both: full access.
+  assert.match(new TextDecoder('latin1').decode(await locked('u', 'o', 'RC4-40')), /\/R 2\b/, 'the RC4-40 file is revision 2');
+  // The same password for both: full access, and saving with it changes nothing about how it opens.
   const same = await locked('both', 'both');
-  assert.equal((await pdf.unlock(same, 'both'))?.full, true);
+  assert.deepEqual([(await pdf.unlock(same, 'both'))?.full, (await pdf.unlock(same, 'both'))?.opens], [true, true]);
+});
+
+test('access: what the reader may do with a file it opened', async () => {
+  const plain = await sample(1);
+  assert.deepEqual({ ...(await pdf.access(plain, null)), bytes: null }, { bytes: null, editable: true, password: null, changesPassword: false });
+  const mine = await pdf.protect(plain, 'pw');
+  const full = await pdf.access(mine, 'pw');
+  assert.equal(full.editable && full.password === 'pw' && !full.changesPassword && !(await pdf.isProtected(full.bytes)), true);
+  const theirs = await locked('u', 'o');
+  assert.deepEqual([(await pdf.access(theirs, 'u')).editable, (await pdf.access(theirs, 'u')).bytes], [false, theirs], 'user password: read-only');
+  const owner = await pdf.access(theirs, 'o');
+  assert.deepEqual([owner.editable, owner.changesPassword], [true, true], 'owner password: editable, and saving sets the open password to it');
+  // Protected in a way pdf-lib can't decrypt (another security handler): shown read-only, never an error.
+  const raw = await PDFDocument.load(mine, { ignoreEncryption: true });
+  (raw.context.lookup(raw.context.trailerInfo.Encrypt) as PDFDict).set(PDFName.of('Filter'), PDFName.of('Unknown'));
+  const odd = await raw.save({ useObjectStreams: false, updateFieldAppearances: false });
+  assert.equal(await pdf.isProtected(odd), true);
+  await assert.rejects(pdf.unlock(odd, 'pw'), /can’t open for changes/);
+  const fallback = await pdf.access(odd, 'pw');
+  assert.deepEqual([fallback.editable, fallback.password, fallback.bytes], [false, null, odd]);
+});
+
+test('Review focus 1 and 3: every write of a protected document keeps its password', async () => {
+  // The reader's write path, step by step: decrypted bytes in memory (undo steps too), `protect` on every save.
+  const root = mkdtempSync(join(tmpdir(), 'pdfoundry-focus-'));
+  try {
+    const store = new Store(join(root, 'data'));
+    const file = store.saveNew(join(root, 'Doc.pdf'), await sample(3));
+    const save = async (plain: Uint8Array, password: string) => store.save(file, await pdf.protect(plain, password));
+    const needs = async (password: string, pages: number) => {
+      const disk = readFileSync(file);
+      assert.equal(await pdf.isProtected(disk), true);
+      assert.equal(await pdf.unlock(disk, 'wrong'), null);
+      assert.equal(await pdf.pageCount((await pdf.unlock(disk, password))!.bytes), pages);
+    };
+    // Focus 3: protect the open (unprotected) document; the next edit is saved protected.
+    let open = (await pdf.access(readFileSync(file), null)).bytes;
+    await save(open, 'pw');
+    await needs('pw', 3);
+    const undo = [open];
+    open = await pdf.deletePages(open, [0]);
+    await save(open, 'pw');
+    await needs('pw', 2);
+    // Focus 1: reopen, edit, undo, save: still protected, content as expected.
+    const reopened = await pdf.access(readFileSync(file), 'pw');
+    assert.equal(reopened.editable, true);
+    undo.push(reopened.bytes);
+    open = await pdf.deletePages(reopened.bytes, [0]);
+    await save(open, 'pw');
+    await needs('pw', 1);
+    open = undo.pop()!;
+    await save(open, 'pw');
+    await needs('pw', 2);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('a file with restrictions only (no open password) is not given full access', async () => {

@@ -79,6 +79,7 @@ test('splitNeverWritesTheSource', async () => {
     assert.deepEqual(await Promise.all(written.map((f) => widths(readFileSync(f)))), [[100, 200], [300, 400], [500]]);
     assert.equal(md5(readFileSync(source)), before);
     assert.equal(store.knows(source), false, 'the source is not listed');
+    assert.deepEqual(store.recent(), [], 'nor are the parts: a long split must not push the open document off the list');
 
     // Again: the names are taken now. Keep both adds a number; Replace writes over the old parts.
     assert.equal(store.existing(desk, named.map((p) => p.name)).length, 3);
@@ -93,6 +94,36 @@ test('splitNeverWritesTheSource', async () => {
     assert.throws(() => store.saveParts(desk, clash, false, [source]), /would replace the file it is made from/);
     assert.equal(existsSync(join(desk, 'Other.pdf')), false);
     assert.equal(md5(readFileSync(source)), before, 'the source is byte for byte the same');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the open document stays on the recent list, and parts never replace a recent file', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pdfoundry-recent-'));
+  try {
+    const store = new Store(join(root, 'data'));
+    const one = await sample(1);
+    const open = join(root, 'Open.pdf');
+    writeFileSync(open, one);
+    store.remember(open);
+    store.setCurrent(open);
+    for (let i = 0; i < 70; i++) {
+      const f = join(root, `File ${i}.pdf`);
+      writeFileSync(f, one);
+      store.remember(f);
+    }
+    assert.equal(store.knows(open), true, 'pushed past 60 files, the open document is still known');
+    store.save(open, await sample(2));
+    assert.equal(store.knows(join(root, 'File 0.pdf')), false, 'others are trimmed as before');
+    // Parts named like a recent file (or the open document) are refused before anything is written.
+    const recentName = [{ name: 'Fresh', bytes: one }, { name: 'File 69', bytes: one }];
+    assert.throws(() => store.saveParts(root, recentName, false, []), /recent files/);
+    assert.throws(() => store.saveParts(root, [{ name: 'Open', bytes: one }], false, []), /open document/);
+    assert.equal(existsSync(join(root, 'Fresh.pdf')), false);
+    store.setCurrent(null);
+    store.setCurrent(join(root, 'Never listed.pdf'));
+    assert.equal(store.knows(join(root, 'Never listed.pdf')), false, 'only a listed file can be the current one');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -5,12 +5,12 @@
 // the page as it is displayed (after its rotation), measured from the top-left corner: the same convention as the
 // Android app's PdfEngine.
 import {
-  BlendMode, PDFArray, PDFCheckBox, PDFDocument, PDFDropdown, PDFName, PDFOptionList, PDFPage, PDFRadioGroup, PDFRef, PDFSignature, PDFStream, PDFTextField,
-  decodePDFRawStream, degrees, fill, popGraphicsState, pushGraphicsState, rectangle, setFillingRgbColor, setGraphicsState,
+  BlendMode, PDFArray, PDFCheckBox, PDFDocument, PDFDropdown, PDFHexString, PDFName, PDFOptionList, PDFPage, PDFRadioGroup, PDFRef, PDFSignature, PDFStream, PDFTextField,
+  StandardFonts, decodePDFRawStream, degrees, fill, popGraphicsState, pushGraphicsState, rectangle, setFillingRgbColor, setGraphicsState,
 } from '@cantoo/pdf-lib';
-import type { PDFField, PDFRawStream } from '@cantoo/pdf-lib';
+import type { PDFField, PDFFont, PDFRawStream } from '@cantoo/pdf-lib';
 import { Encodings } from '@cantoo/pdf-lib/standard-fonts';
-import { encryptionOf, isOwnerPassword } from './security.ts';
+import { encryptionOf, isOwnerPassword, isUserPassword } from './security.ts';
 
 export class PdfError extends Error {}
 
@@ -37,7 +37,8 @@ async function open(bytes: Uint8Array): Promise<PDFDocument> {
 }
 
 function save(doc: PDFDocument): Promise<Uint8Array> {
-  return doc.save({ useObjectStreams: true });
+  // Form fields are never redrawn behind the caller's back: only `fillFields` draws, and only what it filled.
+  return doc.save({ useObjectStreams: true, updateFieldAppearances: false });
 }
 
 function check(doc: PDFDocument, pages: number[]): number[] {
@@ -113,9 +114,11 @@ export async function isProtected(bytes: Uint8Array): Promise<boolean> {
 /**
  * Decrypts a protected file with its password. Null when the password is wrong. `full`: the password is the owner
  * password (or the same as the open password), which is what allows changing the file; a password that only opens
- * it gives `full: false`, and the document must stay read-only. A file that is not protected comes back as it is.
+ * it gives `full: false`, and the document must stay read-only. `opens`: the password is also the open password, so
+ * saving with it as both passwords leaves the way the file opens unchanged (false: saving changes it to this one).
+ * A file that is not protected comes back as it is.
  */
-export async function unlock(bytes: Uint8Array, password: string): Promise<{ bytes: Uint8Array; full: boolean } | null> {
+export async function unlock(bytes: Uint8Array, password: string): Promise<{ bytes: Uint8Array; full: boolean; opens: boolean } | null> {
   let probe: PDFDocument;
   try {
     probe = await PDFDocument.load(bytes, { ignoreEncryption: true, updateMetadata: false });
@@ -123,7 +126,7 @@ export async function unlock(bytes: Uint8Array, password: string): Promise<{ byt
     throw new PdfError('This file is not a PDF that PDFoundry can read.');
   }
   const encryption = encryptionOf(probe);
-  if (!probe.isEncrypted || !encryption) return { bytes, full: true };
+  if (!probe.isEncrypted || !encryption) return { bytes, full: true, opens: true };
   let doc: PDFDocument;
   try {
     doc = await PDFDocument.load(bytes, { password, updateMetadata: false });
@@ -132,6 +135,7 @@ export async function unlock(bytes: Uint8Array, password: string): Promise<{ byt
     throw new PdfError('This PDF is protected in a way PDFoundry can’t open for changes.');
   }
   const full = await isOwnerPassword(encryption, password);
+  const opens = await isUserPassword(encryption, password);
   // pdf-lib drops the trailer's /Encrypt but keeps the dictionary itself and the old cross-reference streams (which
   // still name it): a reader finding either would take the decrypted file for an encrypted one.
   const ref = probe.context.trailerInfo.Encrypt;
@@ -139,7 +143,29 @@ export async function unlock(bytes: Uint8Array, password: string): Promise<{ byt
   for (const [at, object] of doc.context.enumerateIndirectObjects()) {
     if (object instanceof PDFStream && object.dict.get(PDFName.of('Type')) === PDFName.of('XRef')) doc.context.delete(at);
   }
-  return { bytes: await save(doc), full };
+  return { bytes: await save(doc), full, opens };
+}
+
+/** How a document can be worked on, once opened: see `access`. */
+export type Access = { bytes: Uint8Array; editable: boolean; password: string | null; changesPassword: boolean };
+
+/**
+ * What the reader does with a file it has just opened for display, with the password pdf.js was given (null when it
+ * asked none). Editable and decrypted when the password gives full access; otherwise read-only, as it is, including
+ * a protected file PDFoundry can show but not decrypt itself. Never throws for a protected file.
+ * `changesPassword`: saving will make the entered password the open password too (it was only the owner password).
+ */
+export async function access(bytes: Uint8Array, password: string | null): Promise<Access> {
+  const readOnly: Access = { bytes, editable: false, password: null, changesPassword: false };
+  if (!(await isProtected(bytes))) return { ...readOnly, editable: await isEditable(bytes) };
+  if (password === null) return readOnly;
+  try {
+    const unlocked = await unlock(bytes, password);
+    if (!unlocked?.full) return readOnly;
+    return { bytes: unlocked.bytes, editable: true, password, changesPassword: !unlocked.opens };
+  } catch {
+    return readOnly;
+  }
 }
 
 /**
@@ -500,15 +526,22 @@ export function canEncode(text: string): boolean {
  * radio groups the chosen option ('' clears). `images`: for a text field whose text the standard font cannot show,
  * a PNG of the text drawn by the window, used as the field's appearance; its value is still the real text. Refuses
  * read-only fields and names that are not fields.
+ *
+ * Only the fields given here get new appearances: the others are left exactly as they are (a form that asks readers
+ * to draw its fields, with NeedAppearances, keeps asking). A radio button may be named by its option or by its
+ * on-state name (what pdf.js reports); a choice by its export value or the text shown, and its export value is what
+ * is written.
  */
 export async function fillFields(bytes: Uint8Array, values: Record<string, FieldValue>, images: Record<string, Uint8Array> = {}): Promise<Uint8Array> {
   const doc = await open(bytes);
   const form = doc.getForm();
+  let font: PDFFont | null = null;
   for (const [name, value] of Object.entries(values)) {
     const field = form.getFieldMaybe(name);
     if (!field || !kindOf(field) || field instanceof PDFSignature) throw new PdfError(`This form has no field “${name}” to fill.`);
     if (field.isReadOnly()) throw new PdfError('That field can’t be changed.');
     try {
+      let exports: string[] | null = null; // a choice whose export values differ from the text shown
       if (field instanceof PDFTextField) {
         const text = Array.isArray(value) ? value.join(' ') : value === false ? '' : String(value);
         field.setText(text === '' ? undefined : text);
@@ -519,16 +552,32 @@ export async function fillFields(bytes: Uint8Array, values: Record<string, Field
         else field.uncheck();
       } else if (field instanceof PDFRadioGroup) {
         if (value === '' || value === false) field.clear();
-        else field.select(String(value));
+        else {
+          const options = field.getOptions();
+          let option = String(value);
+          if (!options.includes(option)) {
+            const at = field.acroField.getOnValues().map((n) => n.decodeText()).indexOf(option);
+            if (at >= 0 && at < options.length) option = options[at];
+          }
+          field.select(option);
+        }
       } else if (field instanceof PDFDropdown || field instanceof PDFOptionList) {
-        const chosen = (Array.isArray(value) ? value : [String(value)]).filter((v) => v !== '');
+        const entries = field.acroField.getOptions().map((o) => ({ value: o.value.decodeText(), shown: (o.display ?? o.value).decodeText() }));
+        const chosen = (Array.isArray(value) ? value : [String(value)]).filter((v) => v !== '')
+          .map((v) => entries.find((e) => e.value === v) ?? entries.find((e) => e.shown === v) ?? { value: v, shown: v });
         if (!chosen.length) field.clear();
-        else field.select(chosen);
+        else field.select(chosen.map((c) => c.shown));
+        if (chosen.some((c) => c.value !== c.shown)) exports = chosen.map((c) => c.value);
+      }
+      if (field.needsAppearancesUpdate()) field.defaultUpdateAppearances((font ??= await doc.embedFont(StandardFonts.Helvetica)));
+      if (exports) {
+        // Drawn with the text shown; the value is the export value, as the form defines it.
+        const v = exports.length === 1 ? PDFHexString.fromText(exports[0]) : doc.context.obj(exports.map((e) => PDFHexString.fromText(e)));
+        field.acroField.dict.set(PDFName.of('V'), v);
       }
     } catch (e) {
       throw e instanceof PdfError ? e : new PdfError(`“${name}” can’t take that value.`);
     }
   }
-  form.updateFieldAppearances();
   return save(doc);
 }

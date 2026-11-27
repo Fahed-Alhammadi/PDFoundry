@@ -202,12 +202,13 @@ const handlers: Record<string, Handler> = {
   },
   /** Which of Split's part names are taken in the picked folder. */
   partsExisting: (folder: string, names: string[]) => store.existing(pickedFolder(folder), Array.isArray(names) ? names.filter((n) => typeof n === 'string') : []),
-  /** Writes Split's parts into the picked folder (never over `keep`); `keepBoth` numbers names that are taken. */
+  /**
+   * Writes Split's parts into the picked folder; `keepBoth` numbers names that are taken. The store itself refuses to
+   * write over `keep` (the source), the open document and every recent file. The parts are not listed.
+   */
   saveParts: (folder: string, parts: { name: string; bytes: Uint8Array }[], keepBoth: boolean, keep?: string[]) => {
     if (!Array.isArray(parts) || !parts.every((p) => p && typeof p.name === 'string' && p.bytes instanceof Uint8Array)) throw new Error('There is nothing to save.');
-    const saved = store.saveParts(pickedFolder(folder), parts, keepBoth === true, Array.isArray(keep) ? keep.filter((k) => typeof k === 'string') : []);
-    for (const file of saved) app.addRecentDocument(file);
-    return saved;
+    return store.saveParts(pickedFolder(folder), parts, keepBoth === true, Array.isArray(keep) ? keep.filter((k) => typeof k === 'string') : []);
   },
   forget: (file: string) => store.forget(file),
   clearRecent: () => {
@@ -234,6 +235,7 @@ const handlers: Record<string, Handler> = {
   // The open document, as the window reports it: shown in the title bar, and asked about before closing.
   setDocument: (file: string | null, edited: boolean) => {
     unsaved = !!file && edited === true;
+    store.setCurrent(file); // kept on the recent list, so it can always be saved
     if (!win) return;
     const name = typeof file === 'string' ? path.basename(file) : '';
     win.setTitle(name ? `${name}${unsaved && process.platform !== 'darwin' ? ' (edited)' : ''} - PDFoundry` : 'PDFoundry');

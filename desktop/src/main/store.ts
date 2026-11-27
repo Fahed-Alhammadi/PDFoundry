@@ -82,8 +82,19 @@ export class Store {
     }
   }
 
+  /** The document open in the window: it stays on the list (so it can still be saved) however long the list gets. */
+  private current: string | null = null;
+
+  /** Tells the store which document the window has open (null: none). Only a file on the list can be the current one. */
+  setCurrent(file: string | null): void {
+    this.current = typeof file === 'string' && this.knows(file) ? path.resolve(file) : null;
+  }
+
   private write(list: { path: string; opened: number }[]): void {
-    writeFileSync(this.recentFile, JSON.stringify(list.slice(0, MAX_RECENT), null, 2));
+    const kept = list.slice(0, MAX_RECENT);
+    const current = this.current && !kept.some((e) => e.path === this.current) ? list.find((e) => e.path === this.current) : undefined;
+    if (current) kept.push(current);
+    writeFileSync(this.recentFile, JSON.stringify(kept, null, 2));
   }
 
   /** Versions before 1.1 copied every document into the app's folder. Those copies are listed as recent files. */
@@ -182,9 +193,10 @@ export class Store {
   }
 
   /**
-   * Split PDF: writes each part into `folder` as "<name>.pdf" and lists it as recent. `keepBoth`: a name that is taken
-   * gets " 2", " 3"… instead of being replaced. Nothing is written when any part would replace a file in `keep` (the
-   * source, the open document). Returns the paths written, in order.
+   * Split PDF: writes each part into `folder` as "<name>.pdf". The parts are not listed as recent (a split of a long
+   * document would push everything else off the list). `keepBoth`: a name that is taken gets " 2", " 3"… instead of
+   * being replaced. Nothing is written when any part would replace a file in `keep` (the source), the open document
+   * or any file on the recent list. Returns the paths written, in order.
    */
   saveParts(folder: string, parts: { name: string; bytes: Uint8Array }[], keepBoth: boolean, keep: string[] = []): string[] {
     const dir = path.resolve(folder);
@@ -197,11 +209,12 @@ export class Store {
       used.add(target.toLowerCase());
       return target;
     });
-    if (targets.some((t) => keep.some((k) => typeof k === 'string' && k !== '' && sameFile(t, k)))) {
-      throw new Error('A part would replace the file it is made from, or the open document. Choose Keep Both or another folder.');
+    const protectedFiles = [...keep, ...(this.current ? [this.current] : []), ...this.saved.map((e) => e.path)];
+    if (targets.some((t) => protectedFiles.some((k) => typeof k === 'string' && k !== '' && sameFile(t, k)))) {
+      throw new Error('A part would replace the file it is made from, the open document or one of your recent files. Choose Keep Both or another folder.');
     }
     targets.forEach((target, i) => this.writeFile(target, parts[i].bytes));
-    return targets.map((target) => this.remember(target));
+    return targets;
   }
 
   private writeFile(target: string, bytes: Uint8Array): void {

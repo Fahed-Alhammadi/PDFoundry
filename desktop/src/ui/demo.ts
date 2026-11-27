@@ -577,7 +577,7 @@ async function toolsTest(check: (name: string, pass: boolean, detail?: string) =
 
 type Check = (name: string, pass: boolean, detail?: string) => void;
 
-const lastDialog = () => [...document.querySelectorAll<HTMLElement>('.dialog')].pop()!;
+const lastDialog = (): HTMLElement => [...document.querySelectorAll<HTMLElement>('.dialog')].pop() ?? document.createElement('div'); // none yet: an empty stand-in
 const toastText = () => document.querySelector('.toast')?.textContent ?? '';
 /** How many pixels inside `box` are dark (text), counted one by one. */
 function darkCount(px: Px, box: Box): number {
@@ -707,7 +707,22 @@ async function fillSignTest(check: Check, app: App): Promise<void> {
   const undone = (await pdf.fields(app.reader.data)).find((f) => f.name === 'arabic')?.value;
   await until(() => !!input('arabic'), 'the fields again');
   check('Undo takes back a field change', undone === '' && input('arabic').value === '' && !app.reader.dirty, JSON.stringify({ undone, dirty: app.reader.dirty }));
-  await app.reader.close();
+
+  // Save (Ctrl+S) while still typing in a field: the field is written first.
+  const fieldOnDisk = async (name: string) => (await PDFDocument.load(await api.devRead(file))).getForm().getTextField(name).getText();
+  typeInto(input('name'), 'Grace Hopper'); // no change event: the field still has the focus
+  const typingCounts = app.reader.dirty;
+  await app.reader.save();
+  check('Save while typing in a field saves that field', typingCounts && (await fieldOnDisk('name')) === 'Grace Hopper' && !app.reader.dirty,
+    JSON.stringify({ typingCounts, onDisk: await fieldOnDisk('name') }));
+
+  // Closing while still typing asks first, and Save keeps what was typed.
+  await until(() => !!input('name'), 'the fields');
+  typeInto(input('name'), 'Katherine Johnson');
+  const closing = app.reader.close();
+  await until(() => /Save the changes to/.test(lastDialog()?.querySelector('h2')?.textContent ?? ''), 'the save question');
+  clickButton(lastDialog(), 'Save');
+  check('closing while typing in a field asks, and Save keeps it', (await closing) === true && (await fieldOnDisk('name')) === 'Katherine Johnson' && !app.reader.file);
 }
 
 /** Split PDF: bad ranges disable Split and say why; good ones write the parts beside the source, which is left alone. */
@@ -840,6 +855,21 @@ async function passwordTest(check: Check, app: App): Promise<void> {
   const freed = await api.devRead(copy);
   check('Remove Password writes the file without a password', !(await pdf.isProtected(freed)) && await pdf.isEditable(freed) && await pdf.isProtected(await api.devRead(file))
     && (bar.querySelector('.locked') as HTMLElement).hidden === true);
+  await app.reader.close();
+
+  // A file made elsewhere with separate passwords, opened with the owner one: editable, with a note that saving
+  // makes that password the one it opens with.
+  const elsewhere = await PDFDocument.load(await blank(200, 200));
+  elsewhere.encrypt({ userPassword: 'reader', ownerPassword: 'owner', permissions: { modifying: false } });
+  const ownerFile = await api.devCreate('Owner only', await elsewhere.save());
+  const openingOwner = app.reader.open(ownerFile);
+  await until(() => /This PDF is protected/.test(lastDialog()?.querySelector('h2')?.textContent ?? ''), 'the password question');
+  typeInto(lastDialog().querySelector('input')!, 'owner');
+  clickButton(lastDialog(), 'Unlock');
+  await openingOwner;
+  const note = document.querySelector('.reader .notice') as HTMLElement;
+  check('opened with an owner password, it says saving sets the password', !note.hidden && /Saving will set this document’s password/.test(note.textContent ?? '') && !dock.hidden,
+    note.textContent ?? '');
   await app.reader.close();
 
   // Tools › Password-protect on a file that is not open; a second time it says it already is.

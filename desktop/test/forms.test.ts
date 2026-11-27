@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deflateSync } from 'node:zlib';
-import { PDFCheckBox, PDFDocument, PDFDropdown, PDFName, PDFRadioGroup, PDFStream, PDFTextField, degrees } from '@cantoo/pdf-lib';
+import { PDFBool, PDFCheckBox, PDFDocument, PDFDropdown, PDFHexString, PDFName, PDFRadioGroup, PDFStream, PDFTextField, degrees } from '@cantoo/pdf-lib';
 import { todayText } from '../src/core/dates.ts';
 import * as pdf from '../src/core/pdf.ts';
 
@@ -158,4 +158,46 @@ test('a filled form stays a form when protected and unlocked again', async () =>
   const f = (await PDFDocument.load(open.bytes)).getForm();
   assert.equal(f.getTextField('name').getText(), 'Grace');
   assert.equal(f.getFields().length, (await PDFDocument.load(filled)).getForm().getFields().length);
+});
+
+test('filling one field leaves the others as they are (NeedAppearances forms filled elsewhere)', async () => {
+  const doc = await PDFDocument.load(await form());
+  const other = doc.getForm().createTextField('other');
+  other.addToPage(doc.getPage(0), { x: 50, y: 300, width: 300, height: 24 });
+  // Filled in another app that left the drawing to the reader: an Arabic value, no appearance.
+  other.acroField.dict.set(PDFName.of('V'), PDFHexString.fromText('مرحبا'));
+  other.acroField.getWidgets()[0].dict.delete(PDFName.of('AP'));
+  doc.catalog.getOrCreateAcroForm().dict.set(PDFName.of('NeedAppearances'), PDFBool.True);
+  const source = await doc.save({ updateFieldAppearances: false });
+
+  const filled = await PDFDocument.load(await pdf.fillFields(source, { name: 'Ada', agree: true }));
+  const f = filled.getForm();
+  assert.equal(f.getTextField('name').getText(), 'Ada');
+  assert.equal(f.getTextField('other').getText(), 'مرحبا', 'the other value is untouched');
+  assert.equal(f.getTextField('other').acroField.getWidgets()[0].dict.get(PDFName.of('AP')), undefined, 'and still not drawn by us');
+  assert.equal(filled.catalog.getAcroForm()!.dict.get(PDFName.of('NeedAppearances')), PDFBool.True);
+});
+
+test('a radio group with /Opt is filled by its on-state name (as pdf.js reports it) or its option', async () => {
+  // pdf-lib, like many form makers, names the buttons' on-states 0, 1, 2 and keeps the option texts in /Opt.
+  const source = await form();
+  const states = (await PDFDocument.load(source)).getForm().getRadioGroup('size').acroField.getOnValues().map((n) => n.decodeText());
+  assert.deepEqual(states, ['0', '1', '2']);
+  const byState = (await PDFDocument.load(await pdf.fillFields(source, { size: '1' }))).getForm().getRadioGroup('size');
+  assert.equal(byState.getSelected(), 'M');
+  assert.equal(byState.acroField.getValue().decodeText(), '1', 'the on-state is set');
+  const byOption = (await PDFDocument.load(await pdf.fillFields(source, { size: 'L' }))).getForm().getRadioGroup('size');
+  assert.equal(byOption.acroField.getValue().decodeText(), '2');
+});
+
+test('a choice with [export, display] options stores the export value', async () => {
+  const doc = await PDFDocument.load(await form());
+  const colour = doc.getForm().getDropdown('colour');
+  colour.acroField.dict.set(PDFName.of('Opt'), doc.context.obj([['R', 'Red'], ['G', 'Green']].map((pair) => pair.map((t) => PDFHexString.fromText(t)))));
+  const source = await doc.save();
+  for (const given of ['G', 'Green']) {
+    const out = await PDFDocument.load(await pdf.fillFields(source, { colour: given }));
+    const v = out.getForm().getDropdown('colour').acroField.dict.lookup(PDFName.of('V')) as PDFHexString;
+    assert.equal(v.decodeText(), 'G', `given “${given}”`);
+  }
 });

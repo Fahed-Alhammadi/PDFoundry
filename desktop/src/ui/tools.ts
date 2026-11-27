@@ -118,6 +118,7 @@ export class ToolsView {
     if (picked === this.host.openFile()) return void (await this.host.protectOpen());
     const bytes = await api.read(picked);
     if (await pdf.isProtected(bytes)) return alreadyProtected(picked);
+    if (!(await pdf.isEditable(bytes))) return void toast('This PDF can’t be changed by PDFoundry.', true);
     const password = await protectSheet(picked);
     if (!password) return;
     await api.save(picked, await pdf.protect(bytes, password));

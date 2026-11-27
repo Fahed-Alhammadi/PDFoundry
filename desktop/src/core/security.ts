@@ -86,6 +86,17 @@ export async function isOwnerPassword(e: Encryption, password: string): Promise<
   return isUserKeyValid(e, user);
 }
 
+/** Does `password` match the open (user) password? Used to tell whether saving with it changes the open password. */
+export async function isUserPassword(e: Encryption, password: string): Promise<boolean> {
+  if (e.r >= 5) {
+    const pw = (e.r === 6 ? new TextEncoder().encode(password) : latin1(password)).subarray(0, 127);
+    const input = join(pw, e.u.subarray(32, 40));
+    const hash = e.r === 6 ? await hash2B(pw, input, new Uint8Array()) : await sha('SHA-256', input);
+    return equal(hash.subarray(0, 32), e.u.subarray(0, 32));
+  }
+  return e.r >= 2 && isUserKeyValid(e, pad(latin1(password)));
+}
+
 /** Algorithm 6 for revisions 2 to 4, given the user password already padded to 32 bytes. */
 function isUserKeyValid(e: Encryption, padded: Uint8Array): boolean {
   const n = e.r === 2 ? 5 : e.length >> 3;
