@@ -620,6 +620,8 @@ class PdfSource(file: File) : Closeable {
     }
     private val mutex = Mutex()
     private var closed = false
+    /** PdfRenderer draws no annotations: marks are drawn on top from their appearance streams. */
+    private val marks = AnnotationLayer(file)
 
     val pageCount: Int = renderer.pageCount
 
@@ -640,6 +642,7 @@ class PdfSource(file: File) : Closeable {
                 Bitmap.createBitmap(widthPx, height, Bitmap.Config.ARGB_8888).also { bitmap ->
                     bitmap.eraseColor(Color.WHITE)
                     page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                    marks.draw(index, bitmap)
                 }
             }
         }
@@ -651,6 +654,7 @@ class PdfSource(file: File) : Closeable {
             mutex.withLock {
                 if (!closed) {
                     closed = true
+                    marks.close()
                     renderer.close()
                     descriptor.close()
                 }
