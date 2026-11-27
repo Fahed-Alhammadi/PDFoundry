@@ -171,6 +171,34 @@ export class Store {
     return this.remember(target);
   }
 
+  /** Split PDF: which of these names (without ".pdf") are already taken in `folder`. */
+  existing(folder: string, names: string[]): string[] {
+    return names.filter((name) => existsSync(path.join(path.resolve(folder), `${cleanName(name)}.pdf`)));
+  }
+
+  /**
+   * Split PDF: writes each part into `folder` as "<name>.pdf" and lists it as recent. `keepBoth`: a name that is taken
+   * gets " 2", " 3"… instead of being replaced. Nothing is written when any part would replace a file in `keep` (the
+   * source, the open document). Returns the paths written, in order.
+   */
+  saveParts(folder: string, parts: { name: string; bytes: Uint8Array }[], keepBoth: boolean, keep: string[] = []): string[] {
+    const dir = path.resolve(folder);
+    if (!statSync(dir).isDirectory()) throw new Error('That folder could not be found.');
+    const used = new Set<string>();
+    const targets = parts.map(({ name }) => {
+      const base = cleanName(name);
+      let target = path.join(dir, `${base}.pdf`);
+      for (let n = 2; keepBoth && (existsSync(target) || used.has(target.toLowerCase())); n++) target = path.join(dir, `${base} ${n}.pdf`);
+      used.add(target.toLowerCase());
+      return target;
+    });
+    if (targets.some((t) => keep.some((k) => typeof k === 'string' && k !== '' && sameFile(t, k)))) {
+      throw new Error('A part would replace the file it is made from, or the open document. Choose Keep Both or another folder.');
+    }
+    targets.forEach((target, i) => this.writeFile(target, parts[i].bytes));
+    return targets.map((target) => this.remember(target));
+  }
+
   private writeFile(target: string, bytes: Uint8Array): void {
     const partial = path.join(path.dirname(target), `.${path.basename(target)}.${randomUUID()}.part`);
     try {

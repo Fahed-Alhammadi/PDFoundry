@@ -51,6 +51,8 @@ const ICONS: Record<string, string> = {
   zoomIn: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14z M20 20l-3.8-3.8 M11 8v6 M8 11h6',
   zoomOut: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14z M20 20l-3.8-3.8 M8 11h6',
   lock: 'M7 11V8a5 5 0 0 1 10 0v3 M5 11h14v10H5z',
+  unlock: 'M7 11V8a5 5 0 0 1 9.6-2 M5 11h14v10H5z',
+  split: 'M7 3h10v7H7z M7 14h10v7H7z M3 12h3 M18 12h3',
   up: 'M6 15l6-6 6 6',
   down: 'M6 9l6 6 6-6',
   external: 'M14 5h5v5 M19 5l-8 8 M18 14v5H5V6h5',

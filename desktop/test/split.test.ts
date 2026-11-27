@@ -1,8 +1,14 @@
 // Split PDF: reading the page ranges the user types, cutting a document into parts, and never touching the source.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
+import { tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
 import { PDFDocument } from '@cantoo/pdf-lib';
 import { everyN, parseRanges } from '../src/core/ranges.ts';
+import { Store } from '../src/main/store.ts';
 import * as pdf from '../src/core/pdf.ts';
 
 async function sample(pages: number): Promise<Uint8Array> {
@@ -49,4 +55,95 @@ test('split makes one document per part, with the right pages', async () => {
   assert.deepEqual(await Promise.all(custom.map(widths)), [[500], [100, 200]]);
   await assert.rejects(pdf.split(source, [[7]]), /no page 8/);
   await assert.rejects(pdf.split(source, []), /nothing to split/i);
+});
+
+const md5 = (bytes: Uint8Array) => createHash('md5').update(bytes).digest('hex');
+
+test('splitNeverWritesTheSource', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pdfoundry-split-'));
+  try {
+    const desk = join(root, 'Desk');
+    mkdirSync(desk);
+    const source = join(desk, 'Report.pdf');
+    writeFileSync(source, await sample(5));
+    const before = md5(readFileSync(source));
+    const store = new Store(join(root, 'data'));
+    const bytes = store.readOnce(source); // picked with Browse…: read once, not listed
+    const parts = await pdf.split(bytes, everyN(5, 2));
+    const named = parts.map((b, i) => ({ name: `Report (part ${i + 1})`, bytes: b }));
+
+    // Nothing exists yet; all three are written and listed, and the source is the same.
+    assert.deepEqual(store.existing(desk, named.map((p) => p.name)), []);
+    const written = store.saveParts(desk, named, false, [source]);
+    assert.deepEqual(written.map((f) => basename(f)), ['Report (part 1).pdf', 'Report (part 2).pdf', 'Report (part 3).pdf']);
+    assert.deepEqual(await Promise.all(written.map((f) => widths(readFileSync(f)))), [[100, 200], [300, 400], [500]]);
+    assert.equal(md5(readFileSync(source)), before);
+    assert.equal(store.knows(source), false, 'the source is not listed');
+
+    // Again: the names are taken now. Keep both adds a number; Replace writes over the old parts.
+    assert.equal(store.existing(desk, named.map((p) => p.name)).length, 3);
+    const kept = store.saveParts(desk, named, true, [source]);
+    assert.deepEqual(kept.map((f) => basename(f)), ['Report (part 1) 2.pdf', 'Report (part 2) 2.pdf', 'Report (part 3) 2.pdf']);
+    writeFileSync(written[0], 'old');
+    store.saveParts(desk, named, false, [source]);
+    assert.deepEqual(await widths(readFileSync(written[0])), [100, 200]);
+
+    // A part named like the source is refused before anything is written.
+    const clash = [{ name: 'Other', bytes: parts[0] }, { name: 'Report', bytes: parts[1] }];
+    assert.throws(() => store.saveParts(desk, clash, false, [source]), /would replace the file it is made from/);
+    assert.equal(existsSync(join(desk, 'Other.pdf')), false);
+    assert.equal(md5(readFileSync(source)), before, 'the source is byte for byte the same');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('aFailedProtectedSaveLeavesTheOldFile', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pdfoundry-protected-save-'));
+  const fs = createRequire(import.meta.url)('node:fs') as typeof import('node:fs');
+  const real = { rename: fs.renameSync, write: fs.writeFileSync };
+  try {
+    const file = join(root, 'Lease.pdf');
+    writeFileSync(file, await pdf.protect(await sample(3), 'pw'));
+    const before = readFileSync(file);
+    const store = new Store(join(root, 'data'));
+    store.remember(file);
+    const open = (await pdf.unlock(before, 'pw'))!;
+    const edited = await pdf.protect(await pdf.deletePages(open.bytes, [0]), 'pw');
+
+    // The disk fills up half way through writing, and then the last step (the rename) fails.
+    fs.writeFileSync = ((target: string, data: Uint8Array, ...rest: unknown[]) => {
+      if (String(target).endsWith('.part')) {
+        real.write(target, data.subarray(0, data.length >> 1));
+        throw Object.assign(new Error('no space left'), { code: 'ENOSPC' });
+      }
+      return (real.write as (...a: unknown[]) => void)(target, data, ...rest);
+    }) as typeof fs.writeFileSync;
+    syncBuiltinESMExports();
+    assert.throws(() => store.save(file, edited), /no space left/);
+    fs.writeFileSync = real.write;
+    fs.renameSync = (() => {
+      throw Object.assign(new Error('rename failed'), { code: 'EIO' });
+    }) as typeof fs.renameSync;
+    syncBuiltinESMExports();
+    assert.throws(() => store.save(file, edited), /rename failed/);
+    fs.renameSync = real.rename;
+    syncBuiltinESMExports();
+
+    const after = readFileSync(file);
+    assert.equal(md5(after), md5(before), 'the old protected file is untouched');
+    assert.equal(await pdf.isProtected(after), true);
+    assert.equal(await pdf.pageCount((await pdf.unlock(after, 'pw'))!.bytes), 3);
+    assert.deepEqual(readdirSync(root).filter((f) => f.endsWith('.part')), [], 'no half-written file is left behind');
+
+    // And a save that works keeps the password.
+    store.save(file, edited);
+    assert.equal(await pdf.unlock(readFileSync(file), 'wrong'), null);
+    assert.equal(await pdf.pageCount((await pdf.unlock(readFileSync(file), 'pw'))!.bytes), 2);
+  } finally {
+    fs.renameSync = real.rename;
+    fs.writeFileSync = real.write;
+    syncBuiltinESMExports();
+    rmSync(root, { recursive: true, force: true });
+  }
 });

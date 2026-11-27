@@ -126,7 +126,7 @@ main { flex: 1; min-width: 0; display: flex; }
 }
 .icon-button:hover:not(:disabled) { background: var(--hover); }
 
-input[type="text"], input[type="search"], input[type="password"], textarea, select {
+input[type="text"], input[type="search"], input[type="password"], input[type="number"], textarea, select {
   min-height: 32px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); user-select: text;
 }
 input.search { width: 220px; }
@@ -177,6 +177,8 @@ textarea { width: 100%; resize: vertical; }
 }
 .reader-bar > * { -webkit-app-region: no-drag; }
 .doc-title { font-size: 15px; font-weight: 650; margin: 0 10px 0 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 40px; }
+.locked { display: inline-grid; place-items: center; margin-right: 8px; color: var(--muted); }
+.locked[hidden] { display: none; }
 .edited { margin-right: 10px; padding: 1px 8px; border-radius: 999px; background: var(--ember-soft); color: var(--ember-strong); font-size: 12px; font-weight: 600; white-space: nowrap; }
 .reader-bar .save { margin: 0 4px; }
 .page-counter { color: var(--muted); font-size: 13px; white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -402,3 +404,17 @@ button.row:hover { background: var(--hover); }
 @media (prefers-reduced-motion: no-preference) {
   .button, .nav, .icon-button, .tool, .card { transition: background-color 0.12s; }
 }
+
+/* Password-protect and Split PDF */
+.password-fields { display: grid; gap: 8px; margin: 12px 0 4px; }
+.password-fields input { width: 100%; }
+.field-error { min-height: 18px; margin: 0; color: var(--danger); font-size: 13px; }
+.hint.warning { color: var(--ember-strong); font-weight: 500; }
+.split-options { display: grid; gap: 10px; margin: 14px 0 8px; }
+.split-option { display: grid; grid-template-columns: 18px auto 1fr; align-items: center; gap: 10px; min-height: 32px; }
+.split-option input[type="radio"] { width: 16px; height: 16px; margin: 0; accent-color: var(--ember); }
+.split-option input[type="number"] { width: 84px; justify-self: start; }
+.split-option input[type="text"] { width: 100%; }
+.split-option input:disabled { opacity: 0.5; }
+.split-status { min-height: 20px; margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+.split-status.error { color: var(--danger); }

@@ -492,8 +492,8 @@ async function toolsTest(check: (name: string, pass: boolean, detail?: string) =
 
   clickButton(rail, 'Tools');
   const sections = [...view.querySelectorAll('.tool-section h2')].map((e) => e.textContent);
-  check('the Tools view lists today’s tools in their sections', !view.hidden && JSON.stringify(sections) === '["Create","Combine & split"]'
-    && ['Create from Images', 'Merge PDFs', 'Extract Pages'].every((t) => hasButton(view, t)) && !hasButton(view, 'Scan Document'), JSON.stringify(sections));
+  check('the Tools view lists today’s tools in their sections', !view.hidden && JSON.stringify(sections) === '["Create","Combine & split","Protect & optimize"]'
+    && ['Create from Images', 'Merge PDFs', 'Extract Pages', 'Split PDF', 'Password-protect'].every((t) => hasButton(view, t)) && !hasButton(view, 'Scan Document'), JSON.stringify(sections));
 
   // From a recent file: pick it, tick pages 1 and 3, Extract, and say where to save.
   const extractFrom = async (choose: () => void, tick: number[], out: string) => {

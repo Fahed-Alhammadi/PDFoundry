@@ -4,8 +4,9 @@
 //
 // A PDF is opened where it is and saved back to the same file when the user chooses Save; nothing is copied into
 // the app. The window may read and save only files the user picked (a system dialog, a drop, or "Open with").
-// The one exception only reads: Extract Pages gets the bytes of the file picked in its own dialog, once, and that
-// file is not listed (so the window cannot read or save it afterwards).
+// The one exception only reads: Extract Pages and Split PDF get the bytes of the file picked in their own dialog, once,
+// and that file is not listed (so the window cannot read or save it afterwards). Split PDF writes its parts only into
+// a folder the user has just picked.
 //
 // The window itself can never use the network: it is served from the app:// scheme and every other request is
 // refused. The only thing that goes online is the update check in this process (GitHub releases).
@@ -47,7 +48,14 @@ let unsaved = false;
 /** Set once the user has answered the "save your changes?" question, so the window may really close. */
 let closing = false;
 /** Development only (the self-test): the answer to the next save or open dialog, so no system dialog is shown. */
-let devAnswer: { save?: string; pick?: string } = {};
+let devAnswer: { save?: string; pick?: string; folder?: string } = {};
+/** Folders the user picked for Split PDF's parts: the only folders the window may look into or write new files in. */
+const pickedFolders = new Set<string>();
+
+function pickedFolder(folder: unknown): string {
+  if (typeof folder !== 'string' || !pickedFolders.has(path.resolve(folder))) throw new Error('Choose a folder first.');
+  return path.resolve(folder);
+}
 
 const updater = new Updater((state) => send('update', state));
 
@@ -160,14 +168,14 @@ const handlers: Record<string, Handler> = {
    * Extract Pages: asks for one PDF and hands its bytes to the window, once. The file is not added to the recent
    * list, so this grants no access beyond this read. Null when cancelled.
    */
-  pickPdf: async () => {
+  pickPdf: async (title?: string) => {
     let file: string | undefined;
     if (dev && devAnswer.pick) {
       file = devAnswer.pick;
       delete devAnswer.pick;
     } else {
       const picked = await dialog.showOpenDialog(win!, {
-        title: 'Extract Pages',
+        title: typeof title === 'string' ? title : 'Extract Pages',
         properties: ['openFile'],
         filters: [{ name: 'PDF documents', extensions: ['pdf'] }],
       });
@@ -175,6 +183,29 @@ const handlers: Record<string, Handler> = {
     }
     if (!file) return null;
     return { path: file, name: path.basename(file), bytes: store.readOnce(file) };
+  },
+  /** Split PDF: asks for the folder to put the parts in. Null when cancelled. */
+  pickFolder: async () => {
+    let folder: string | undefined;
+    if (dev && devAnswer.folder) {
+      folder = devAnswer.folder;
+      delete devAnswer.folder;
+    } else {
+      const picked = await dialog.showOpenDialog(win!, { title: 'Choose a Folder for the Parts', buttonLabel: 'Choose', properties: ['openDirectory', 'createDirectory'] });
+      folder = picked.canceled ? undefined : picked.filePaths[0];
+    }
+    if (!folder) return null;
+    pickedFolders.add(path.resolve(folder));
+    return path.resolve(folder);
+  },
+  /** Which of Split's part names are taken in the picked folder. */
+  partsExisting: (folder: string, names: string[]) => store.existing(pickedFolder(folder), Array.isArray(names) ? names.filter((n) => typeof n === 'string') : []),
+  /** Writes Split's parts into the picked folder (never over `keep`); `keepBoth` numbers names that are taken. */
+  saveParts: (folder: string, parts: { name: string; bytes: Uint8Array }[], keepBoth: boolean, keep?: string[]) => {
+    if (!Array.isArray(parts) || !parts.every((p) => p && typeof p.name === 'string' && p.bytes instanceof Uint8Array)) throw new Error('There is nothing to save.');
+    const saved = store.saveParts(pickedFolder(folder), parts, keepBoth === true, Array.isArray(keep) ? keep.filter((k) => typeof k === 'string') : []);
+    for (const file of saved) app.addRecentDocument(file);
+    return saved;
   },
   forget: (file: string) => store.forget(file),
   clearRecent: () => {
@@ -244,8 +275,8 @@ const handlers: Record<string, Handler> = {
     writeFileSync(file, bytes);
     return file;
   },
-  /** The answer the next save dialog (`save`) or Extract Pages open dialog (`pick`) gives, without showing it. */
-  devAnswer: (answer: { save?: string; pick?: string }) => {
+  /** The answer the next save dialog (`save`), Extract/Split open dialog (`pick`) or folder dialog gives, without showing it. */
+  devAnswer: (answer: { save?: string; pick?: string; folder?: string }) => {
     if (dev) devAnswer = { ...devAnswer, ...answer };
   },
   devRead: (file: string) => (dev ? readFileSync(file) : null),

@@ -2,14 +2,19 @@
 // strikethrough on selected text, typed text, drawing; Fill & Sign: signatures and text; Pages: the organizer),
 // search, zoom, printing and undo. The file is opened where it is. Changes are kept in memory until the user
 // chooses Save (back to the same file) or Save As; leaving with unsaved changes asks first.
+//
+// A protected file opened with a password that gives full access is decrypted once: every change, and every Undo
+// step, works on the decrypted bytes in memory, and Save and Save As encrypt them again with the same password. The
+// password is kept here only while the document is open.
 import { api, revealLabel, title } from './api.ts';
-import { button, choose, dialog, h, icon, iconButton, message, prompt, showMenu, toast } from './dom.ts';
+import { button, choose, confirm, dialog, h, icon, iconButton, message, prompt, showMenu, toast } from './dom.ts';
 import type { MenuItem } from './dom.ts';
 import { paintStrokes, rasterize, textImage } from './images.ts';
 import type { Placed, Stroke } from './images.ts';
 import { HIGHLIGHT_COLOURS, MARK_RED, modeBar } from './modebar.ts';
 import type { TextTool, ToolMode } from './modebar.ts';
 import { organizer } from './organizer.ts';
+import { alreadyProtected, protectSheet } from './protect.ts';
 import { PasswordNeeded, openPdf, pageSizes, renderPage, renderTextLayer, search } from './pdfview.ts';
 import type { Match, PDFDocumentProxy, Size } from './pdfview.ts';
 import { signatureDialog } from './sign.ts';
@@ -46,6 +51,8 @@ export class Reader {
   private bytes: Uint8Array = new Uint8Array();
   /** The bytes as they are on disk. The document has unsaved changes whenever `bytes` is something else. */
   private savedBytes: Uint8Array = this.bytes;
+  /** The password of a protected document that was unlocked with full access. Every write is encrypted with it. */
+  private password: string | null = null;
   private doc: PDFDocumentProxy | null = null;
   private sizes: Size[] = [];
   private editable = true;
@@ -66,6 +73,7 @@ export class Reader {
 
   private readonly heading = h('h1.doc-title');
   private readonly edited = h('span.edited', { hidden: true }, 'Edited');
+  private readonly locked = h('span.locked', { hidden: true, title: 'Protected with a password', 'aria-label': 'Protected with a password', role: 'img' }, icon('lock', 16));
   private readonly saveButton = h('button.button.save', { type: 'button', disabled: true, title: 'Save (Ctrl+S)', onclick: () => void this.save() }, 'Save');
   private readonly counter = h('span.page-counter', { role: 'status' });
   private readonly zoomLabel = h('span.zoom-label');
@@ -82,6 +90,7 @@ export class Reader {
       h('header.reader-bar',
         iconButton('back', 'Close document', () => void this.close()),
         this.heading,
+        this.locked,
         this.edited,
         this.counter,
         h('span.spacer'),
@@ -119,18 +128,28 @@ export class Reader {
     if (!(await this.leave())) return false;
     try {
       const bytes = await api.read(file);
-      const doc = await openPdf(bytes, (wrong) => prompt(wrong ? 'That password didn’t work' : 'This PDF is protected', 'Password', '', 'Unlock', 'password'));
+      let tried: string | null = null; // the password pdf.js was last given: the one that worked, once it opens
+      const doc = await openPdf(bytes, async (wrong) => (tried = await prompt(wrong ? 'That password didn’t work' : 'This PDF is protected', 'Password', '', 'Unlock', 'password')));
+      // Protected: editable only when the password gives full access. Then the document is worked on decrypted.
+      let working = bytes;
+      let password: string | null = null;
+      let editable: boolean;
+      if (await pdf.isProtected(bytes)) {
+        const unlocked = tried === null ? null : await pdf.unlock(bytes, tried);
+        editable = !!unlocked?.full;
+        if (unlocked?.full) [working, password] = [unlocked.bytes, tried];
+      } else editable = await pdf.isEditable(bytes);
       this.reset();
       this.file = file;
-      this.bytes = bytes;
-      this.savedBytes = bytes;
+      this.bytes = working;
+      this.savedBytes = working;
+      this.password = password;
       this.doc = doc;
       this.sizes = await pageSizes(doc);
-      this.editable = await pdf.isEditable(bytes);
+      this.editable = editable;
       this.heading.textContent = title(file);
       this.heading.title = file;
-      this.notice.hidden = this.editable;
-      this.notice.replaceChildren(icon('lock', 18), 'This PDF is protected, so it can be read but not changed.');
+      this.showProtection();
       this.zoom = 'fit';
       this.layout(false);
       this.drawDock();
@@ -143,8 +162,16 @@ export class Reader {
     }
   }
 
+  /** The lock beside the title, and the notice of a protected file that can only be read. */
+  private showProtection(): void {
+    this.locked.hidden = !this.password;
+    this.notice.hidden = this.editable;
+    this.notice.replaceChildren(icon('lock', 18), 'This PDF is protected, so it can be read but not changed.');
+  }
+
   private reset(): void {
     this.observer?.disconnect();
+    this.password = null;
     void this.doc?.loadingTask.destroy();
     this.doc = null;
     this.undoStack = [];
@@ -164,6 +191,7 @@ export class Reader {
     this.reset();
     this.file = '';
     this.bytes = this.savedBytes = new Uint8Array();
+    this.showProtection();
     this.report();
     this.host.back();
     return true;
@@ -205,7 +233,7 @@ export class Reader {
     }
     const bytes = this.bytes;
     try {
-      await api.save(this.file, bytes);
+      await api.save(this.file, await this.encrypted(bytes));
       this.savedBytes = bytes;
       this.report();
       toast('Saved.');
@@ -221,7 +249,7 @@ export class Reader {
     if (!this.file || this.busy) return false;
     const bytes = this.bytes;
     try {
-      const saved = await api.saveAs(title(this.file), bytes, this.file);
+      const saved = await api.saveAs(title(this.file), await this.encrypted(bytes), this.file);
       if (!saved) return false;
       this.file = saved;
       this.savedBytes = bytes;
@@ -230,6 +258,81 @@ export class Reader {
       this.report();
       this.host.opened(saved);
       toast('Saved.');
+      return true;
+    } catch (e) {
+      toast(message(e), true);
+      return false;
+    }
+  }
+
+  /** What goes to disk: the bytes encrypted with the document's password, when it has one. */
+  private encrypted(bytes: Uint8Array): Promise<Uint8Array> {
+    return this.password ? pdf.protect(bytes, this.password) : Promise.resolve(bytes);
+  }
+
+  // Passwords (More › Protect with Password / Remove Password, and Tools › Password-protect on the open document)
+
+  /** The open document's password, when `file` is that document and it is protected; otherwise null. */
+  passwordFor(file: string): string | null {
+    return file && file === this.file ? this.password : null;
+  }
+
+  /**
+   * Protects the open file with a new password, in place. With unsaved changes it asks first, because protecting
+   * writes the file (Save and Protect). From then on every save is encrypted with this password.
+   */
+  async protectWithPassword(): Promise<boolean> {
+    if (!this.file || this.busy) return false;
+    if (this.password || !this.editable) {
+      alreadyProtected(this.file);
+      return false;
+    }
+    if (this.ink || this.placement) {
+      toast('Finish what you are placing or drawing first.', true);
+      return false;
+    }
+    if (this.dirty) {
+      const answer = await choose(`Save the changes to “${title(this.file)}” first?`, 'Protecting saves the file, with your changes.', [
+        { label: 'Cancel', value: 'cancel' },
+        { label: 'Save and Protect', value: 'save', kind: 'primary' },
+      ]);
+      if (answer !== 'save') return false;
+    }
+    const password = await protectSheet(this.file);
+    if (!password || !this.file) return false;
+    const bytes = this.bytes;
+    try {
+      await api.save(this.file, await pdf.protect(bytes, password));
+      this.password = password;
+      this.savedBytes = bytes;
+      this.showProtection();
+      this.report();
+      toast(`“${title(this.file)}” is now protected with a password.`);
+      return true;
+    } catch (e) {
+      toast(message(e), true);
+      return false;
+    }
+  }
+
+  /** Takes the password off: the file is written without encryption (with any unsaved changes), after asking. */
+  async removePassword(): Promise<boolean> {
+    if (!this.file || this.busy || !this.password) return false;
+    if (this.ink || this.placement) {
+      toast('Finish what you are placing or drawing first.', true);
+      return false;
+    }
+    const ok = await confirm(`Remove the password from “${title(this.file)}”?`,
+      `Anyone who has the file will be able to open it.${this.dirty ? ' Your unsaved changes are saved too.' : ''}`, 'Remove Password');
+    if (!ok || !this.file) return false;
+    const bytes = this.bytes;
+    try {
+      await api.save(this.file, bytes);
+      this.password = null;
+      this.savedBytes = bytes;
+      this.showProtection();
+      this.report();
+      toast('The password was removed.');
       return true;
     } catch (e) {
       toast(message(e), true);
@@ -881,6 +984,10 @@ export class Reader {
       'separator',
       { label: 'Save', icon: 'save', disabled: !this.dirty, action: () => void this.save() },
       { label: 'Save As…', icon: 'copy', action: () => void this.saveAs() },
+      'separator',
+      this.password
+        ? { label: 'Remove Password', icon: 'unlock', action: () => void this.removePassword() }
+        : { label: 'Protect with Password', icon: 'lock', disabled: !this.editable, action: () => void this.protectWithPassword() },
       'separator',
       { label: revealLabel(), icon: 'folder', action: () => void api.reveal(this.file) },
       { label: 'Print…', icon: 'print', action: () => void this.print() },

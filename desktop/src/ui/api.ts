@@ -43,10 +43,15 @@ export const api = {
   /** `keep`: files the new one must not replace (its sources, the open document). */
   saveAs: (suggested: string, bytes: Uint8Array, beside?: string, keep: string[] = []): Promise<string | null> => bridge.call('saveAs', suggested, bytes, beside, keep),
   /** Extract Pages: asks for one PDF and reads it once, without listing it as recent. Null when cancelled. */
-  pickPdf: async (): Promise<PickedPdf | null> => {
-    const picked = await bridge.call('pickPdf');
+  pickPdf: async (title?: string): Promise<PickedPdf | null> => {
+    const picked = await bridge.call('pickPdf', title);
     return picked ? { ...picked, bytes: new Uint8Array(picked.bytes) } : null;
   },
+  /** Split PDF: asks for a folder for the parts. Only a folder picked here can be written to. Null when cancelled. */
+  pickFolder: (): Promise<string | null> => bridge.call('pickFolder'),
+  partsExisting: (folder: string, names: string[]): Promise<string[]> => bridge.call('partsExisting', folder, names),
+  saveParts: (folder: string, parts: { name: string; bytes: Uint8Array }[], keepBoth: boolean, keep: string[] = []): Promise<string[]> =>
+    bridge.call('saveParts', folder, parts, keepBoth, keep),
   forget: (file: string): Promise<void> => bridge.call('forget', file),
   clearRecent: (): Promise<void> => bridge.call('clearRecent'),
   reveal: (file: string): Promise<void> => bridge.call('reveal', file),
@@ -64,7 +69,7 @@ export const api = {
 
   devCreate: (name: string, bytes: Uint8Array): Promise<string> => bridge.call('devCreate', name, bytes),
   devWrite: (name: string, bytes: Uint8Array): Promise<string> => bridge.call('devWrite', name, bytes),
-  devAnswer: (answer: { save?: string; pick?: string }): Promise<void> => bridge.call('devAnswer', answer),
+  devAnswer: (answer: { save?: string; pick?: string; folder?: string }): Promise<void> => bridge.call('devAnswer', answer),
   devRead: async (file: string): Promise<Uint8Array> => new Uint8Array(await bridge.call('devRead', file)),
   devCapture: (name: string): Promise<void> => bridge.call('devCapture', name),
   devDone: (result: unknown): Promise<void> => bridge.call('devDone', result),
