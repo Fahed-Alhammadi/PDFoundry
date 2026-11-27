@@ -384,7 +384,7 @@ final class ReaderModel {
     // MARK: Shapes
 
     private(set) var shapeKind = ShapeKind.rectangle
-    @ObservationIgnored private(set) var shapeColor: UIColor = Mark.ink
+    var shapeColor: UIColor = Mark.ink
     /// The box or line being dragged right now, in the page view: from where the finger went down to where it is.
     var boxDraft: (from: CGPoint, to: CGPoint)?
 
@@ -481,6 +481,48 @@ final class ReaderModel {
 
     func discardRedactions() {
         pendingRedactions = [:]
+    }
+
+    /// Opens Redact. Text selected beforehand is marked straight away.
+    func beginRedaction() {
+        selectedAnnotation = nil
+        cancelMode()
+        addRedactionsForSelection()
+        toolMode = .redact
+    }
+
+    /// What was asked for while redaction boxes are waiting: closing Redact, or leaving the document.
+    enum LeaveRequest { case closeRedact, leaveDocument }
+
+    /// Set while the reader asks "Apply the redactions?".
+    var leaveRequest: LeaveRequest?
+
+    /// The bar's close button. With boxes waiting in Redact, asks first.
+    func closeToolMode() {
+        if toolMode == .redact, pendingRedactionCount > 0 {
+            leaveRequest = .closeRedact
+        } else {
+            toolMode = .none
+        }
+    }
+
+    /// Whether leaving the document must ask first (boxes are waiting). If so, the question is shown.
+    func shouldAskBeforeLeaving() -> Bool {
+        guard pendingRedactionCount > 0 else { return false }
+        leaveRequest = .leaveDocument
+        return true
+    }
+
+    /// Blacks out every pending box for good, as one Undo step, and saves (with the password, if there is one).
+    /// Undo and Revert can bring the old pages back only while the document is open: they are held in memory.
+    func applyRedactions() {
+        guard canEdit, let document, !pendingRedactions.isEmpty else { return }
+        syncFields()
+        let swaps = Redaction.replacements(in: document, boxes: pendingRedactions).compactMap { index, page in
+            document.page(at: index).map { PageSwap(old: $0, new: page) }
+        }
+        pendingRedactions = [:]
+        replacePages(swaps)
     }
 
     /// Where each pending box shows in the page view.

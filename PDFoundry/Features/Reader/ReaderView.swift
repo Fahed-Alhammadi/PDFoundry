@@ -20,6 +20,7 @@ struct ReaderView: View {
     @State private var showProtect = false
     @State private var askToRemovePassword = false
     @State private var shared: SharedFile?
+    @State private var askToApplyRedactions = false
 
     init(url: URL) {
         _model = State(initialValue: ReaderModel(url: url))
@@ -29,7 +30,8 @@ struct ReaderView: View {
         content
             .navigationTitle(model.title)
             .navigationBarTitleDisplayMode(.inline)
-            .navigationBarBackButtonHidden(model.mode != .reading)
+            // While redaction boxes wait, the reader's own back button asks first (this also turns off swipe-back).
+            .navigationBarBackButtonHidden(model.mode != .reading || model.pendingRedactionCount > 0)
             .toolbar(.hidden, for: .tabBar)
             .toolbar { toolbar }
             .safeAreaInset(edge: .bottom) { bottomBar }
@@ -87,6 +89,27 @@ struct ReaderView: View {
             } message: {
                 Text("Anyone who has the file will be able to open it.")
             }
+            .alert("Apply Redactions?", isPresented: $askToApplyRedactions) {
+                Button("Apply", role: .destructive) { model.applyRedactions() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(Self.redactionWarning)
+            }
+            .alert("Apply the redactions?", isPresented: Binding(get: { model.leaveRequest != nil }, set: { if !$0 { model.leaveRequest = nil } })) {
+                Button("Apply") {
+                    let request = model.leaveRequest
+                    model.applyRedactions()
+                    finishLeaving(request)
+                }
+                Button("Discard", role: .destructive) {
+                    let request = model.leaveRequest
+                    model.discardRedactions()
+                    finishLeaving(request)
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(Self.redactionWarning)
+            }
             .sheet(item: $model.commentDraft) { draft in
                 CommentSheet(text: draft.comment?.contents ?? "", isNew: draft.comment == nil) { text in
                     if let comment = draft.comment {
@@ -108,6 +131,16 @@ struct ReaderView: View {
                 await model.load()
             }
             .onDisappear { model.syncFields() }
+    }
+
+    static let redactionWarning = "Redacting removes everything under the boxes for good. Each redacted page becomes an image, so its text can no longer be selected or searched, and its form fields and marks are pressed into it."
+
+    private func finishLeaving(_ request: ReaderModel.LeaveRequest?) {
+        switch request {
+        case .closeRedact: model.toolMode = .none
+        case .leaveDocument: dismiss()
+        case nil: break
+        }
     }
 
     /// Opens a comment to read, edit or delete it.
@@ -252,6 +285,8 @@ struct ReaderView: View {
                     newText = ReaderModel.todayText()
                     textPromptTitle = "Add Date"
                     showTextPrompt = true
+                } onApplyRedactions: {
+                    askToApplyRedactions = true
                 }
             } else {
                 Label("This document's owner doesn't allow changes, so it's read-only.", systemImage: "lock.fill")
@@ -302,6 +337,13 @@ struct ReaderView: View {
 
     @ToolbarContentBuilder
     private var readingToolbar: some ToolbarContent {
+        if model.pendingRedactionCount > 0 {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Back", systemImage: "chevron.backward") {
+                    if !model.shouldAskBeforeLeaving() { dismiss() }
+                }
+            }
+        }
         ToolbarItemGroup(placement: .topBarTrailing) {
             Button("Search", systemImage: "magnifyingglass") { model.showSearch() }
             Menu("More", systemImage: "ellipsis") {
