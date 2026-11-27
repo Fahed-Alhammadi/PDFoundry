@@ -153,6 +153,29 @@ test('a file with restrictions only (no open password) is not given full access'
   assert.equal((await pdf.unlock(bytes, 'owner'))?.full, true);
 });
 
+test('a restrictions-only file never loses its restrictions through Extract, Split or other changes', async () => {
+  const doc = await PDFDocument.load(await sample(3));
+  doc.encrypt({ userPassword: '', ownerPassword: 'o', permissions: { modifying: false, copying: false } });
+  const bytes = await doc.save();
+  // pdf-lib decrypts it with the empty open password, but that gives no right to change it.
+  const empty = (await pdf.unlock(bytes, ''))!;
+  assert.deepEqual([empty.full, empty.opens], [false, true]);
+  // What the reader and the tools see (opened without being asked for a password): read-only, as it is.
+  const access = await pdf.access(bytes, null);
+  assert.deepEqual([access.editable, access.password, access.bytes], [false, null, bytes]);
+  assert.deepEqual([(await pdf.access(bytes, '')).editable], [false]);
+  // The engine itself refuses to make anything from the still-encrypted bytes, so no plain copy can come out.
+  for (const attempt of [pdf.extract(bytes, [0]), pdf.split(bytes, [[0], [1, 2]]), pdf.deletePages(bytes, [0]), pdf.fillFields(bytes, {})]) {
+    await assert.rejects(attempt, /protected, so it can only be read/);
+  }
+  await assert.rejects(pdf.merge([bytes, await sample(1)]), /Remove Password/);
+  // Only the owner password gives the bytes that may be changed, and then output is protected with it again.
+  const owner = await pdf.access(bytes, 'o');
+  assert.equal(owner.editable, true);
+  const part = await pdf.protect((await pdf.split(owner.bytes, [[0]]))[0], 'o');
+  assert.equal(await pdf.unlock(part, ''), null, 'the part needs the password');
+});
+
 test('an unprotected file unlocks as itself', async () => {
   const plain = await sample(1);
   const open = (await pdf.unlock(plain, 'anything'))!;

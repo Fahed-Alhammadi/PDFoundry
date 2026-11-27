@@ -872,6 +872,20 @@ async function passwordTest(check: Check, app: App): Promise<void> {
     note.textContent ?? '');
   await app.reader.close();
 
+  // A file with restrictions only (opens without a password): Extract asks for the owner password, and without it
+  // makes nothing, so no copy without the restrictions can come out.
+  const restrictedDoc = await PDFDocument.load(await blank(200, 200, 2));
+  restrictedDoc.encrypt({ userPassword: '', ownerPassword: 'o', permissions: { modifying: false } });
+  await api.devCreate('Restricted', await restrictedDoc.save());
+  clickButton(document.querySelector('.rail')!, 'Tools');
+  clickButton(app.tools.el, 'Extract Pages');
+  await until(() => document.querySelectorAll('.dialog.picker .picker-row').length > 1, 'the recent files');
+  clickButton(document.querySelector('.dialog.picker')!, 'Restricted');
+  await until(() => /can only be read/.test(lastDialog()?.querySelector('h2')?.textContent ?? ''), 'the owner password question');
+  clickButton(lastDialog(), 'Cancel');
+  await until(() => /only be read/.test(toastText()), 'the read-only message');
+  check('a restrictions-only file is not extracted without its owner password', !document.querySelector('.dialog.extract') && !document.querySelector('.dialog'), toastText());
+
   // Tools › Password-protect on a file that is not open; a second time it says it already is.
   const other = await api.devCreate('Tools protect', await blank(200, 200));
   const rail = document.querySelector('.rail')!;

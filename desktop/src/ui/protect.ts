@@ -44,9 +44,11 @@ export function protectSheet(name: string): Promise<string | null> {
 }
 
 /** Asks for a protected file's password until it works. Null when the user gives up. */
-export async function askPassword(name: string, bytes: Uint8Array): Promise<{ bytes: Uint8Array; password: string; full: boolean } | null> {
+export async function askPassword(name: string, bytes: Uint8Array, restricted = false): Promise<{ bytes: Uint8Array; password: string; full: boolean } | null> {
   for (let wrong = false; ; wrong = true) {
-    const password = await prompt(wrong ? 'That password didn’t work' : `“${title(name)}” is protected`, 'Password', '', 'Unlock', 'password');
+    // `restricted`: it opens without a password but may not be changed; only its owner password allows that.
+    const heading = wrong ? 'That password didn’t work' : restricted ? `“${title(name)}” can only be read` : `“${title(name)}” is protected`;
+    const password = await prompt(heading, restricted ? 'Owner password' : 'Password', '', 'Unlock', 'password');
     if (password === null) return null;
     const unlocked = await pdf.unlock(bytes, password);
     if (unlocked) return { ...unlocked, password };
@@ -63,8 +65,14 @@ export async function unlockSource(source: { name: string; bytes: Uint8Array; pa
   try {
     if (!(await pdf.isProtected(source.bytes))) return { bytes: source.bytes, password: source.password ?? null };
     const known = source.password ? await pdf.unlock(source.bytes, source.password) : null; // the open document's own
-    const unlocked = known ? { ...known, password: source.password! } : await askPassword(source.name, source.bytes);
-    if (!unlocked) return null;
+    // Restrictions only (it opens with the empty password): nothing may be made from it without the owner password,
+    // or the new file would come out without its restrictions.
+    const restricted = !known && !!(await pdf.unlock(source.bytes, '').catch(() => null));
+    const unlocked = known ? { ...known, password: source.password! } : await askPassword(source.name, source.bytes, restricted);
+    if (!unlocked) {
+      if (restricted) toast('This PDF is protected, so it can only be read.', true);
+      return null;
+    }
     if (!unlocked.full) {
       toast(`That password opens “${title(source.name)}” but doesn’t allow changes, so its pages can’t be ${verb}.`, true);
       return null;
