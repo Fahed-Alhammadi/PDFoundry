@@ -42,7 +42,7 @@ enum Redaction {
         context.endPDFPage()
         context.closePDF()
 
-        guard let made = PDFDocument(data: data as Data)?.page(at: 0) else { return nil }
+        guard let made = PDFOperations.detachedPage(from: data as Data) else { return nil }
         for box in [PDFDisplayBox.cropBox, .bleedBox, .trimBox, .artBox] {
             made.setBounds(page.bounds(for: box), for: box)
         }

@@ -811,6 +811,29 @@ final class ReaderModel {
         commit(PageStamps.addWatermark(document, style: style))
     }
 
+    // MARK: Make Searchable
+
+    /// The pages Make Searchable would read: those with no text yet.
+    var pagesNeedingText: [Int] { document.map(OCR.pagesNeedingText) ?? [] }
+
+    /// Reads the pages without text and adds invisible text over the words, as one Undo step. Returns how many
+    /// pages got text (0: nothing was found, nothing changed). Cancelling the task changes nothing.
+    func makeSearchable(progress: @escaping (Int, Int) -> Void) async throws -> Int {
+        guard canEdit, let document else { return 0 }
+        syncFields()
+        let pages = OCR.pagesNeedingText(document)
+        guard !pages.isEmpty else { return 0 }
+        let rebuilt = try await OCR.rebuild(document, pages: pages, progress: progress)
+        try Task.checkCancellation()
+        // The document may have been reverted meanwhile.
+        guard self.document === document else { throw CancellationError() }
+        let swaps = rebuilt.compactMap { index, page in
+            document.page(at: index).map { PageSwap(old: $0, new: page, moved: $0.annotations) }
+        }
+        replacePages(swaps)
+        return swaps.count
+    }
+
     // MARK: Replacing pages
 
     /// Puts each swap's new page in place of its old one, carrying the listed annotations over, as one Undo step.
@@ -818,6 +841,8 @@ final class ReaderModel {
         guard let document, !swaps.isEmpty else { return }
         syncFields()
         selectedAnnotation = nil
+        let shown = detachFromView()
+        defer { reattach(shown) }
         for swap in swaps {
             let index = document.index(for: swap.old)
             guard index != NSNotFound, index < document.pageCount else { continue }
@@ -825,24 +850,43 @@ final class ReaderModel {
                 swap.old.removeAnnotation(annotation)
                 swap.new.addAnnotation(annotation)
             }
-            document.removePage(at: index)
-            document.insert(swap.new, at: index)
+            Self.swap(in: document, at: index, with: swap.new)
         }
         pagesReplaced()
         record(.replaced(swaps))
     }
 
+    private static func swap(in document: PDFDocument, at index: Int, with page: PDFPage) {
+        document.insert(page, at: index)
+        document.removePage(at: index + 1)
+    }
+
+    /// Takes the document out of the page view while pages are swapped, and returns the page index shown. PDFView
+    /// crashes in its layout when pages are swapped under it after a search has run on the document.
+    private func detachFromView() -> Int {
+        let index = pageIndex
+        pdfView?.document = nil
+        return index
+    }
+
+    private func reattach(_ index: Int) {
+        guard let pdfView, let document else { return }
+        pdfView.document = document
+        if let page = document.page(at: min(index, max(0, document.pageCount - 1))) { pdfView.go(to: page) }
+    }
+
     private func restore(_ swaps: [PageSwap]) {
         guard let document else { return }
+        let shown = detachFromView()
+        defer { reattach(shown) }
         for swap in swaps.reversed() {
             let index = document.index(for: swap.new)
             guard index != NSNotFound, index < document.pageCount else { continue }
+            Self.swap(in: document, at: index, with: swap.old)
             for annotation in swap.moved {
                 swap.new.removeAnnotation(annotation)
                 swap.old.addAnnotation(annotation)
             }
-            document.removePage(at: index)
-            document.insert(swap.old, at: index)
         }
         pagesReplaced()
     }

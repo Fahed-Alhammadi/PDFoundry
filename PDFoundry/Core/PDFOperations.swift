@@ -155,6 +155,14 @@ enum PDFOperations {
         }
     }
 
+    /// The first page of a PDF made in memory, ready to be put into another document. It is copied while its own
+    /// document is still alive (as Merge does), so it never points at a document that is gone (PDFView crashes on
+    /// such a page when it is removed again).
+    nonisolated static func detachedPage(from data: Data) -> PDFPage? {
+        guard let document = PDFDocument(data: data), let page = document.page(at: 0) else { return nil }
+        return withExtendedLifetime(document) { page.copy() as? PDFPage }
+    }
+
     /// Joins the given files, in order, into one new document.
     static func merge(_ urls: [URL]) throws -> PDFDocument {
         try merge(urls.map { (name: $0.deletingPathExtension().lastPathComponent, data: try? Data(contentsOf: $0)) })
