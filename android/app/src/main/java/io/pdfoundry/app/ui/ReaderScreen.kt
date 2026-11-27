@@ -100,6 +100,7 @@ import io.pdfoundry.app.data.DocumentStore
 import io.pdfoundry.app.data.FieldKind
 import io.pdfoundry.app.data.FormField
 import io.pdfoundry.app.data.InkStroke
+import io.pdfoundry.app.data.MarkInfo
 import io.pdfoundry.app.data.bitmap
 import io.pdfoundry.app.data.todayText
 import io.pdfoundry.app.data.PdfEngine
@@ -129,6 +130,9 @@ sealed interface EditMode {
     /** Words are being selected for a highlight, underline or strikethrough. */
     data class TextMark(val mark: io.pdfoundry.app.data.TextMark, val argb: Int) : EditMode
 }
+
+/** A selected mark and the page it is on. */
+data class Selection(val page: Int, val mark: MarkInfo)
 
 /** Which set of tools the reader's bottom bar shows. The reader always opens in [None], the reading bar. */
 enum class ToolMode { None, Markup, FillSign }
@@ -181,6 +185,13 @@ class ReaderState(
         private set
     /** The document's form fields, one per widget. Read again after every change. */
     var fields by mutableStateOf<List<FormField>>(emptyList())
+        private set
+
+    /** The marks (annotations) on each page, by page index. Read again after every change. */
+    var marks by mutableStateOf<Map<Int, List<MarkInfo>>>(emptyMap())
+        private set
+    /** The mark the user tapped, shown with handles; null when none is. */
+    var selected by mutableStateOf<Selection?>(null)
         private set
 
     /** The bar's mode. Using a tool and finishing or cancelling it returns to this mode, not to reading. */
@@ -252,6 +263,9 @@ class ReaderState(
             }
         }
         fields = if (opened == null) emptyList() else withContext(Dispatchers.IO) { runCatching { PdfEngine.fields(viewFile) }.getOrDefault(emptyList()) }
+        marks = if (opened == null) emptyMap() else withContext(Dispatchers.IO) { runCatching { PdfEngine.allMarks(viewFile) }.getOrDefault(emptyMap()) }
+        // A selected mark follows its new place (after Undo, say); one that is gone is no longer selected.
+        selected = selected?.let { old -> marks[old.page]?.firstOrNull { it.id == old.mark.id }?.let { Selection(old.page, it) } }
         source = opened
         version++
         withContext(Dispatchers.IO) { old?.close() }
@@ -460,6 +474,7 @@ class ReaderState(
 
     fun begin(mode: EditMode, page: Int) {
         if (readOnly) return
+        selected = null
         editPage = page.coerceIn(0, (pageCount - 1).coerceAtLeast(0))
         editMode = mode
     }
@@ -486,6 +501,37 @@ class ReaderState(
         val page = editPage
         editMode = null
         if (rects.isNotEmpty()) edit { PdfEngine.markText(it, page, rects, mark, argb, lower) }
+    }
+
+    // Selecting marks --------------------------------------------------------------------------
+
+    /** Selects the topmost mark at ([x], [y]) on [page] (page fractions). False when there is none. */
+    fun select(page: Int, x: Float, y: Float): Boolean {
+        val mark = PdfEngine.hit(marks[page].orEmpty(), x, y)
+        selected = if (mark == null || readOnly) null else Selection(page, mark)
+        return selected != null
+    }
+
+    fun select(page: Int, mark: MarkInfo) {
+        if (!readOnly) selected = Selection(page, mark)
+    }
+
+    fun deselect() {
+        selected = null
+    }
+
+    /** Moves or resizes the selected mark to [rect] (page fractions): one Undo step, saved at once. */
+    fun moveSelected(rect: RectF) {
+        val current = selected ?: return
+        if (!current.mark.movable || rect == current.mark.rect) return
+        selected = current.copy(mark = current.mark.copy(rect = RectF(rect)))
+        edit { PdfEngine.moveMark(it, current.page, current.mark.id, rect) }
+    }
+
+    fun deleteSelected() {
+        val current = selected ?: return
+        selected = null
+        edit { PdfEngine.deleteMark(it, current.page, current.mark.id) }
     }
 
     /**
@@ -667,6 +713,8 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
     }
     // Back closes a mode before it closes the document.
     BackHandler(enabled = state.toolMode != ToolMode.None) { state.toolMode = ToolMode.None }
+    // And a selection before that.
+    BackHandler(enabled = state.selected != null) { state.deselect() }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
@@ -880,7 +928,14 @@ private data class TextDraft(val title: String, val text: String)
 
 /** All pages in a column. Pinch to zoom; when zoomed, the page scrolls sideways too. */
 @Composable
-private fun PageList(state: ReaderState, source: PdfSource, listState: androidx.compose.foundation.lazy.LazyListState, onFieldText: (FormField) -> Unit, onFieldSign: (FormField) -> Unit) {
+private fun PageList(
+    state: ReaderState,
+    source: PdfSource,
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    onFieldText: (FormField) -> Unit,
+    onFieldSign: (FormField) -> Unit,
+    onOpenComment: (Int, MarkInfo) -> Unit = { _, _ -> }
+) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val baseWidthPx = constraints.maxWidth
         val baseWidth = maxWidth
@@ -927,6 +982,16 @@ private fun PageList(state: ReaderState, source: PdfSource, listState: androidx.
                             onText = onFieldText,
                             onSet = { field, value -> state.setField(field, value) },
                             onSign = onFieldSign
+                        )
+                        MarkLayer(
+                            marks = state.marks[index].orEmpty(),
+                            selected = state.selected?.takeIf { it.page == index }?.mark,
+                            enabled = !state.readOnly,
+                            onSelect = { state.select(index, it) },
+                            onDeselect = { state.deselect() },
+                            onMove = { state.moveSelected(it) },
+                            onDelete = { state.deleteSelected() },
+                            onOpen = { onOpenComment(index, it) }
                         )
                     }
                 }

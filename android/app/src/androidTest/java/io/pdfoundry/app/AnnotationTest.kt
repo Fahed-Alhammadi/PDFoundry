@@ -17,6 +17,7 @@ import io.pdfoundry.app.data.PagePoint
 import io.pdfoundry.app.data.PdfEngine
 import io.pdfoundry.app.data.PdfSource
 import io.pdfoundry.app.data.TextMark
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -245,5 +246,138 @@ class AnnotationTest {
             fx in rect.left..rect.right && fy in rect.top..rect.bottom && isTinted(after.getPixel(x, y))
         } }
         assertTrue("and the paper around it is tinted", tinted > 100)
+    }
+
+    // Select, move, resize, delete ---------------------------------------------------------------
+
+    private fun waitUntil(done: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + 15_000
+        while (!done() && System.currentTimeMillis() < deadline) Thread.sleep(20)
+        assertTrue("timed out", done())
+    }
+
+    private fun idle(state: io.pdfoundry.app.ui.ReaderState) {
+        Thread.sleep(100)
+        waitUntil { !state.busy }
+        Thread.sleep(100)
+        waitUntil { !state.busy }
+    }
+
+    /** The mark's appearance, decoded: its form stream and every image it draws. */
+    private fun appearanceBytes(file: File, id: String): List<ByteArray> = PDDocument.load(file).use { document ->
+        val a = document.getPage(0).annotations.first { it.annotationName == id }
+        val form = a.normalAppearanceStream
+        val images = form.resources.xObjectNames.map { (form.resources.getXObject(it) as com.tom_roush.pdfbox.pdmodel.graphics.image.PDImageXObject).cosObject.createInputStream().readBytes() }
+        listOf(form.cosObject.createInputStream().readBytes()) + images
+    }
+
+    @Test
+    fun moveResizeDeleteUndoRestoresExactly() {
+        val file = makePdf("Moving")
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default)
+        val state = io.pdfoundry.app.ui.ReaderState(context.applicationContext, file, scope)
+        try {
+            state.open()
+            waitUntil { state.source != null }
+            idle(state)
+            state.begin(io.pdfoundry.app.ui.EditMode.Place(solid(Color.BLUE), "signature"), 0)
+            state.place(solid(Color.BLUE), RectF(0.2f, 0.6f, 0.5f, 0.7f))
+            idle(state)
+            val original = state.marks[0]!!.single()
+            val originalLook = appearanceBytes(file, original.id)
+
+            assertTrue(state.select(0, original.rect.centerX(), original.rect.centerY()))
+            state.moveSelected(RectF(0.4f, 0.2f, 0.7f, 0.3f))
+            idle(state)
+            assertEquals(0.4f, state.marks[0]!!.single().rect.left, 0.002f)
+            assertNear(0.55f to 0.25f, render(file).centre(::isBlue), "the moved stamp")
+            state.moveSelected(RectF(0.4f, 0.2f, 0.9f, 0.4f))
+            idle(state)
+            assertNear(0.65f to 0.3f, render(file).centre(::isBlue), "the resized stamp")
+            // Moving never redraws the image: the appearance is the same bytes.
+            assertTrue(appearanceBytes(file, original.id).zip(originalLook).all { (a, b) -> a.contentEquals(b) })
+            state.deleteSelected()
+            idle(state)
+            assertEquals(null, state.marks[0])
+            assertEquals(null, state.selected)
+
+            repeat(3) { state.undo(); idle(state) }
+
+            val back = state.marks[0]!!.single()
+            assertEquals(original.id, back.id)
+            assertEquals(original.rect.left, back.rect.left, 0.0001f)
+            assertEquals(original.rect.top, back.rect.top, 0.0001f)
+            assertEquals(original.rect.right, back.rect.right, 0.0001f)
+            assertEquals(original.rect.bottom, back.rect.bottom, 0.0001f)
+            val look = appearanceBytes(file, original.id)
+            assertEquals(originalLook.size, look.size)
+            assertTrue("the appearance is restored byte for byte", look.zip(originalLook).all { (a, b) -> a.contentEquals(b) })
+            assertNear(0.35f to 0.65f, render(file).centre(::isBlue), "the stamp back in place")
+        } finally {
+            state.close()
+            Thread.sleep(300)
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun inkMovesWithItsPaths() {
+        val file = makePdf("Ink move", text = "")
+        PdfEngine.ink(file, 0, listOf(InkStroke(listOf(PagePoint(0.1f, 0.1f), PagePoint(0.3f, 0.1f)), Color.RED, 0.01f, false)))
+        val mark = PdfEngine.marks(file, 0).single()
+        val dx = 0.5f
+        PdfEngine.moveMark(file, 0, mark.id, RectF(mark.rect.left + dx, mark.rect.top + 0.5f, mark.rect.right + dx, mark.rect.bottom + 0.5f))
+        assertNear(0.7f to 0.6f, render(file).centre(::isRed), "the moved drawing")
+        PDDocument.load(file).use { document ->
+            val ink = (document.getPage(0).annotations.single().cosObject.getDictionaryObject(COSName.getPDFName("InkList")) as com.tom_roush.pdfbox.cos.COSArray)
+            val first = (ink.getObject(0) as com.tom_roush.pdfbox.cos.COSArray).toFloatArray()
+            // The path moved with it (other viewers redraw ink from it): 0.6 × 612 and (1 − 0.6) × 792.
+            assertEquals(0.6f * 612, first[0], 1f)
+            assertEquals(0.4f * 792, first[1], 1f)
+        }
+    }
+
+    @Test
+    fun textMarkupDeletableNotMovable() {
+        val file = makePdf("Markup delete")
+        val rect = PdfEngine.words(file, 0).first { it.text == "Beta" }.rect
+        PdfEngine.markText(file, 0, listOf(rect), TextMark.Highlight, Color.argb(128, 255, 204, 0))
+        val mark = PdfEngine.marks(file, 0).single()
+        assertEquals(false, mark.movable)
+        assertEquals(mark, PdfEngine.markAt(file, 0, rect.centerX(), rect.centerY()))
+
+        org.junit.Assert.assertThrows(io.pdfoundry.app.data.PdfException::class.java) {
+            PdfEngine.moveMark(file, 0, mark.id, RectF(0.1f, 0.1f, 0.3f, 0.2f))
+        }
+        PdfEngine.deleteMark(file, 0, mark.id)
+        assertEquals(emptyList<Any>(), PdfEngine.marks(file, 0))
+    }
+
+    @Test
+    fun oldUntaggedAnnotationDeletable() {
+        val file = makePdf("Old stamp", text = "")
+        // A stamp made the way another app (or an older build) makes it: no tag, no /NM.
+        PDDocument.load(file).use { document ->
+            val page = document.getPage(0)
+            val stamp = com.tom_roush.pdfbox.pdmodel.interactive.annotation.PDAnnotationRubberStamp()
+            stamp.rectangle = PDRectangle(100f, 100f, 100f, 50f)
+            val appearance = com.tom_roush.pdfbox.pdmodel.interactive.annotation.PDAppearanceStream(document).apply {
+                bBox = PDRectangle(0f, 0f, 100f, 50f)
+                resources = com.tom_roush.pdfbox.pdmodel.PDResources()
+            }
+            com.tom_roush.pdfbox.pdmodel.PDPageContentStream(document, appearance).use { it.setNonStrokingColor(0f, 0f, 1f); it.addRect(0f, 0f, 100f, 50f); it.fill() }
+            stamp.appearance = com.tom_roush.pdfbox.pdmodel.interactive.annotation.PDAppearanceDictionary().apply { setNormalAppearance(appearance) }
+            page.annotations = listOf(stamp)
+            document.save(File(folder, "old-out.pdf"))
+        }
+        File(folder, "old-out.pdf").renameTo(file)
+
+        val mark = PdfEngine.marks(file, 0).single()
+        assertEquals("#0", mark.id)
+        assertEquals(MarkKind.Stamp, mark.kind)
+        assertEquals("not ours: it can't be moved", false, mark.movable)
+        assertNotNull("the reader shows it", render(file).centre(::isBlue))
+        PdfEngine.deleteMark(file, 0, mark.id)
+        assertEquals(0, PDDocument.load(file).use { it.getPage(0).annotations.size })
     }
 }

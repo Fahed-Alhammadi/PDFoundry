@@ -647,14 +647,70 @@ object PdfEngine {
     /** The marks on a page that PDFoundry can select: every annotation of a kind it makes, its own or not. */
     fun marks(file: File, pageIndex: Int): List<MarkInfo> = PDDocument.load(file, memory()).use { document ->
         if (pageIndex !in 0 until document.numberOfPages) return@use emptyList()
-        val page = document.getPage(pageIndex)
+        marksOf(document.getPage(pageIndex))
+    }
+
+    private fun marksOf(page: PDPage): List<MarkInfo> {
         val frame = PageFrame(page)
-        runCatching { page.annotations }.getOrDefault(emptyList()).mapIndexedNotNull { index, annotation ->
+        return runCatching { page.annotations }.getOrDefault(emptyList()).mapIndexedNotNull { index, annotation ->
             val kind = Annotations.kind(annotation)
             val rect = annotation.rectangle
             if (kind == MarkKind.Other || rect == null || annotation.isHidden || annotation.isNoView) null
             else MarkInfo(idOf(annotation, index), kind, frame.fractions(rect), Annotations.isMovable(annotation))
         }
+    }
+
+    /** Every page's marks, by page index (pages without marks are left out). */
+    fun allMarks(file: File): Map<Int, List<MarkInfo>> = PDDocument.load(file, memory()).use { document ->
+        (0 until document.numberOfPages).mapNotNull { index -> marksOf(document.getPage(index)).takeIf { it.isNotEmpty() }?.let { index to it } }.toMap()
+    }
+
+    /** The topmost mark at [x], [y] (page fractions), if any. */
+    fun markAt(file: File, pageIndex: Int, x: Float, y: Float): MarkInfo? = hit(marks(file, pageIndex), x, y)
+
+    /** The topmost of [marks] under the point, with a little slack for thin marks. */
+    fun hit(marks: List<MarkInfo>, x: Float, y: Float, slack: Float = 0.01f): MarkInfo? =
+        marks.lastOrNull { x in it.rect.left - slack..it.rect.right + slack && y in it.rect.top - slack..it.rect.bottom + slack }
+
+    /**
+     * Moves or resizes one of PDFoundry's marks to [rect] (page fractions). Only `/Rect` and the mark's
+     * geometry (ink paths, line ends) change: the appearance is kept as it is and fitted to the new rect
+     * by every viewer, so an image is never redrawn.
+     */
+    fun moveMark(file: File, pageIndex: Int, id: String, rect: RectF) = edit(file) { document ->
+        val page = document.getPage(pageIndex)
+        val annotation = page.annotation(id) ?: throw PdfException("This mark is no longer in the document.")
+        if (!Annotations.isMovable(annotation)) throw PdfException("This mark can't be moved.")
+        val frame = PageFrame(page)
+        val old = annotation.rectangle ?: throw PdfException("This mark can't be moved.")
+        val new = frame.userRect(rect)
+        if (new.width < 1f || new.height < 1f) throw PdfException("That is too small.")
+        val sx = if (old.width > 0f) new.width / old.width else 1f
+        val sy = if (old.height > 0f) new.height / old.height else 1f
+        fun mapped(values: FloatArray) = COSArray().apply {
+            values.forEachIndexed { i, v -> add(COSFloat(if (i % 2 == 0) new.lowerLeftX + (v - old.lowerLeftX) * sx else new.lowerLeftY + (v - old.lowerLeftY) * sy)) }
+        }
+        val dict = annotation.cosObject
+        val inkList = COSName.getPDFName("InkList")
+        (dict.getDictionaryObject(inkList) as? COSArray)?.let { list ->
+            val moved = COSArray()
+            for (i in 0 until list.size()) (list.getObject(i) as? COSArray)?.let { moved.add(mapped(it.toFloatArray())) }
+            dict.setItem(inkList, moved)
+        }
+        (dict.getDictionaryObject(COSName.L) as? COSArray)?.let { dict.setItem(COSName.L, mapped(it.toFloatArray())) }
+        annotation.rectangle = new
+        annotation.setModifiedDate(java.util.Calendar.getInstance())
+    }
+
+    /** Deletes a mark (any kind PDFoundry knows, made here or not), and its popup. */
+    fun deleteMark(file: File, pageIndex: Int, id: String) = edit(file) { document ->
+        val page = document.getPage(pageIndex)
+        val annotation = page.annotation(id) ?: throw PdfException("This mark is no longer in the document.")
+        if (!Annotations.isDeletable(annotation)) throw PdfException("This mark can't be deleted here.")
+        val popup = annotation.cosObject.getDictionaryObject(COSName.getPDFName("Popup"))
+        // A new array: PdfBox's list view of /Annots does not always remove from the array behind it.
+        val kept = page.annotations.filterNot { it.cosObject == annotation.cosObject || (popup != null && it.cosObject == popup) }
+        page.cosObject.setItem(COSName.ANNOTS, COSArray().apply { kept.forEach { add(it.cosObject) } })
     }
 
     // endregion
