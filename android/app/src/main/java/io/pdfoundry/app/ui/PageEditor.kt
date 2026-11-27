@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -179,7 +180,7 @@ fun PageEditor(
                         Text("Page ${pageIndex + 1}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 },
-                navigationIcon = { IconButton(onClick = leave) { Icon(Icons.Filled.Close, if (mode is EditMode.Redact) "Close Redact" else "Cancel") } },
+                navigationIcon = { IconButton(onClick = leave) { Icon(Icons.Filled.Close, closeLabel(mode)) } },
                 actions = {
                     when (mode) {
                         is EditMode.Ink -> {
@@ -427,8 +428,13 @@ fun PageEditor(
                             Canvas(Modifier.fillMaxSize()) {
                                 drawRect(accent, style = Stroke(width = 3f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f, 10f))))
                             }
-                            Box(
-                                Modifier.align(Alignment.BottomEnd).offset(18.dp, 18.dp).size(36.dp).clip(CircleShape).background(accent)
+                        }
+                        // The handle sits on the item's bottom-right corner, outside the item's box, so a small
+                        // item (a date, initials) never squeezes it out of round.
+                        val handlePx = with(density) { ResizeHandle.toPx() }
+                        Box(
+                            Modifier.offset { IntOffset((left + itemWidth - handlePx / 2).roundToInt(), (top + itemHeight - handlePx / 2).roundToInt()) }
+                                .requiredSize(ResizeHandle).clip(CircleShape).background(accent)
                                     .pointerInput(Unit) {
                                         detectDragGestures { change, drag ->
                                             change.consume()
@@ -438,7 +444,6 @@ fun PageEditor(
                                     .semantics { contentDescription = "Resize" },
                                 contentAlignment = Alignment.Center
                             ) { Icon(Icons.Filled.OpenInFull, null, tint = Color.White, modifier = Modifier.size(18.dp)) }
-                        }
                     }
                 }
             }
@@ -475,6 +480,19 @@ fun PageEditor(
             onComment(PagePoint(at.x / boxSize.x, at.y / boxSize.y), text)
         })
     }
+}
+
+/** Resize handles: always this size and round, however small the item is. */
+val ResizeHandle = 36.dp
+
+/**
+ * What the editor's × does, for TalkBack. Shapes and Redact keep what was done (each shape is saved as it
+ * is drawn), so × closes the tool; the other tools drop what was not placed yet, so × cancels.
+ */
+fun closeLabel(mode: EditMode): String = when (mode) {
+    is EditMode.Shape -> "Close Shapes"
+    EditMode.Redact -> "Close Redact"
+    else -> "Cancel"
 }
 
 const val RedactApplyTitle = "Apply Redactions?"

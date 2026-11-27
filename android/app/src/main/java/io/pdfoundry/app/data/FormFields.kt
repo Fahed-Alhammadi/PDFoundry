@@ -41,10 +41,15 @@ data class FormField(
     val widget: Int = 0,
     val labels: List<String> = options,
     /** Checkbox or radio: this widget is ticked (from its appearance state). */
-    val checked: Boolean = false
+    val checked: Boolean = false,
+    /** The field's tooltip (/TU), the name its author gave it for people; null when it has none. */
+    val tooltip: String? = null
 ) {
     /** True when this widget is the ticked one (checkbox or radio). */
     val isOn: Boolean get() = checked
+
+    /** What the field is called to the user: its tooltip, else the last part of its name. */
+    val title: String get() = tooltip?.trim()?.takeIf { it.isNotEmpty() } ?: name.substringAfterLast('.').ifEmpty { "Text field" }
 }
 
 internal fun kindOf(field: PDField): FieldKind? = when (field) {
