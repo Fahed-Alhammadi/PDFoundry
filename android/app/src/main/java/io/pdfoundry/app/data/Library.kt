@@ -645,6 +645,7 @@ class PdfSource(file: File) : Closeable {
     val sizes: List<Size> = try {
         (0 until pageCount).map { index -> renderer.openPage(index).use { Size(it.width, it.height) } }
     } catch (e: Throwable) {
+        marks.close()
         renderer.close()
         descriptor.close()
         throw e

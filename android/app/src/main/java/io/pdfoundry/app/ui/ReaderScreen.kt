@@ -347,7 +347,7 @@ class ReaderState(
             PdfEngine.protect(unlockedCopy, password, file)
             store.push(file)
         } catch (e: Exception) {
-            before.copyTo(file, overwrite = true)
+            file.replaceWith(before)
             throw e
         } finally {
             before.delete()
@@ -358,8 +358,9 @@ class ReaderState(
      * Runs one change to the document and saves it at once; a file opened where it lives is written back
      * there. A copy is kept first so the change can be undone.
      */
-    fun edit(change: (File) -> Unit) {
+    fun edit(onFailure: () -> Unit = {}, change: (File) -> Unit) {
         if (readOnly) return
+        forgetRedactions()
         queue {
             try {
                 withContext(Dispatchers.IO) {
@@ -369,9 +370,9 @@ class ReaderState(
                     try {
                         change(target)
                         save()
-                    } catch (e: Exception) {
-                        // Nothing was saved: go back to the document as it was.
-                        snapshot.copyTo(target, overwrite = true)
+                    } catch (e: Throwable) {
+                        // Nothing was saved (including running out of memory): go back to the document as it was.
+                        target.replaceWith(snapshot)
                         snapshot.delete()
                         throw e
                     }
@@ -380,8 +381,11 @@ class ReaderState(
                 }
                 canUndo = true
                 settle()
-            } catch (e: Exception) {
-                message = e.message ?: "The change could not be saved."
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                message = if (e is OutOfMemoryError) "There isn't enough memory for this change. Nothing was changed." else e.message ?: "The change could not be saved."
+                onFailure()
                 reopen()
             }
         }
@@ -404,7 +408,12 @@ class ReaderState(
         }
     }
 
-    fun undo() = queue {
+    fun undo() {
+        forgetRedactions()
+        undoQueued()
+    }
+
+    private fun undoQueued() = queue {
         val snapshot = undoStack.removeLastOrNull() ?: return@queue
         try {
             withContext(Dispatchers.IO) {
@@ -412,11 +421,11 @@ class ReaderState(
                 val current = File(undoFolder, "current")
                 target.copyTo(current, overwrite = true)
                 try {
-                    snapshot.copyTo(target, overwrite = true)
+                    target.replaceWith(snapshot)
                     save()
                 } catch (e: Exception) {
                     // Nothing was saved: the document stays as it was, and the step can be undone later.
-                    current.copyTo(target, overwrite = true)
+                    target.replaceWith(current)
                     throw e
                 } finally {
                     current.delete()
@@ -443,14 +452,14 @@ class ReaderState(
             try {
                 withContext(Dispatchers.IO) {
                     unlockedCopy.parentFile?.mkdirs()
-                    file.copyTo(unlockedCopy, overwrite = true)
+                    unlockedCopy.replaceWith(file)
                     val before = File(undoFolder, "before-save")
                     file.copyTo(before, overwrite = true)
                     try {
                         PdfEngine.protect(unlockedCopy, newPassword, file)
                         store.push(file)
                     } catch (e: Exception) {
-                        before.copyTo(file, overwrite = true)
+                        file.replaceWith(before)
                         unlockedCopy.delete()
                         throw e
                     } finally {
@@ -476,10 +485,10 @@ class ReaderState(
                     val before = File(undoFolder, "before-save")
                     file.copyTo(before, overwrite = true)
                     try {
-                        unlockedCopy.copyTo(file, overwrite = true)
+                        file.replaceWith(unlockedCopy)
                         store.push(file)
                     } catch (e: Exception) {
-                        before.copyTo(file, overwrite = true)
+                        file.replaceWith(before)
                         throw e
                     } finally {
                         before.delete()
@@ -501,6 +510,7 @@ class ReaderState(
 
     fun begin(mode: EditMode, page: Int) {
         if (readOnly) return
+        if (mode != EditMode.Redact) forgetRedactions()
         selected = null
         editPage = page.coerceIn(0, (pageCount - 1).coerceAtLeast(0))
         editMode = mode
@@ -610,7 +620,7 @@ class ReaderState(
                     message = OcrNothingFound
                 }
                 else -> edit { target ->
-                    copy.copyTo(target, overwrite = true)
+                    target.replaceWith(copy)
                     copy.delete()
                 }
             }
@@ -648,9 +658,27 @@ class ReaderState(
     /** Redacts every pending box (one Undo step) and leaves Redact. */
     fun applyRedactions() {
         val boxes = pending
+        val page = editPage
         pending = emptyMap()
         editMode = null
-        if (boxes.isNotEmpty()) edit { Redaction.apply(it, boxes) }
+        if (boxes.isEmpty()) return
+        // If it fails, nothing changed: back in Redact with the same boxes.
+        edit(onFailure = {
+            pending = boxes
+            editPage = page.coerceIn(0, (pageCount - 1).coerceAtLeast(0))
+            editMode = EditMode.Redact
+        }) { Redaction.apply(it, boxes) }
+    }
+
+    /**
+     * Pending boxes are page numbers and places on the page as it is now. Anything that changes the pages
+     * (Undo, Revert, the page organizer, another tool) first drops them, so they can never land on other
+     * content. They exist only while Redact is open, so this is a safeguard.
+     */
+    private fun forgetRedactions() {
+        if (pending.isEmpty()) return
+        pending = emptyMap()
+        if (editMode == EditMode.Redact) editMode = null
     }
 
     /** Forgets the pending boxes and leaves Redact; nothing changes. */
@@ -713,6 +741,7 @@ class ReaderState(
      */
     fun revertToOriginal() {
         if (readOnly) return
+        forgetRedactions()
         queue {
             try {
                 val opened = originalPassword
@@ -729,14 +758,14 @@ class ReaderState(
                             if (opened != null) {
                                 if (PdfEngine.unlock(original, opened, unlockedCopy) != UnlockResult.Full) throw PdfException("The original could not be opened.")
                             } else {
-                                original.copyTo(unlockedCopy, overwrite = true)
+                                unlockedCopy.replaceWith(original)
                             }
                         }
-                        if (restored == opened) original.copyTo(file, overwrite = true) else PdfEngine.protect(unlockedCopy, restored!!, file)
+                        if (restored == opened) file.replaceWith(original) else PdfEngine.protect(unlockedCopy, restored!!, file)
                         store.push(file)
                     } catch (e: Exception) {
-                        before.copyTo(file, overwrite = true)
-                        snapshot.copyTo(target, overwrite = true)
+                        file.replaceWith(before)
+                        target.replaceWith(snapshot)
                         snapshot.delete()
                         throw e
                     } finally {
@@ -1271,4 +1300,18 @@ private fun SearchDialog(state: ReaderState, onDismiss: () -> Unit, onOpenPage: 
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } }
     )
+}
+
+/**
+ * Replaces this file with a copy of [source] by renaming a full copy over it, so a reader that has the
+ * file open (PdfRenderer and the mark layer) keeps the one version it opened instead of seeing it change.
+ */
+internal fun File.replaceWith(source: File) {
+    val temp = File(parentFile, "$name.${System.nanoTime()}.swap")
+    try {
+        source.copyTo(temp, overwrite = true)
+        if (!temp.renameTo(this)) temp.copyTo(this, overwrite = true)
+    } finally {
+        temp.delete()
+    }
 }

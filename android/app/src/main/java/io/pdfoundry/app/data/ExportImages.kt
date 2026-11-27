@@ -20,6 +20,8 @@ enum class ExportQuality(val label: String, val dpi: Int) { Screen("Screen", 150
  */
 object ExportImages {
     const val JPEG_QUALITY = 90
+    /** About 3300 × 5100 pixels at most per picture (Redaction uses the same). */
+    const val MAX_PIXELS = 17_000_000L
 
     /**
      * "<base> page 1.png"; with more than 9 pages the number is zero-padded to the width of the page
@@ -55,7 +57,7 @@ object ExportImages {
             val file = unlocked ?: source
             ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
                 PdfRenderer(descriptor).use { renderer ->
-                    AnnotationLayer(file).use { marks ->
+                    AnnotationLayer(file, widgets = true).use { marks ->
                         val count = renderer.pageCount
                         val wanted = pages.filter { it in 0 until count }.distinct().sorted()
                         if (wanted.isEmpty()) throw PdfException("There are no pages to save.")
@@ -63,7 +65,10 @@ object ExportImages {
                             if (isCancelled()) throw InterruptedException()
                             progress(done, wanted.size)
                             renderer.openPage(index).use { page ->
-                                val scale = dpi / 72f
+                                var scale = dpi / 72f
+                                val pixels = page.width.toLong() * page.height * scale * scale
+                                // A very large page is drawn smaller rather than running out of memory.
+                                if (pixels > MAX_PIXELS) scale *= kotlin.math.sqrt(MAX_PIXELS.toDouble() / pixels).toFloat()
                                 val bitmap = Bitmap.createBitmap(Math.round(page.width * scale).coerceAtLeast(1), Math.round(page.height * scale).coerceAtLeast(1), Bitmap.Config.ARGB_8888)
                                 try {
                                     bitmap.eraseColor(Color.WHITE)

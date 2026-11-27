@@ -373,7 +373,7 @@ class AnnotationTest {
         File(folder, "old-out.pdf").renameTo(file)
 
         val mark = PdfEngine.marks(file, 0).single()
-        assertEquals("#0", mark.id)
+        assertTrue("an old mark is known by its kind and place: ${mark.id}", mark.id.startsWith("#Stamp@"))
         assertEquals(MarkKind.Stamp, mark.kind)
         assertEquals("not ours: it can't be moved", false, mark.movable)
         assertNotNull("the reader shows it", render(file).centre(::isBlue))

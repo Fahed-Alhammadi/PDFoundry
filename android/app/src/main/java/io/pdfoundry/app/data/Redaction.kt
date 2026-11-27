@@ -52,47 +52,101 @@ object Redaction {
     }
 
     private fun applyPlain(file: File, boxes: Map<Int, List<RectF>>) {
-        // Pictures first, from the file as it is now (PdfRenderer for the content, the marks on top).
-        val pictures = HashMap<Int, Bitmap>()
-        try {
-            ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
-                PdfRenderer(descriptor).use { renderer ->
-                    AnnotationLayer(file, widgets = true).use { marks ->
-                        for ((index, rects) in boxes) {
-                            if (index !in 0 until renderer.pageCount) continue
-                            renderer.openPage(index).use { page ->
-                                var scale = DPI / 72f
-                                val pixels = page.width.toLong() * page.height * scale * scale
-                                if (pixels > MAX_PIXELS) scale *= kotlin.math.sqrt(MAX_PIXELS.toDouble() / pixels).toFloat()
-                                val w = Math.round(page.width * scale).coerceAtLeast(1)
-                                val h = Math.round(page.height * scale).coerceAtLeast(1)
-                                val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-                                bitmap.eraseColor(Color.WHITE)
-                                page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
-                                marks.draw(index, bitmap)
-                                val black = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL }
-                                val canvas = Canvas(bitmap)
-                                for (r in rects) canvas.drawRect(r.left * w, r.top * h, r.right * w, r.bottom * h, black)
-                                bitmap.setHasAlpha(false)
-                                pictures[index] = bitmap
+        // The pictures are made from the file as it is now (PdfRenderer for the content, the marks and
+        // fields on top), one page at a time: each is drawn, written into the new file and freed before
+        // the next, so only one page picture is ever in memory.
+        ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
+            PdfRenderer(descriptor).use { renderer ->
+                // Strict: a mark or field that can't be drawn fails the redaction, rather than being deleted unseen.
+                AnnotationLayer(file, widgets = true, strict = true).use { marks ->
+                    PdfEngine.edit(file) { document ->
+                        val dropped = HashSet<COSDictionary>()
+                        for ((index, rects) in boxes.toSortedMap()) {
+                            if (index !in 0 until renderer.pageCount || index !in 0 until document.numberOfPages) continue
+                            val picture = picture(renderer, marks, index, rects)
+                            try {
+                                replace(document, index, picture, dropped)
+                            } finally {
+                                picture.recycle()
                             }
                         }
+                        unlink(document, dropped)
+                        scrubDocument(document)
                     }
                 }
             }
-            PdfEngine.edit(file) { document ->
-                for ((index, picture) in pictures) replace(document, index, picture)
-            }
-        } finally {
-            pictures.values.forEach { it.recycle() }
         }
     }
 
-    private fun replace(document: PDDocument, index: Int, picture: Bitmap) {
+    /** Page [index] as shown (content, marks and fields) at 300 dpi, with [rects] painted black. */
+    private fun picture(renderer: PdfRenderer, marks: AnnotationLayer, index: Int, rects: List<RectF>): Bitmap =
+        renderer.openPage(index).use { page ->
+            var scale = DPI / 72f
+            val pixels = page.width.toLong() * page.height * scale * scale
+            if (pixels > MAX_PIXELS) scale *= kotlin.math.sqrt(MAX_PIXELS.toDouble() / pixels).toFloat()
+            val w = Math.round(page.width * scale).coerceAtLeast(1)
+            val h = Math.round(page.height * scale).coerceAtLeast(1)
+            val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            try {
+                bitmap.eraseColor(Color.WHITE)
+                page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
+                marks.draw(index, bitmap)
+                val black = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL }
+                val canvas = Canvas(bitmap)
+                for (r in rects) canvas.drawRect(r.left * w, r.top * h, r.right * w, r.bottom * h, black)
+                bitmap.setHasAlpha(false)
+                bitmap
+            } catch (e: Throwable) {
+                bitmap.recycle()
+                throw e
+            }
+        }
+
+    /**
+     * What can still hold a redacted page's words outside the page itself: the structure tree (alternate
+     * and actual text, references to the page's dropped marks, fields and content streams) and outline
+     * links into it, the form's calculation order and its XFA copy of every field value. The structure
+     * tree goes as a whole: scrubbing it piece by piece is easy to get wrong, and a page that is now a
+     * picture has no tagged content anyway. Tags on the other pages are lost with it (known limit).
+     */
+    private fun scrubDocument(document: PDDocument) {
+        val catalog = document.documentCatalog.cosObject
+        catalog.removeItem(COSName.STRUCT_TREE_ROOT)
+        catalog.removeItem(COSName.MARK_INFO)
+        for (page in document.pages) page.cosObject.removeItem(COSName.STRUCT_PARENTS)
+        for (page in document.pages) runCatching { page.annotations }.getOrDefault(emptyList()).forEach { it.cosObject.removeItem(COSName.STRUCT_PARENT) }
+        // Outline items can point at structure elements (/SE).
+        val seen = HashSet<COSDictionary>()
+        fun outline(item: COSDictionary?) {
+            var node = item
+            while (node != null && seen.add(node)) {
+                node.removeItem(COSName.getPDFName("SE"))
+                outline(node.getDictionaryObject(COSName.FIRST) as? COSDictionary)
+                node = node.getDictionaryObject(COSName.NEXT) as? COSDictionary
+            }
+        }
+        outline((catalog.getDictionaryObject(COSName.OUTLINES) as? COSDictionary)?.getDictionaryObject(COSName.FIRST) as? COSDictionary)
+        val form = catalog.getDictionaryObject(COSName.ACRO_FORM) as? COSDictionary ?: return
+        // XFA holds its own copy of every value.
+        form.removeItem(COSName.XFA)
+        // The calculation order may list fields that were removed with the page's widgets.
+        val co = form.getDictionaryObject(COSName.CO) as? COSArray ?: return
+        val live = HashSet<COSDictionary>()
+        fun collect(kids: COSArray?) {
+            if (kids == null) return
+            for (i in 0 until kids.size()) (kids.getObject(i) as? COSDictionary)?.let { if (live.add(it)) collect(it.getDictionaryObject(COSName.KIDS) as? COSArray) }
+        }
+        collect(form.getDictionaryObject(COSName.FIELDS) as? COSArray)
+        val kept = COSArray()
+        for (i in 0 until co.size()) (co.getObject(i) as? COSDictionary)?.takeIf { it in live }?.let { kept.add(it) }
+        if (kept.size() == 0) form.removeItem(COSName.CO) else form.setItem(COSName.CO, kept)
+    }
+
+    private fun replace(document: PDDocument, index: Int, picture: Bitmap, dropped: MutableSet<COSDictionary>) {
         val page = document.getPage(index)
         val frame = PageFrame(page)
         removeWidgets(document, page)
-        scrubStructure(document, page)
+        dropped += runCatching { page.annotations }.getOrDefault(emptyList()).map { it.cosObject }
         val dict = page.cosObject
         for (key in listOf(COSName.ANNOTS, COSName.getPDFName("Thumb"), COSName.getPDFName("PieceInfo"), COSName.METADATA, COSName.getPDFName("B"), COSName.getPDFName("AA"))) {
             dict.removeItem(key)
@@ -136,24 +190,16 @@ object Redaction {
         return kids.size() == 0
     }
 
-    /** Drops alternate text, actual text and expansions of structure elements on the page: they can hold its words. */
-    private fun scrubStructure(document: PDDocument, page: PDPage) {
-        val root = document.documentCatalog.cosObject.getDictionaryObject(COSName.STRUCT_TREE_ROOT) as? COSDictionary ?: return
-        val seen = HashSet<COSDictionary>()
-        fun visit(node: COSBase?) {
-            val value = (node as? COSObject)?.`object` ?: node
-            when (value) {
-                is COSArray -> for (i in 0 until value.size()) visit(value.get(i))
-                is COSDictionary -> {
-                    if (!seen.add(value)) return
-                    if (value.getDictionaryObject(COSName.PG) == page.cosObject) {
-                        for (key in listOf("Alt", "ActualText", "E", "T")) value.removeItem(COSName.getPDFName(key))
-                    }
-                    visit(value.getItem(COSName.K))
+    /** Removes links from marks on other pages (replies, popups) to the marks dropped with a redacted page. */
+    private fun unlink(document: PDDocument, dropped: Set<COSDictionary>) {
+        if (dropped.isEmpty()) return
+        for (page in document.pages) {
+            for (annotation in runCatching { page.annotations }.getOrDefault(emptyList())) {
+                val dict = annotation.cosObject
+                for (key in listOf(COSName.getPDFName("IRT"), COSName.PARENT, COSName.getPDFName("Popup"))) {
+                    if (dict.getDictionaryObject(key) in dropped) dict.removeItem(key)
                 }
-                else -> Unit
             }
         }
-        visit(root.getItem(COSName.K))
     }
 }

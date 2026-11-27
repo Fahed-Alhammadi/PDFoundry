@@ -26,21 +26,18 @@ import java.io.File
  * The document is loaded once, read-only; its pages' content is emptied in memory so only the marks are
  * drawn. Nothing is ever written back.
  */
-class AnnotationLayer(private val file: File, private val widgets: Boolean = false) : Closeable {
-    private var document: PDDocument? = null
-    private var failed = false
+class AnnotationLayer(file: File, private val widgets: Boolean = false, private val strict: Boolean = false) : Closeable {
+    // Loaded at once, when the page renderer opens the same file, so both read the same version of it
+    // (changes replace a file by renaming a new one over it: a file already open keeps its contents).
+    private var document: PDDocument? = try {
+        PDDocument.load(file, MemoryUsageSetting.setupTempFileOnly())
+    } catch (e: Throwable) {
+        if (strict) throw e
+        null
+    }
     private val emptied = HashSet<Int>()
 
-    private fun document(): PDDocument? {
-        if (failed) return null
-        document?.let { return it }
-        return try {
-            PDDocument.load(file, MemoryUsageSetting.setupTempFileOnly()).also { document = it }
-        } catch (e: Throwable) {
-            failed = true
-            null
-        }
-    }
+    private fun document(): PDDocument? = document
 
     /** True when the page has marks to draw. */
     private fun marksOn(document: PDDocument, pageIndex: Int): List<PDAnnotation> =
@@ -53,6 +50,7 @@ class AnnotationLayer(private val file: File, private val widgets: Boolean = fal
             if (pageIndex !in 0 until document.numberOfPages) return
             val marks = marksOn(document, pageIndex)
             if (marks.isEmpty()) return
+            if (failForTest) throw java.io.IOException("Drawing failed (test)")
             if (emptied.add(pageIndex)) document.getPage(pageIndex).setContents(PDStream(document))
             val frame = PageFrame(document.getPage(pageIndex))
             val scale = page.width / frame.width
@@ -74,7 +72,9 @@ class AnnotationLayer(private val file: File, private val widgets: Boolean = fal
                 rendered.recycle()
             }
         } catch (e: Throwable) {
-            // A mark that can't be drawn must not keep the page from showing.
+            // A mark that can't be drawn must not keep the page from showing. In [strict] mode (redaction,
+            // which deletes the marks it presses into the page) the change fails instead.
+            if (strict) throw e
         }
     }
 
@@ -85,6 +85,10 @@ class AnnotationLayer(private val file: File, private val widgets: Boolean = fal
 
     companion object {
         private val skipped = setOf("Widget", "Link", "Popup")
+
+        /** Tests only: makes drawing a page's marks fail, as a damaged appearance would. */
+        @androidx.annotation.VisibleForTesting
+        @Volatile var failForTest = false
 
         fun drawn(a: PDAnnotation): Boolean =
             a.subtype !in skipped && !a.isHidden && !a.isNoView && a.normalAppearanceStream != null

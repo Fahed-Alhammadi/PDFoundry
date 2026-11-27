@@ -100,7 +100,7 @@ object Ocr {
                                 bitmap to scale
                             }
                             try {
-                                val words = recognise(api, picture)
+                                val words = recognise(api, picture, isCancelled)
                                 if (words.isNotEmpty()) found[index] = words to scale
                             } finally {
                                 picture.recycle()
@@ -132,9 +132,28 @@ object Ocr {
         }
     }
 
-    private fun recognise(api: TessBaseAPI, picture: Bitmap): List<OcrWord> {
+    private fun recognise(api: TessBaseAPI, picture: Bitmap, isCancelled: () -> Boolean): List<OcrWord> {
         api.setImage(picture)
-        api.getUTF8Text()
+        // Recognising one page takes seconds: Cancel stops Tesseract in the middle of it.
+        val done = java.util.concurrent.atomic.AtomicBoolean(false)
+        val watcher = Thread {
+            while (!done.get()) {
+                if (isCancelled()) {
+                    api.stop()
+                    return@Thread
+                }
+                try { Thread.sleep(50) } catch (e: InterruptedException) { return@Thread }
+            }
+        }.apply { isDaemon = true; start() }
+        try {
+            // getHOCRText runs recognition with Tesseract's progress monitor, which is what stop() cancels.
+            api.getHOCRText(0)
+        } finally {
+            done.set(true)
+            watcher.interrupt()
+            watcher.join()
+        }
+        if (isCancelled()) throw CancellationException()
         val words = mutableListOf<OcrWord>()
         val iterator = api.resultIterator ?: return words
         try {

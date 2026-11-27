@@ -209,10 +209,21 @@ internal object AnnotationWriter {
 /** Finds a page's annotation by the id [MarkInfo] gives it. */
 internal fun PDPage.annotation(id: String): PDAnnotation? {
     val list = annotations
-    if (id.startsWith("#")) return id.drop(1).toIntOrNull()?.let { list.getOrNull(it) }
+    if (id.startsWith("#")) return list.firstOrNull { it.annotationName.isNullOrEmpty() && signature(it) == id }
     return list.firstOrNull { it.annotationName == id }
 }
 
-internal fun idOf(annotation: PDAnnotation, index: Int): String = annotation.annotationName?.takeIf { it.isNotEmpty() } ?: "#$index"
+/**
+ * A mark's id: its `/NM`, or for an old mark without one its subtype and rect ("#Stamp@100.0,100.0,200.0,150.0"),
+ * which, unlike its place in the page's list, stays the same when another mark is deleted first.
+ */
+@Suppress("UNUSED_PARAMETER")
+internal fun idOf(annotation: PDAnnotation, index: Int): String = annotation.annotationName?.takeIf { it.isNotEmpty() } ?: signature(annotation)
+
+private fun signature(annotation: PDAnnotation): String {
+    val r = annotation.rectangle
+    fun f(v: Float?) = "%.1f".format(java.util.Locale.ROOT, v ?: 0f)
+    return "#${annotation.subtype}@${f(r?.lowerLeftX)},${f(r?.lowerLeftY)},${f(r?.upperRightX)},${f(r?.upperRightY)}"
+}
 
 internal fun COSBase?.floatsOrNull(): FloatArray? = (this as? COSArray)?.toFloatArray()
