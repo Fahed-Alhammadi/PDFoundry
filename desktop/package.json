@@ -1,7 +1,7 @@
 {
   "name": "pdfoundry-desktop",
   "productName": "PDFoundry",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Read, merge, edit and sign PDFs on your computer",
   "private": true,
   "type": "module",
