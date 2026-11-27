@@ -1,5 +1,51 @@
 import UIKit
 
+/// The shapes of Markup › Shapes.
+enum ShapeKind: CaseIterable {
+    case rectangle, ellipse, line, arrow
+
+    var title: String {
+        switch self {
+        case .rectangle: "Rectangle"
+        case .ellipse: "Ellipse"
+        case .line: "Line"
+        case .arrow: "Arrow"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .rectangle: "rectangle"
+        case .ellipse: "circle"
+        case .line: "line.diagonal"
+        case .arrow: "arrow.up.right"
+        }
+    }
+
+    /// The stroke colours: graphite ink (the default) and the four highlight colours, solid so a 2 pt line shows.
+    static let colors: [(name: String, color: UIColor)] = [
+        ("Graphite", Mark.ink),
+        ("Yellow", light(.systemYellow)),
+        ("Green", light(.systemGreen)),
+        ("Pink", light(.systemPink)),
+        ("Blue", light(.systemBlue)),
+    ]
+
+    /// The colour as it is in Light Mode, so a mark looks the same whatever the device's appearance.
+    private static func light(_ color: UIColor) -> UIColor {
+        color.resolvedColor(with: UITraitCollection(userInterfaceStyle: .light))
+    }
+
+    static let lineWidth: CGFloat = 2
+
+    /// The banner while the shape tool is on.
+    var drawHint: String {
+        let name = title.lowercased()
+        let article = name.first.map { "aeiou".contains($0) } == true ? "an" : "a"
+        return "Drag on the page to draw \(article) \(name). Scroll with two fingers."
+    }
+}
+
 /// The Check (✓) and Cross (✗) marks of Fill & Sign.
 enum Mark: CaseIterable {
     case check, cross

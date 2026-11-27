@@ -10,10 +10,10 @@
 import { api, revealLabel, title } from './api.ts';
 import { button, choose, confirm, dialog, h, icon, iconButton, message, prompt, showMenu, toast } from './dom.ts';
 import type { MenuItem } from './dom.ts';
-import { TEXT_INK, fieldTextPng, markPng, paintStrokes, placedFromPng, rasterize, textImage } from './images.ts';
+import { TEXT_INK, fieldTextPng, markPng, paintStrokes, placedFromPng, textImage, toPng } from './images.ts';
 import type { Placed, Stroke } from './images.ts';
-import { HIGHLIGHT_COLOURS, MARK_RED, modeBar } from './modebar.ts';
-import type { TextTool, ToolMode } from './modebar.ts';
+import { HIGHLIGHT_COLOURS, MARK_RED, SHAPE_COLOURS, SHAPE_NAMES, modeBar } from './modebar.ts';
+import type { ShapeTool, TextTool, ToolMode } from './modebar.ts';
 import { organizer } from './organizer.ts';
 import { alreadyProtected, protectSheet } from './protect.ts';
 import { PasswordNeeded, openPdf, pageSizes, renderFormLayer, renderPage, renderTextLayer, search } from './pdfview.ts';
@@ -21,8 +21,12 @@ import type { Match, PDFDocumentProxy, Size, Widget } from './pdfview.ts';
 import { signatureDialog } from './sign.ts';
 import { todayText } from '../core/dates.ts';
 import * as pdf from '../core/pdf.ts';
-import type { FieldInfo, FieldValue, PageRect, TextMark } from '../core/pdf.ts';
+import type { FieldInfo, FieldValue, MarkInfo, PagePoint, PageRect, Rgba, ShapeKind, TextMark } from '../core/pdf.ts';
 import { joinBoxes } from '../core/rects.ts';
+import { redact } from '../core/redaction.ts';
+import { addPageNumbers, addWatermark } from '../core/pagestamps.ts';
+import { ocrSheet, pageNumbersSheet, watermarkPng, watermarkSheet } from './pagetools.ts';
+import { addInvisibleText, pagesWithoutText } from '../core/ocrtext.ts';
 import type { TextDirection } from '../core/rects.ts';
 
 const UNDO_STEPS = 10;
@@ -45,6 +49,58 @@ type Ink = { marker: boolean; color: string; strokes: Map<number, Stroke[]> };
 type Placement = { item: Placed; page: number; x: number; y: number; width: number; box: HTMLElement };
 
 export type ReaderHost = { back: () => void; opened: (file: string) => void };
+
+/**
+ * A page as it is shown (its content, marks and form fields as saved) at 300 dpi, with `rects` painted solid black,
+ * as a PNG (lossless, so it stays crisp). Very large pages are drawn at fewer dots, up to about 16 megapixels.
+ */
+async function redactedPicture(doc: PDFDocumentProxy, index: number, size: Size, rects: PageRect[]): Promise<Uint8Array> {
+  const canvas = document.createElement('canvas');
+  await (await renderPage(doc, index, canvas, (size.width * 300) / 72, 1)).promise;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#000000';
+  for (const r of rects) {
+    // Rounded outwards, so no sliver of what is under the edge stays.
+    const left = Math.floor(r.x * canvas.width);
+    const top = Math.floor(r.y * canvas.height);
+    ctx.fillRect(left, top, Math.ceil((r.x + r.width) * canvas.width) - left, Math.ceil((r.y + r.height) * canvas.height) - top);
+  }
+  return toPng(canvas);
+}
+
+/** `rect` moved by (dx, dy), kept on the page. */
+function moved(rect: PageRect, dx: number, dy: number): PageRect {
+  return { ...rect, x: Math.min(1 - rect.width, Math.max(0, rect.x + dx)), y: Math.min(1 - rect.height, Math.max(0, rect.y + dy)) };
+}
+
+/**
+ * `rect` resized by dragging one corner (nw, ne, sw, se) by (dx, dy), kept on the page and at least a few points big.
+ * `keep`: the proportions stay as they are (`aspect` is the page's width over its height, to compare like with like).
+ */
+function resized(rect: PageRect, corner: string, dx: number, dy: number, keep: boolean, aspect: number): PageRect {
+  const min = 0.01;
+  let left = rect.x, top = rect.y, right = rect.x + rect.width, bottom = rect.y + rect.height;
+  if (corner.includes('w')) left = Math.min(right - min, Math.max(0, left + dx));
+  else right = Math.max(left + min, Math.min(1, right + dx));
+  if (corner.includes('n')) top = Math.min(bottom - min, Math.max(0, top + dy));
+  else bottom = Math.max(top + min, Math.min(1, bottom + dy));
+  if (keep) {
+    // The width decides; the height follows it, from the corner opposite the one dragged.
+    const ratio = (rect.height / rect.width) * aspect;
+    let width = right - left;
+    let height = (width * ratio) / aspect;
+    const room = corner.includes('n') ? rect.y + rect.height : 1 - rect.y;
+    if (height > room) {
+      height = room;
+      width = (height * aspect) / ratio;
+      if (corner.includes('w')) left = right - width;
+      else right = left + width;
+    }
+    if (corner.includes('n')) top = bottom - height;
+    else bottom = top + height;
+  }
+  return { x: left, y: top, width: right - left, height: bottom - top };
+}
 
 export class Reader {
   readonly el = h('section.view.reader', { 'aria-label': 'Document' });
@@ -85,6 +141,26 @@ export class Reader {
   toolMode: ToolMode = 'none';
   /** Highlight, Underline or Strikethrough waiting for the user to select text (Markup only). */
   private textTool: TextTool | null = null;
+  /** Markup › Shapes: each drag on a page draws one. */
+  private shapeTool: ShapeTool | null = null;
+  /** The colour shapes are drawn in (kept when another shape is picked). */
+  private shapeColour: Rgba = SHAPE_COLOURS[0].rgba;
+  /** Markup › Comment: a click on a page places a comment there. */
+  private commentTool = false;
+  /** Markup › Redact: drags on a page (or selected text) mark areas to redact. */
+  private redactTool = false;
+  /**
+   * Areas marked for redaction and not yet applied, per page. Held here only, never written to the file: Apply turns
+   * them into a redaction (one change), and leaving asks about them.
+   */
+  private pending = new Map<number, PageRect[]>();
+  /** The mark selected on a page (to move, resize or delete it), and the box drawn around it. */
+  private selected: { page: number; mark: MarkInfo; box: HTMLElement } | null = null;
+  /** A move of the selected mark is being written; `nextMove` is the latest place asked for meanwhile. */
+  private moving = false;
+  private nextMove: PageRect | null = null;
+  /** The selected mark as it was before the moves now being written (put back when they fail). */
+  private moveFrom: MarkInfo | null = null;
   private matches: Match[] = [];
   private matchAt = -1;
   private observer: IntersectionObserver | null = null;
@@ -131,6 +207,7 @@ export class Reader {
     // With a text tool chosen, letting go of the mouse after selecting text marks it.
     this.scroller.addEventListener('pointerup', (e) => {
       if (this.textTool) setTimeout(() => void this.markSelection(e), 0);
+      else if (this.redactTool) setTimeout(() => this.redactSelection(), 0);
     });
     // A form field changed (text when it loses focus, a box when it is ticked, a choice when picked): write it.
     this.scroller.addEventListener('change', (e) => this.fieldChanged(e));
@@ -213,7 +290,9 @@ export class Reader {
     this.ink = null;
     this.placement = null;
     this.toolMode = 'none';
-    this.textTool = null;
+    this.disarm();
+    this.selected = null;
+    this.pending.clear();
     this.matches = [];
     this.matchAt = -1;
     this.findBar.hidden = true;
@@ -241,7 +320,11 @@ export class Reader {
   /** Writes the field being typed in (by leaving it) and waits for every field change to be in `bytes`. */
   private async commitFields(): Promise<void> {
     const active = document.activeElement;
-    if (active instanceof HTMLElement && active.closest('.annotationLayer')) active.blur(); // fires its change
+    if (active instanceof HTMLElement && active.closest('.annotationLayer')) {
+      active.blur(); // fires its change
+      // While the window itself doesn't have the focus, leaving a field fires no events: write it directly.
+      if (this.typing) this.fieldChanged({ target: active } as unknown as Event);
+    }
     await this.fieldWork;
   }
 
@@ -250,12 +333,13 @@ export class Reader {
     this.edited.hidden = !this.dirty;
     this.saveButton.disabled = !this.dirty;
     this.saveButton.classList.toggle('primary', this.dirty);
-    void api.setDocument(this.file || null, this.dirty);
+    void api.setDocument(this.file || null, this.dirty, this.pendingCount);
   }
 
   /** Before closing or opening something else: with unsaved changes, asks whether to save them. False = stay. */
   private async leave(): Promise<boolean> {
     await this.commitFields();
+    if (!(await this.settleRedactions())) return false;
     if (!this.dirty) return true;
     const answer = await choose(`Save the changes to “${title(this.file)}”?`, 'Your changes will be lost if you don’t save them.', [
       { label: 'Cancel', value: 'cancel' },
@@ -270,6 +354,7 @@ export class Reader {
   async save(): Promise<boolean> {
     await this.commitFields(); // the field being typed in (Ctrl+S, the close question) is written first
     if (!this.file || this.busy) return false;
+    if (!(await this.settleRedactions())) return false; // never a file saved with areas the user meant to remove
     if (!this.dirty) return true;
     if (this.ink || this.placement) {
       toast('Finish what you are placing or drawing first.', true);
@@ -294,6 +379,7 @@ export class Reader {
   async saveAs(): Promise<boolean> {
     await this.commitFields();
     if (!this.file || this.busy) return false;
+    if (!(await this.settleRedactions())) return false;
     const bytes = this.bytes;
     try {
       const saved = await api.saveAs(title(this.file), await this.encrypted(bytes), this.file);
@@ -333,6 +419,7 @@ export class Reader {
   async protectWithPassword(): Promise<boolean> {
     await this.commitFields();
     if (!this.file || this.busy) return false;
+    if (!(await this.settleRedactions())) return false;
     if (this.password || (await pdf.isProtected(this.bytes))) {
       alreadyProtected(this.file);
       return false;
@@ -374,6 +461,7 @@ export class Reader {
   async removePassword(): Promise<boolean> {
     await this.commitFields();
     if (!this.file || this.busy || !this.password) return false;
+    if (!(await this.settleRedactions())) return false;
     if (this.ink || this.placement) {
       toast('Finish what you are placing or drawing first.', true);
       return false;
@@ -428,12 +516,14 @@ export class Reader {
       if (!reuse) {
         this.scroller.append(page);
         page.addEventListener('pointerdown', (e) => this.pagePointerDown(e, index));
+        page.addEventListener('click', (e) => void this.pageClick(e, index));
       }
       this.observer!.observe(page);
     });
     if (anchor) this.restore(anchor);
     this.updateCounter();
     this.drawMatches();
+    this.drawPending();
     this.redrawInk();
   }
 
@@ -566,6 +656,11 @@ export class Reader {
   async undo(): Promise<void> {
     await this.fieldWork; // a field change still being written comes first, so Undo takes back the latest step
     if (this.busy || !this.undoStack.length || this.ink || this.placement) return;
+    // Areas waiting to be redacted are places on pages as they are now: an older version may have other pages, so
+    // they are settled first. Apply is a change of its own, so Undo stops there.
+    const redactions = await this.askRedactions();
+    if (redactions === 'stay' || redactions === 'applied' || this.busy) return;
+    this.deselect();
     this.busy = true;
     try {
       const previous = this.undoStack.pop()!;
@@ -620,41 +715,72 @@ export class Reader {
         h('button.button.primary', { type: 'button', disabled: !count, onclick: () => void this.saveInk() }, 'Done'),
       );
     } else {
-      this.dock.replaceChildren(...modeBar(this.toolMode, { canUndo: this.undoStack.length > 0, armed: this.textTool }, {
-        setMode: (mode) => this.setMode(mode),
+      this.dock.replaceChildren(...modeBar(this.toolMode, {
+        canUndo: this.undoStack.length > 0,
+        armed: { text: this.textTool, shape: this.shapeTool, comment: this.commentTool, redact: this.redactTool },
+        pending: this.pendingCount,
+      }, {
+        shapes: (anchor) => this.shapesMenu(anchor),
+        comment: () => this.armComment(),
+        redact: () => this.armRedact(),
+        applyRedactions: () => void this.applyRedactions(),
+        setMode: (mode) => void this.requestMode(mode),
         highlight: (anchor) => this.highlightMenu(anchor),
         textMark: (mark) => this.chooseTextTool({ mark, rgba: MARK_RED }, true),
         text: () => {
-          this.textTool = null;
+          this.disarm();
           this.textDialog();
         },
         draw: () => this.beginInk(),
         signature: () => void signatureDialog((signature) => this.beginPlacement(signature, 0.32)),
         initials: () => void signatureDialog((initials) => this.beginPlacement(initials, 0.12), 'initials'),
         date: () => {
-          this.textTool = null;
+          this.disarm();
           this.textDialog(todayText(), 'Add date');
         },
         mark: (mark) => void this.placeMark(mark),
         pages: () => this.organize(),
         undo: () => void this.undo(),
       }));
-      if (this.textTool) {
-        this.dockNote.textContent = MARK_HINTS[this.textTool.mark];
+      const hint = this.textTool ? MARK_HINTS[this.textTool.mark]
+        : this.shapeTool ? `Drag on the page to draw ${this.shapeTool.kind === 'ellipse' || this.shapeTool.kind === 'arrow' ? 'an' : 'a'} ${SHAPE_NAMES[this.shapeTool.kind].toLowerCase()}.`
+          : this.commentTool ? 'Click the page where the comment goes.'
+            : this.redactTool ? 'Drag over what to remove, or select text. Then choose Apply.' : '';
+      if (hint) {
+        this.dockNote.textContent = hint;
         this.dockNote.hidden = false;
       }
     }
+    const free = !this.ink && !this.placement;
     this.el.classList.toggle('inking', !!this.ink);
     this.el.classList.toggle('placing', !!this.placement);
-    this.el.classList.toggle('marking', !!this.textTool && !this.ink && !this.placement);
+    this.el.classList.toggle('marking', !!this.textTool && free);
+    this.el.classList.toggle('picking', (!!this.shapeTool || this.commentTool) && free);
+    this.el.classList.toggle('redacting', this.redactTool && free);
+  }
+
+  /** Switches the bar's mode, first asking about redactions not yet applied when Markup closes. */
+  async requestMode(mode: ToolMode): Promise<void> {
+    // Nothing waiting: at once, so the bar changes with the click.
+    if (mode !== 'markup' && this.pending.size && !(await this.settleRedactions())) return;
+    this.setMode(mode);
   }
 
   /** Switches the bar to a mode (or back to reading with 'none'). */
   setMode(mode: ToolMode): void {
     if (!this.editable && mode !== 'none') return;
     this.toolMode = mode;
-    this.textTool = null;
+    this.disarm();
     this.drawDock();
+  }
+
+  /** Puts away whichever Markup tool was waiting for the page (text, shape, comment). */
+  private disarm(): void {
+    this.deselect();
+    this.textTool = null;
+    this.shapeTool = null;
+    this.commentTool = false;
+    this.redactTool = false;
   }
 
   // Marking selected text (Markup: Highlight, Underline, Strikethrough)
@@ -673,7 +799,10 @@ export class Reader {
    * `toggle`: choosing the tool that is already waiting puts it away again.
    */
   private chooseTextTool(tool: TextTool, toggle: boolean, waiting = this.selectedBoxes()): void {
-    this.textTool = toggle && this.textTool?.mark === tool.mark ? null : tool;
+    const next = toggle && this.textTool?.mark === tool.mark ? null : tool;
+    this.disarm();
+    this.deselect();
+    this.textTool = next;
     this.drawDock();
     if (this.textTool && waiting.size) void this.applyMark(waiting);
   }
@@ -748,7 +877,7 @@ export class Reader {
 
   private beginInk(): void {
     if (!this.editable) return;
-    this.textTool = null;
+    this.disarm();
     this.ink = { marker: false, color: PENS[0].color, strokes: new Map() };
     this.drawDock();
   }
@@ -791,7 +920,14 @@ export class Reader {
       }
       return;
     }
-    if (!this.ink || e.button !== 0) return;
+    if (e.button !== 0) return;
+    if (!this.ink && !this.busy && !(e.target as HTMLElement).closest('.mark-selection')) {
+      if (this.shapeTool) return this.drawShape(e, index);
+      if (this.commentTool) return this.newComment(e, index);
+      // Redact: a drag marks an area; on the text itself the drag selects text instead (marked when it ends).
+      if (this.redactTool && !(e.target as HTMLElement).closest('.textLayer span, .redact-box')) return this.drawRedaction(e, index);
+    }
+    if (!this.ink) return;
     e.preventDefault();
     const ink = this.ink;
     const box = page.getBoundingClientRect();
@@ -842,15 +978,462 @@ export class Reader {
     const ok = await this.change(async (bytes) => {
       let out = bytes;
       for (const [index, strokes] of ink.strokes) {
-        // Pen strokes cover the page; marker strokes darken it, so they are saved as a second, see-through image.
-        const pen = await rasterize(strokes.filter((s) => !s.marker), this.sizes[index]);
-        if (pen) out = await pdf.stamp(out, index, pen.png, pen.rect);
-        const marker = await rasterize(strokes.filter((s) => s.marker), this.sizes[index]);
-        if (marker) out = await pdf.stamp(out, index, marker.png, marker.rect, { multiply: true, opacity: 0.55 });
+        // Pen strokes cover the page; marker strokes darken it, so they are a second, see-through Ink annotation.
+        const pen = strokes.filter((s) => !s.marker);
+        if (pen.length) out = await pdf.ink(out, index, pen);
+        const marker = strokes.filter((s) => s.marker);
+        if (marker.length) out = await pdf.ink(out, index, marker, { multiply: true, opacity: 0.55 });
       }
       return out;
     });
     if (ok) this.endInk();
+  }
+
+  // Shapes and comments (Markup › Shapes, Comment)
+
+  private shapesMenu(anchor: HTMLElement): void {
+    const pick = (kind: ShapeKind) => {
+      this.disarm();
+      this.shapeTool = { kind, rgba: this.shapeColour };
+      this.drawDock();
+    };
+    const colour = (rgba: Rgba) => {
+      this.shapeColour = rgba;
+      const kind = this.shapeTool?.kind ?? 'rectangle';
+      pick(kind);
+    };
+    const same = (a: Rgba, b: Rgba) => a.every((v, i) => Math.abs(v - b[i]) < 1e-6);
+    showMenu(anchor, [
+      ...(Object.keys(SHAPE_NAMES) as ShapeKind[]).map((kind) => ({ label: SHAPE_NAMES[kind], icon: kind, action: () => pick(kind) })),
+      'separator',
+      ...SHAPE_COLOURS.map((c) => ({ label: same(c.rgba, this.shapeColour) ? `${c.name} ✓` : c.name, swatch: c.css, action: () => colour(c.rgba) })),
+      ...(this.shapeTool ? ['separator' as const, { label: 'Stop drawing shapes', icon: 'close', action: () => { this.disarm(); this.drawDock(); } }] : []),
+    ]);
+  }
+
+  private armComment(): void {
+    const on = !this.commentTool;
+    this.disarm();
+    this.commentTool = on;
+    this.drawDock();
+  }
+
+  /** The point of a pointer event on a page, in page fractions, kept on the page. */
+  private pointOn(page: HTMLElement, e: { clientX: number; clientY: number }): PagePoint {
+    const box = page.getBoundingClientRect();
+    return { x: Math.min(1, Math.max(0, (e.clientX - box.left) / box.width)), y: Math.min(1, Math.max(0, (e.clientY - box.top) / box.height)) };
+  }
+
+  /** A drag on the page with a shape tool: shows the shape as it is dragged, and adds it when the button goes up. */
+  private drawShape(e: PointerEvent, index: number): void {
+    const tool = this.shapeTool!;
+    const page = e.currentTarget as HTMLElement;
+    e.preventDefault();
+    const start = this.pointOn(page, e);
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'shape-preview');
+    svg.setAttribute('viewBox', '0 0 1 1');
+    svg.setAttribute('preserveAspectRatio', 'none');
+    const css = `rgb(${tool.rgba.slice(0, 3).map((v) => Math.round(v * 255)).join(',')})`;
+    const el = document.createElementNS('http://www.w3.org/2000/svg', tool.kind === 'rectangle' ? 'rect' : tool.kind === 'ellipse' ? 'ellipse' : 'line');
+    el.setAttribute('stroke', css);
+    el.setAttribute('fill', 'none');
+    el.setAttribute('stroke-width', '2');
+    el.setAttribute('vector-effect', 'non-scaling-stroke');
+    svg.append(el);
+    page.append(svg);
+    let end = start;
+    const update = () => {
+      const [x, y, w, hgt] = [Math.min(start.x, end.x), Math.min(start.y, end.y), Math.abs(end.x - start.x), Math.abs(end.y - start.y)];
+      if (tool.kind === 'rectangle') Object.entries({ x, y, width: w, height: hgt }).forEach(([k, v]) => el.setAttribute(k, String(v)));
+      else if (tool.kind === 'ellipse') Object.entries({ cx: x + w / 2, cy: y + hgt / 2, rx: w / 2, ry: hgt / 2 }).forEach(([k, v]) => el.setAttribute(k, String(v)));
+      else Object.entries({ x1: start.x, y1: start.y, x2: end.x, y2: end.y }).forEach(([k, v]) => el.setAttribute(k, String(v)));
+    };
+    update();
+    try { page.setPointerCapture(e.pointerId); } catch { /* not a live pointer */ }
+    const move = (ev: PointerEvent) => {
+      end = this.pointOn(page, ev);
+      update();
+    };
+    const up = (ev: PointerEvent) => {
+      page.removeEventListener('pointermove', move);
+      page.removeEventListener('pointerup', up);
+      page.removeEventListener('pointercancel', up);
+      end = this.pointOn(page, ev);
+      const size = this.sizes[index];
+      const dx = (end.x - start.x) * size.width;
+      const dy = (end.y - start.y) * size.height;
+      const big = tool.kind === 'line' || tool.kind === 'arrow' ? Math.hypot(dx, dy) >= 4 : Math.abs(dx) >= 4 && Math.abs(dy) >= 4;
+      if (ev.type === 'pointercancel' || !big) return svg.remove();
+      void this.change((bytes) => pdf.shape(bytes, index, tool.kind, start, end, tool.rgba)).finally(() => svg.remove());
+    };
+    page.addEventListener('pointermove', move);
+    page.addEventListener('pointerup', up);
+    page.addEventListener('pointercancel', up);
+  }
+
+  /** A click on the page with Comment chosen: asks for the text and puts the note there. */
+  private newComment(e: PointerEvent, index: number): void {
+    e.preventDefault();
+    const at = this.pointOn(e.currentTarget as HTMLElement, e);
+    this.commentDialog('', async (text) => {
+      await this.change((bytes) => pdf.comment(bytes, index, at, text));
+    });
+  }
+
+  /** The comment sheet: type (or change) the text; Done saves it. An empty comment is not kept. */
+  private commentDialog(value: string, done: (text: string) => Promise<void>, remove?: () => Promise<void>): void {
+    const input = h('textarea.comment-text', { rows: 5, placeholder: 'Type your comment', 'aria-label': 'Comment', dir: 'auto' });
+    input.value = value;
+    const d = dialog(value ? 'Comment' : 'Add comment', [input], [
+      ...(remove ? [h('span.spacer-left', button('Delete', () => {
+        d.close();
+        void remove();
+      }, 'danger'))] : []),
+      button('Cancel', () => d.close()),
+      button('Done', () => {
+        d.close();
+        if (input.value.trim() || value) void done(input.value);
+      }, 'primary'),
+    ]);
+    input.focus();
+  }
+
+  // Selecting marks: a click on a mark (with no tool waiting) selects it; drag to move, corners to resize, Delete.
+
+  /** A click on a page with no tool waiting: selects the mark under the pointer, or clears the selection. */
+  private async pageClick(e: MouseEvent, index: number): Promise<void> {
+    if (!this.editable || this.busy || this.ink || this.placement || this.textTool || this.shapeTool || this.commentTool || this.redactTool) return;
+    const target = e.target as HTMLElement;
+    if (target.closest('.mark-selection, .annotationLayer, .sign-field, .placement')) return;
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed) return; // the click ended a text selection
+    const page = e.currentTarget as HTMLElement;
+    const point = this.pointOn(page, e);
+    const bytes = this.bytes;
+    let found: MarkInfo | undefined;
+    try {
+      // A few pixels of slack, so thin lines and underlines can be hit; the topmost mark wins.
+      const box = page.getBoundingClientRect();
+      const [sx, sy] = [5 / box.width, 5 / box.height];
+      found = (await pdf.marks(bytes, index)).reverse()
+        .find((m) => point.x >= m.rect.x - sx && point.x <= m.rect.x + m.rect.width + sx && point.y >= m.rect.y - sy && point.y <= m.rect.y + m.rect.height + sy);
+    } catch {
+      found = undefined;
+    }
+    if (bytes !== this.bytes) return; // changed meanwhile
+    if (found) this.select(index, found);
+    else this.deselect();
+  }
+
+  /** The selected mark's page and id, for the self-test. */
+  get selectedMark(): { page: number; mark: MarkInfo } | null {
+    return this.selected ? { page: this.selected.page, mark: this.selected.mark } : null;
+  }
+
+  deselect(): void {
+    this.selected?.box.remove();
+    this.selected = null;
+  }
+
+  /** Draws the selection box around a mark: handles to resize (marks that can be), and its menu. */
+  select(index: number, mark: MarkInfo): void {
+    this.deselect();
+    const page = this.pageEls()[index];
+    if (!page) return;
+    const resizable = mark.movable && mark.kind !== 'comment';
+    const box = h('div.mark-selection', {
+      tabIndex: 0, role: 'group', class: mark.movable ? 'movable' : '',
+      'aria-label': `Selected ${mark.kind === 'stamp' ? 'item' : mark.kind}. ${mark.movable ? 'Drag to move, arrow keys to nudge. ' : ''}Delete removes it.`,
+    });
+    if (resizable) for (const corner of ['nw', 'ne', 'sw', 'se']) box.append(h('span.corner', { class: corner, dataset: { corner }, 'aria-hidden': 'true' }));
+    const menu = h('div.mark-menu', { role: 'toolbar', 'aria-label': 'Selected mark' },
+      ...(mark.kind === 'comment' ? [h('button', { type: 'button', onclick: () => void this.openComment() }, icon('comment', 16), 'Open')] : []),
+      h('button.danger', { type: 'button', onclick: () => void this.deleteSelected() }, icon('trash', 16), 'Delete'));
+    box.append(menu);
+    this.selected = { page: index, mark, box };
+    this.placeSelection(mark.rect);
+    page.append(box);
+    box.addEventListener('pointerdown', (e) => this.dragSelection(e));
+    box.addEventListener('keydown', (e) => this.selectionKey(e));
+    box.addEventListener('dblclick', () => {
+      if (mark.kind === 'comment') void this.openComment();
+    });
+    box.focus({ preventScroll: true });
+  }
+
+  private placeSelection(rect: PageRect): void {
+    const s = this.selected!;
+    Object.assign(s.box.style, { left: `${rect.x * 100}%`, top: `${rect.y * 100}%`, width: `${rect.width * 100}%`, height: `${rect.height * 100}%` });
+    s.box.classList.toggle('menu-below', rect.y < 0.08);
+  }
+
+  /** Dragging the selection: inside moves it, a corner resizes it. Stamps and drawings keep their proportions. */
+  private dragSelection(e: PointerEvent): void {
+    const s = this.selected;
+    if (!s || e.button !== 0 || (e.target as HTMLElement).closest('.mark-menu')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (!s.mark.movable) return;
+    const page = this.pageEls()[s.page].getBoundingClientRect();
+    const corner = (e.target as HTMLElement).dataset.corner;
+    const keep = s.mark.kind === 'stamp' || s.mark.kind === 'ink';
+    const from = s.mark.rect;
+    const start = { x: e.clientX, y: e.clientY };
+    let rect = from;
+    try { s.box.setPointerCapture(e.pointerId); } catch { /* not a live pointer */ }
+    const move = (ev: PointerEvent) => {
+      const dx = (ev.clientX - start.x) / page.width;
+      const dy = (ev.clientY - start.y) / page.height;
+      rect = corner ? resized(from, corner, dx, dy, keep, page.width / page.height) : moved(from, dx, dy);
+      this.placeSelection(rect);
+    };
+    const up = () => {
+      s.box.removeEventListener('pointermove', move);
+      s.box.removeEventListener('pointerup', up);
+      s.box.removeEventListener('pointercancel', up);
+      if (rect !== from && (Math.abs(rect.x - from.x) + Math.abs(rect.y - from.y) + Math.abs(rect.width - from.width) + Math.abs(rect.height - from.height)) > 1e-4) void this.moveSelected(rect);
+    };
+    s.box.addEventListener('pointermove', move);
+    s.box.addEventListener('pointerup', up);
+    s.box.addEventListener('pointercancel', up);
+  }
+
+  private selectionKey(e: KeyboardEvent): void {
+    const s = this.selected;
+    if (!s) return;
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault();
+      void this.deleteSelected();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      this.deselect();
+    } else if (e.key === 'Enter' && s.mark.kind === 'comment') {
+      e.preventDefault();
+      void this.openComment();
+    } else if (s.mark.movable && e.key.startsWith('Arrow')) {
+      e.preventDefault();
+      // One point at a time, ten with Shift.
+      const size = this.sizes[s.page];
+      const step = e.shiftKey ? 10 : 1;
+      const [dx, dy] = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key] ?? [0, 0];
+      void this.moveSelected(moved(s.mark.rect, dx / size.width, dy / size.height));
+    }
+  }
+
+  /** Moves or resizes the selected mark (one Undo step) and keeps it selected. */
+  private async moveSelected(rect: PageRect): Promise<void> {
+    const s = this.selected;
+    if (!s) return;
+    // The box shows the new place at once, and further nudges build on it. While a move is being written, only the
+    // latest place waits: quick nudges become one move instead of being dropped.
+    const { page } = s;
+    const id = s.mark.id;
+    const before = this.moveFrom ?? { ...s.mark };
+    this.moveFrom = before;
+    s.mark = { ...s.mark, rect };
+    this.placeSelection(rect);
+    this.nextMove = rect;
+    if (this.moving) return;
+    this.moving = true;
+    let ok = true;
+    try {
+      while (this.nextMove && ok) {
+        const target = this.nextMove;
+        this.nextMove = null;
+        await this.idle();
+        ok = await this.change((bytes) => pdf.moveMark(bytes, page, id, target));
+      }
+    } finally {
+      this.moving = false;
+      this.nextMove = null;
+      this.moveFrom = null;
+    }
+    if (!ok) return void this.reselect(page, id, before);
+    // Still the same mark selected (not deselected or another picked meanwhile): show it as written.
+    if (this.selected?.mark.id === id) await this.reselect(page, id);
+  }
+
+  /** Selects the mark with this id again after a change (or `fallback` as it was, when the change failed). */
+  private async reselect(page: number, id: string, fallback?: MarkInfo): Promise<void> {
+    const mark = fallback ?? (await pdf.marks(this.bytes, page).catch(() => [])).find((m) => m.id === id);
+    if (mark) this.select(page, mark);
+    else this.deselect();
+  }
+
+  async deleteSelected(): Promise<void> {
+    const s = this.selected;
+    if (!s) return;
+    this.deselect();
+    await this.change((bytes) => pdf.deleteMark(bytes, s.page, s.mark.id));
+  }
+
+  /** Opens the selected comment to read, change or delete it. */
+  private async openComment(): Promise<void> {
+    const s = this.selected;
+    if (!s || s.mark.kind !== 'comment') return;
+    const { page, mark } = s;
+    const text = await pdf.commentText(this.bytes, page, mark.id).catch(() => '');
+    this.commentDialog(text, async (changed) => {
+      if (changed.trim() === text.trim()) return;
+      await this.change((bytes) => pdf.updateComment(bytes, page, mark.id, changed));
+      await this.reselect(page, mark.id);
+    }, async () => {
+      this.deselect();
+      await this.change((bytes) => pdf.deleteMark(bytes, page, mark.id));
+    });
+  }
+
+  // Redaction (Markup › Redact): areas are marked first (red outlines, held in memory only), then Apply removes
+  // everything under them for good: each page with boxes becomes a picture of itself with the boxes painted black.
+
+  get pendingCount(): number {
+    return [...this.pending.values()].reduce((n, rects) => n + rects.length, 0);
+  }
+
+  /** Tools › Redact: the open document in Markup with Redact chosen. */
+  startRedact(): void {
+    if (!this.editable) return void toast('This PDF is protected, so it can only be read.', true);
+    this.setMode('markup');
+    this.armRedact();
+  }
+
+  private armRedact(): void {
+    const on = !this.redactTool;
+    this.disarm();
+    this.redactTool = on;
+    this.drawDock();
+  }
+
+  /** Marks an area of a page for redaction (the self-test, and the drags and selections below). */
+  addRedaction(index: number, rect: PageRect): void {
+    const r = { x: Math.max(0, rect.x), y: Math.max(0, rect.y), width: Math.min(1, rect.x + rect.width) - Math.max(0, rect.x), height: Math.min(1, rect.y + rect.height) - Math.max(0, rect.y) };
+    if (!(r.width > 0 && r.height > 0)) return;
+    this.pending.set(index, [...(this.pending.get(index) ?? []), r]);
+    this.drawPending();
+    this.drawDock();
+    this.report();
+  }
+
+  private drawRedaction(e: PointerEvent, index: number): void {
+    const page = e.currentTarget as HTMLElement;
+    e.preventDefault();
+    window.getSelection()?.removeAllRanges();
+    const start = this.pointOn(page, e);
+    const outline = h('div.redact-box.drawing');
+    page.append(outline);
+    let rect: PageRect = { ...start, width: 0, height: 0 };
+    const update = (ev: PointerEvent) => {
+      const end = this.pointOn(page, ev);
+      rect = { x: Math.min(start.x, end.x), y: Math.min(start.y, end.y), width: Math.abs(end.x - start.x), height: Math.abs(end.y - start.y) };
+      Object.assign(outline.style, { left: `${rect.x * 100}%`, top: `${rect.y * 100}%`, width: `${rect.width * 100}%`, height: `${rect.height * 100}%` });
+    };
+    try { page.setPointerCapture(e.pointerId); } catch { /* not a live pointer */ }
+    const up = (ev: PointerEvent) => {
+      page.removeEventListener('pointermove', update);
+      page.removeEventListener('pointerup', up);
+      page.removeEventListener('pointercancel', up);
+      outline.remove();
+      if (ev.type === 'pointercancel') return;
+      update(ev);
+      const size = this.sizes[index];
+      if (rect.width * size.width >= 3 && rect.height * size.height >= 3) this.addRedaction(index, rect);
+    };
+    page.addEventListener('pointermove', update);
+    page.addEventListener('pointerup', up);
+    page.addEventListener('pointercancel', up);
+  }
+
+  /** Text selected with Redact chosen: its lines are marked for redaction. */
+  private redactSelection(): void {
+    if (!this.redactTool) return;
+    const boxes = this.selectedBoxes();
+    if (!boxes.size) return;
+    window.getSelection()?.removeAllRanges();
+    for (const [index, rects] of boxes) for (const rect of rects) this.addRedaction(index, rect);
+  }
+
+  /** The red outlines of the areas waiting to be redacted, each with a button that takes it away again. */
+  private drawPending(): void {
+    this.scroller.querySelectorAll('.redact-box:not(.drawing)').forEach((b) => b.remove());
+    const els = this.pageEls();
+    for (const [index, rects] of this.pending) {
+      rects.forEach((rect, i) => {
+        const box = h('div.redact-box', { role: 'img', 'aria-label': 'Area to redact' },
+          h('button.redact-remove', {
+            type: 'button', title: 'Remove this area', 'aria-label': 'Remove this area',
+            onpointerdown: (e: PointerEvent) => e.stopPropagation(),
+            onclick: (e: MouseEvent) => {
+              e.stopPropagation();
+              const left = (this.pending.get(index) ?? []).filter((_, n) => n !== i);
+              if (left.length) this.pending.set(index, left);
+              else this.pending.delete(index);
+              this.drawPending();
+              this.drawDock();
+              this.report();
+            },
+          }, icon('close', 12)));
+        Object.assign(box.style, { left: `${rect.x * 100}%`, top: `${rect.y * 100}%`, width: `${rect.width * 100}%`, height: `${rect.height * 100}%` });
+        els[index]?.append(box);
+      });
+    }
+  }
+
+  /** Forgets the areas marked for redaction (nothing was written). */
+  dropRedactions(): true {
+    this.discardRedactions();
+    return true;
+  }
+
+  private discardRedactions(): void {
+    this.pending.clear();
+    this.drawPending();
+    this.drawDock();
+    this.report();
+  }
+
+  /** Before leaving (closing Markup or the document, organizing pages): asks about areas not yet redacted. False = stay. */
+  async settleRedactions(): Promise<boolean> {
+    return (await this.askRedactions()) !== 'stay';
+  }
+
+  /** The question itself: 'none' (nothing waiting), 'applied', 'discarded', or 'stay' (Cancel, or Apply failed). */
+  private async askRedactions(): Promise<'none' | 'applied' | 'discarded' | 'stay'> {
+    if (!this.pending.size) return 'none';
+    const answer = await choose('Apply the redactions?', '', [
+      { label: 'Cancel', value: 'cancel' },
+      { label: 'Discard', value: 'discard' },
+      { label: 'Apply', value: 'apply', kind: 'primary' },
+    ]);
+    if (answer === 'discard') {
+      this.discardRedactions();
+      return 'discarded';
+    }
+    if (answer === 'apply') return (await this.applyRedactions(false)) ? 'applied' : 'stay';
+    return 'stay';
+  }
+
+  /**
+   * Applies the marked areas, after asking (unless `ask` is false: the leaving question already did): every page with
+   * areas is drawn at 300 dpi as it is shown, the areas painted black, and becomes that picture (one Undo step).
+   */
+  async applyRedactions(ask = true): Promise<boolean> {
+    if (!this.pending.size || !this.doc) return true;
+    if (ask) {
+      const ok = await confirm('Apply Redactions?', 'Redacting removes everything under the boxes for good. Each redacted page becomes an image, so its text can no longer be selected or searched, and its form fields and marks are pressed into it.', 'Apply');
+      if (!ok) return false;
+    }
+    await this.commitFields();
+    await this.fresh(); // the pictures are drawn from the document as it is now, field values included
+    const boxes = new Map(this.pending);
+    const doc = this.doc;
+    const ok = await this.change(async (bytes) => {
+      const pictures = new Map<number, Uint8Array>();
+      for (const [index, rects] of boxes) pictures.set(index, await redactedPicture(doc, index, this.sizes[index], rects));
+      return redact(bytes, pictures);
+    }, boxes.size === 1 ? 'The page was redacted.' : `${boxes.size} pages were redacted.`);
+    if (ok) this.discardRedactions();
+    return ok;
   }
 
   // Placing a signature or typed text
@@ -987,7 +1570,7 @@ export class Reader {
 
   /** ✓ or ✗, placed and resized like a signature. About 18 points wide to start with. */
   private async placeMark(mark: 'check' | 'cross'): Promise<void> {
-    this.textTool = null;
+    this.disarm();
     const item = await placedFromPng(await markPng(mark));
     this.beginPlacement(item, 18 / this.sizes[this.currentPage()].width);
   }
@@ -1165,6 +1748,11 @@ export class Reader {
   private moreMenu(): MenuItem[] {
     return [
       { label: 'Organize pages', icon: 'pages', action: () => this.organize() },
+      ...(this.editable ? [
+        { label: 'Make Searchable…', icon: 'searchable', action: () => void this.makeSearchable() },
+        { label: 'Page Numbers…', icon: 'numbers', action: () => void this.pageNumbers() },
+        { label: 'Watermark…', icon: 'watermark', action: () => void this.watermark() },
+      ] : []),
       'separator',
       { label: 'Save', icon: 'save', disabled: !this.dirty, action: () => void this.save() },
       { label: 'Save As…', icon: 'copy', action: () => void this.saveAs() },
@@ -1180,11 +1768,58 @@ export class Reader {
     ];
   }
 
+  /** Page Numbers (More menu, Tools › Enhance): the sheet, then one change to the open document. */
+  async pageNumbers(): Promise<boolean> {
+    if (!(await this.readyForPageTool())) return false;
+    const style = await pageNumbersSheet(this.bytes, this.sizes.length);
+    if (!style) return false;
+    return this.change((bytes) => addPageNumbers(bytes, style), 'Page numbers were added.');
+  }
+
+  /** Watermark (More menu, Tools › Enhance): the sheet, then one change. Text the PDF font can't write is drawn here. */
+  async watermark(): Promise<boolean> {
+    if (!(await this.readyForPageTool())) return false;
+    const style = await watermarkSheet(this.bytes);
+    if (!style) return false;
+    const image = pdf.canEncode(style.text) ? undefined : await watermarkPng(style);
+    return this.change((bytes) => addWatermark(bytes, style, image), 'The watermark was added.');
+  }
+
+  /** Make Searchable (More menu, Tools › Enhance): reads the pages with no text and adds it invisibly, as one change. */
+  async makeSearchable(): Promise<boolean> {
+    if (!(await this.readyForPageTool())) return false;
+    const doc = this.doc!;
+    const found = await ocrSheet(doc, await pagesWithoutText(doc), this.sizes.length);
+    if (!found || doc !== this.doc) return false;
+    return this.change(async (bytes) => {
+      let out = bytes;
+      for (const [index, words] of found) out = await addInvisibleText(out, index, words);
+      return out;
+    }, found.size === 1 ? 'Text was added to 1 page.' : `Text was added to ${found.size} pages.`);
+  }
+
+  /** Before a tool that changes every page: an editable document, nothing half placed, field changes written. */
+  private async readyForPageTool(): Promise<boolean> {
+    if (!this.doc || this.busy) return false;
+    if (!this.editable) {
+      toast('This PDF is protected, so it can only be read.', true);
+      return false;
+    }
+    if (this.ink || this.placement) {
+      toast('Finish what you are placing or drawing first.', true);
+      return false;
+    }
+    await this.commitFields();
+    await this.fresh();
+    return true;
+  }
+
   async organize(): Promise<void> {
     if (!this.doc) return;
     if (!this.editable) return void toast('This PDF is protected, so its pages cannot be changed.', true);
     if (this.ink) this.endInk();
     this.endPlacement();
+    if (!(await this.settleRedactions())) return; // pages may move: the boxes would no longer be on theirs
     await this.fieldWork;
     await this.fresh();
     organizer(this);

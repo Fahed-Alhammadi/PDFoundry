@@ -20,6 +20,10 @@ struct ReaderView: View {
     @State private var showProtect = false
     @State private var askToRemovePassword = false
     @State private var shared: SharedFile?
+    @State private var askToApplyRedactions = false
+    @State private var toolSheet: ReaderTool?
+    /// A tool asked for by the Tools tab, waiting for a locked document to be unlocked.
+    @State private var waitingTool: ReaderTool?
 
     init(url: URL) {
         _model = State(initialValue: ReaderModel(url: url))
@@ -29,7 +33,8 @@ struct ReaderView: View {
         content
             .navigationTitle(model.title)
             .navigationBarTitleDisplayMode(.inline)
-            .navigationBarBackButtonHidden(model.mode != .reading)
+            // While redaction boxes wait, the reader's own back button asks first (this also turns off swipe-back).
+            .navigationBarBackButtonHidden(model.mode != .reading || model.toolMode == .redact || model.pendingRedactionCount > 0)
             .toolbar(.hidden, for: .tabBar)
             .toolbar { toolbar }
             .safeAreaInset(edge: .bottom) { bottomBar }
@@ -60,13 +65,6 @@ struct ReaderView: View {
             } message: {
                 Text("Type the text, then drag it into place.")
             }
-            .confirmationDialog(
-                model.selectedAnnotation?.title ?? "",
-                isPresented: Binding(get: { model.selectedAnnotation != nil }, set: { if !$0 { model.selectedAnnotation = nil } }),
-                titleVisibility: .visible
-            ) {
-                Button("Delete", role: .destructive) { model.deleteSelectedAnnotation() }
-            }
             .alert("Couldn't Save", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
                 Button("Save a Copy in PDFoundry") { saveCopy() }
                 Button("OK", role: .cancel) {}
@@ -94,15 +92,100 @@ struct ReaderView: View {
             } message: {
                 Text("Anyone who has the file will be able to open it.")
             }
+            .alert("Apply Redactions?", isPresented: $askToApplyRedactions) {
+                Button("Apply", role: .destructive) { model.applyRedactions() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(Self.redactionWarning)
+            }
+            .alert("Apply the redactions?", isPresented: Binding(get: { model.leaveRequest != nil }, set: { if !$0 { model.leaveRequest = nil } })) {
+                Button("Apply") {
+                    let request = model.leaveRequest
+                    model.applyRedactions()
+                    // Undo right after Apply would only take the redactions back again.
+                    if request != .undo { finishLeaving(request) }
+                }
+                Button("Discard", role: .destructive) {
+                    let request = model.leaveRequest
+                    model.discardRedactions()
+                    finishLeaving(request)
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(Self.redactionWarning)
+            }
+            .sheet(item: $model.commentDraft) { draft in
+                CommentSheet(text: draft.comment?.contents ?? "", isNew: draft.comment == nil) { text in
+                    if let comment = draft.comment {
+                        model.updateComment(comment, text: text)
+                    } else if let point = draft.point {
+                        model.addComment(at: point, text: text)
+                    }
+                } onDelete: {
+                    if let comment = draft.comment { model.updateComment(comment, text: "") }
+                }
+                .presentationDetents([.medium, .large])
+            }
             .sheet(item: $shared) { file in
                 ActivityView(url: file.url)
+            }
+            .sheet(item: $toolSheet) { tool in
+                switch tool {
+                // Tall enough for the preview and every control without scrolling (iPad's form size is too short).
+                case .pageNumbers: PageNumbersSheet(model: model).presentationSizing(.page)
+                case .watermark: WatermarkSheet(model: model).presentationSizing(.page)
+                case .makeSearchable: OCRSheet(model: model).presentationDetents([.medium])
+                case .redact: EmptyView()
+                }
             }
             .task {
                 // So Protect on the Tools tab can hand this reader the password (it may still be alive in its tab).
                 store.attach(model)
                 await model.load()
+                if let tool = store.takeReaderTool(for: model.url) {
+                    if model.isLocked { waitingTool = tool } else { open(tool) }
+                }
+            }
+            .onChange(of: model.isLocked) { _, locked in
+                if !locked, let tool = waitingTool {
+                    waitingTool = nil
+                    open(tool)
+                }
             }
             .onDisappear { model.syncFields() }
+    }
+
+    /// Opens a tool on the document. A document that can't be changed shows the read-only notice instead.
+    private func open(_ tool: ReaderTool) {
+        guard model.canEdit else {
+            model.show(hint: "This document's owner doesn't allow changes, so it's read-only.", for: .seconds(4))
+            return
+        }
+        if tool == .redact {
+            model.beginRedaction()
+        } else {
+            toolSheet = tool
+        }
+    }
+
+    static let redactionWarning = "Redacting removes everything under the boxes for good. Each redacted page becomes an image, so its text can no longer be selected or searched, and its form fields and marks are pressed into it."
+
+    private func finishLeaving(_ request: ReaderModel.LeaveRequest?) {
+        switch request {
+        case .closeRedact: model.toolMode = .none
+        case .leaveDocument: dismiss()
+        case .revert: askToRevert = true
+        case .removePassword: askToRemovePassword = true
+        case .undo: model.undo()
+        case .organizePages: showPages = true
+        case nil: break
+        }
+    }
+
+    /// Opens a comment to read, edit or delete it.
+    private func openComment(_ comment: PDFAnnotation) {
+        model.selectedAnnotation = nil
+        model.commentDraft = ReaderModel.CommentDraft(comment: comment)
     }
 
     /// When the file can't be changed where it is, the edited document is kept as a new one inside PDFoundry.
@@ -130,6 +213,10 @@ struct ReaderView: View {
             ZStack {
                 PDFKitView(model: model, horizontal: horizontalScroll)
 
+                BoxOverlay(model: model)
+                if model.mode == .reading, model.selectedAnnotation != nil {
+                    SelectionOverlay(model: model) { comment in openComment(comment) }
+                }
                 if model.mode == .drawing {
                     DrawingCanvas(drawing: $model.drawing)
                 }
@@ -163,7 +250,11 @@ struct ReaderView: View {
         switch model.mode {
         case .drawing: "Draw on the page, then tap Done."
         case .placing: "Drag to move. Use the handle to resize."
-        case .reading: model.hint
+        case .shaping: model.shapeKind.drawHint
+        case .commenting: "Tap where the comment goes."
+        case .reading:
+            model.hint ?? (model.toolMode == .redact && model.pendingRedactionCount == 0
+                ? "Drag over what to black out. Scroll with two fingers." : nil)
         }
     }
 
@@ -219,7 +310,7 @@ struct ReaderView: View {
         if model.document != nil, !model.isLocked, model.mode == .reading {
             if model.canEdit {
                 ModeBar(model: model) {
-                    showPages = true
+                    if !model.askAboutRedactions(before: .organizePages) { showPages = true }
                 } onText: {
                     newText = ""
                     textPromptTitle = "Add Text"
@@ -233,6 +324,8 @@ struct ReaderView: View {
                     newText = ReaderModel.todayText()
                     textPromptTitle = "Add Date"
                     showTextPrompt = true
+                } onApplyRedactions: {
+                    askToApplyRedactions = true
                 }
             } else {
                 Label("This document's owner doesn't allow changes, so it's read-only.", systemImage: "lock.fill")
@@ -269,12 +362,27 @@ struct ReaderView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Place") { model.commitPlacement() }
                 }
+            case .shaping:
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { model.cancelMode() }
+                }
+            case .commenting:
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { model.cancelMode() }
+                }
             }
         }
     }
 
     @ToolbarContentBuilder
     private var readingToolbar: some ToolbarContent {
+        if model.toolMode == .redact || model.pendingRedactionCount > 0 {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Back", systemImage: "chevron.backward") {
+                    if !model.shouldAskBeforeLeaving() { dismiss() }
+                }
+            }
+        }
         ToolbarItemGroup(placement: .topBarTrailing) {
             Button("Search", systemImage: "magnifyingglass") { model.showSearch() }
             Menu("More", systemImage: "ellipsis") {
@@ -284,13 +392,17 @@ struct ReaderView: View {
                 Button("Print", systemImage: "printer") { model.printDocument() }
                 if model.canEdit {
                     Divider()
+                    Button("Make Searchable", systemImage: "text.viewfinder") { open(.makeSearchable) }
+                    Button("Page Numbers", systemImage: "number") { open(.pageNumbers) }
+                    Button("Watermark", systemImage: "seal") { open(.watermark) }
+                    Divider()
                     if model.isProtected {
-                        Button("Remove Password", systemImage: "lock.open") { askToRemovePassword = true }
+                        Button("Remove Password", systemImage: "lock.open") { if !model.askAboutRedactions(before: .removePassword) { askToRemovePassword = true } }
                     } else {
                         Button("Protect with Password", systemImage: "lock") { showProtect = true }
                     }
                     Divider()
-                    Button("Revert to Original", systemImage: "arrow.uturn.backward.circle", role: .destructive) { askToRevert = true }
+                    Button("Revert to Original", systemImage: "arrow.uturn.backward.circle", role: .destructive) { if !model.askAboutRedactions(before: .revert) { askToRevert = true } }
                         .disabled(!model.canRevert)
                 }
             }

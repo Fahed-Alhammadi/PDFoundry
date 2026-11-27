@@ -29,9 +29,16 @@ struct AnnotationSelection {
         case "FreeText": "Text"
         case "Stamp": "Signature or Drawing"
         case "Ink": "Drawing"
+        case "Square": "Rectangle"
+        case "Circle": "Ellipse"
+        case "Line": annotation.endLineStyle == .openArrow ? "Arrow" : "Line"
+        case "Text": "Comment"
         default: "Annotation"
         }
     }
+
+    var isMovable: Bool { Annotations.isMovable(annotation) }
+    var isComment: Bool { annotation.type == "Text" }
 }
 
 /// State and editing actions for one open document.
@@ -42,10 +49,12 @@ struct AnnotationSelection {
 @Observable
 final class ReaderModel {
     /// What the reader is doing right now: reading, or drawing / placing something on the page.
-    enum Mode { case reading, drawing, placing }
+    /// `shaping`: one finger drags shapes onto the page (two fingers scroll). `commenting`: the next tap places a comment.
+    enum Mode { case reading, drawing, placing, shaping, commenting }
     /// The group of tools the bottom bar shows. It stays as it is while a tool draws or places something, so
-    /// the bar comes back to the same tools afterwards (signing two places is one tap each).
-    enum ToolMode { case none, markup, fillSign }
+    /// the bar comes back to the same tools afterwards (signing two places is one tap each). `redact`: boxes are
+    /// dragged over the page and applied together.
+    enum ToolMode { case none, markup, fillSign, redact }
 
     let url: URL
     private(set) var document: PDFDocument?
@@ -67,7 +76,13 @@ final class ReaderModel {
     /// Where the last item was placed, in the reader's space, so the next one doesn't start on top of it.
     @ObservationIgnored private(set) var lastPlacedRect: CGRect?
     var drawing = PKDrawing()
-    var selectedAnnotation: AnnotationSelection?
+    var selectedAnnotation: AnnotationSelection? {
+        didSet {
+            // A drag whose end never arrived (SwiftUI may not call onEnded) is finished when the selection changes,
+            // so its start can't be applied to the next mark.
+            if oldValue?.annotation !== selectedAnnotation?.annotation { finishDrag() }
+        }
+    }
     var hint: String?
     var errorMessage: String?
 
@@ -77,7 +92,28 @@ final class ReaderModel {
     private enum UndoStep {
         case added([(PDFPage, PDFAnnotation)])
         case fields([(PDFAnnotation, FieldValue)])
+        /// Marks moved or resized, with where they were before.
+        case changed([(PDFAnnotation, AnnotationGeometry)])
+        /// Marks deleted, with the page they were on.
+        case removed([(PDFPage, PDFAnnotation)])
+        /// Comment text edited, with the text from before.
+        case edited(PDFAnnotation, String)
+        /// Pages replaced by new ones (redaction, Make Searchable).
+        case replaced([PageSwap])
     }
+
+    /// A page put in place of another one. `moved` are annotations carried over from the old page to the new one,
+    /// so Undo carries them back.
+    struct PageSwap {
+        let old: PDFPage
+        let new: PDFPage
+        var moved: [PDFAnnotation] = []
+    }
+
+    /// The selected mark as it was when the current drag began, so the finished drag is one Undo step.
+    @ObservationIgnored private var dragStart: (annotation: PDFAnnotation, geometry: AnnotationGeometry)?
+    /// Changes whenever the page view scrolls or zooms, so overlays drawn over the page follow it.
+    var viewportTick = 0
 
     @ObservationIgnored private var undoStack: [UndoStep] = []
     /// Every form field's value as last saved, to find the fields the user has changed.
@@ -208,7 +244,8 @@ final class ReaderModel {
     /// the document. The steps so far can't be undone one by one after that (their pages are gone).
     @discardableResult
     func removePassword() -> Bool {
-        guard canEdit, let old = password else { return false }
+        guard canEdit, let old = password, !askAboutRedactions(before: .removePassword) else { return false }
+        selectedAnnotation = nil
         syncFields()
         guard let document else { return false }
         let plain = document.isEncrypted ? PDFOperations.unencrypted(document) : document
@@ -348,6 +385,221 @@ final class ReaderModel {
         mode = .reading
         placement = nil
         drawing = PKDrawing()
+        boxDraft = nil
+    }
+
+    // MARK: Shapes
+
+    private(set) var shapeKind = ShapeKind.rectangle
+    var shapeColor: UIColor = Mark.ink
+    /// The box or line being dragged right now, in the page view: from where the finger went down to where it is.
+    var boxDraft: (from: CGPoint, to: CGPoint)?
+
+    /// One finger drags boxes or lines on the page (and two fingers scroll) while drawing shapes or redaction boxes.
+    var dragsBoxes: Bool { mode == .shaping || (toolMode == .redact && mode == .reading) }
+
+    /// A one-finger drag on the page has ended: the shape or redaction box is added.
+    func finishBox(from: CGPoint, to: CGPoint) {
+        boxDraft = nil
+        if mode == .shaping {
+            commitShape(from: from, to: to)
+        } else if toolMode == .redact {
+            addRedaction(fromViewPoint: from, to: to)
+        }
+    }
+
+    /// One finger now drags `kind` onto the page, until Done.
+    func beginShape(_ kind: ShapeKind, color: UIColor) {
+        selectedAnnotation = nil
+        shapeKind = kind
+        shapeColor = color
+        mode = .shaping
+    }
+
+    /// Adds the shape dragged from `from` to `to` (page view points). The tool stays on for the next one.
+    func commitShape(from: CGPoint, to: CGPoint) {
+        boxDraft = nil
+        guard let pdfView, let page = pdfView.page(for: from, nearest: true) else { return }
+        let start = pdfView.convert(from, to: page), end = pdfView.convert(to, to: page)
+        guard hypot(end.x - start.x, end.y - start.y) >= 4 else { return }
+        let annotation: PDFAnnotation
+        switch shapeKind {
+        case .rectangle, .ellipse:
+            let box = CGRect(x: min(start.x, end.x), y: min(start.y, end.y), width: abs(end.x - start.x), height: abs(end.y - start.y))
+            annotation = PDFAnnotation(bounds: box, forType: shapeKind == .rectangle ? .square : .circle, withProperties: nil)
+        case .line, .arrow:
+            // Room around the ends for the stroke and the arrow head. PDFKit keeps the ends relative to the origin.
+            let box = CGRect(x: min(start.x, end.x), y: min(start.y, end.y), width: abs(end.x - start.x), height: abs(end.y - start.y))
+                .insetBy(dx: -10, dy: -10)
+            annotation = PDFAnnotation(bounds: box, forType: .line, withProperties: nil)
+            annotation.startPoint = CGPoint(x: start.x - box.minX, y: start.y - box.minY)
+            annotation.endPoint = CGPoint(x: end.x - box.minX, y: end.y - box.minY)
+            annotation.startLineStyle = .none
+            annotation.endLineStyle = shapeKind == .arrow ? .openArrow : .none
+        }
+        let border = PDFBorder()
+        border.lineWidth = ShapeKind.lineWidth
+        annotation.border = border
+        annotation.color = shapeColor
+        page.addAnnotation(annotation)
+        commit([(page, annotation)])
+    }
+
+    // MARK: Redaction
+
+    /// Boxes to black out, by page index, in page space. Held here only, never written, until they are applied.
+    private(set) var pendingRedactions: [Int: [CGRect]] = [:]
+
+    var pendingRedactionCount: Int { pendingRedactions.values.reduce(0) { $0 + $1.count } }
+
+    func addRedaction(_ rect: CGRect, page index: Int) {
+        let box = rect.standardized
+        guard box.width >= 2, box.height >= 2, let document, index >= 0, index < document.pageCount else { return }
+        pendingRedactions[index, default: []].append(box)
+    }
+
+    /// Adds the box dragged from `from` to `to` in the page view.
+    func addRedaction(fromViewPoint from: CGPoint, to: CGPoint) {
+        guard let pdfView, let document, let page = pdfView.page(for: from, nearest: true) else { return }
+        let start = pdfView.convert(from, to: page), end = pdfView.convert(to, to: page)
+        let box = CGRect(x: min(start.x, end.x), y: min(start.y, end.y), width: abs(end.x - start.x), height: abs(end.y - start.y))
+            .intersection(page.bounds(for: .mediaBox))
+        guard !box.isNull else { return }
+        addRedaction(box, page: document.index(for: page))
+    }
+
+    /// Adds a box over each line of the selected text.
+    func addRedactionsForSelection() {
+        guard let pdfView, let document, let selection = pdfView.currentSelection, !(selection.string ?? "").isEmpty else { return }
+        for line in selection.selectionsByLine() {
+            for page in line.pages {
+                addRedaction(line.bounds(for: page).insetBy(dx: -1, dy: -1), page: document.index(for: page))
+            }
+        }
+        pdfView.clearSelection()
+        hasSelection = false
+    }
+
+    func removeRedaction(page index: Int, at position: Int) {
+        guard var boxes = pendingRedactions[index], boxes.indices.contains(position) else { return }
+        boxes.remove(at: position)
+        pendingRedactions[index] = boxes.isEmpty ? nil : boxes
+    }
+
+    func discardRedactions() {
+        pendingRedactions = [:]
+    }
+
+    /// Opens Redact. Text selected beforehand is marked straight away.
+    func beginRedaction() {
+        selectedAnnotation = nil
+        cancelMode()
+        addRedactionsForSelection()
+        toolMode = .redact
+    }
+
+    /// What was asked for while redaction boxes are waiting: closing Redact, or leaving the document.
+    enum LeaveRequest { case closeRedact, leaveDocument, revert, removePassword, undo, organizePages }
+
+    /// Before something that changes or swaps pages while redaction boxes wait: asks "Apply the redactions?" and
+    /// returns true (the caller stops; the reader carries on once the question is answered). False when no boxes wait.
+    func askAboutRedactions(before request: LeaveRequest) -> Bool {
+        guard pendingRedactionCount > 0 else { return false }
+        leaveRequest = request
+        return true
+    }
+
+    /// Set while the reader asks "Apply the redactions?".
+    var leaveRequest: LeaveRequest?
+
+    /// The bar's close button. With boxes waiting in Redact, asks first.
+    func closeToolMode() {
+        if toolMode == .redact, pendingRedactionCount > 0 {
+            leaveRequest = .closeRedact
+        } else {
+            toolMode = .none
+        }
+    }
+
+    /// Whether leaving the document must ask first (boxes are waiting). If so, the question is shown.
+    func shouldAskBeforeLeaving() -> Bool {
+        guard pendingRedactionCount > 0 else { return false }
+        leaveRequest = .leaveDocument
+        return true
+    }
+
+    /// Blacks out every pending box for good, as one Undo step, and saves (with the password, if there is one).
+    /// Undo and Revert can bring the old pages back only while the document is open: they are held in memory.
+    func applyRedactions() {
+        guard canEdit, let document, !pendingRedactions.isEmpty else { return }
+        syncFields()
+        let swaps = Redaction.replacements(in: document, boxes: pendingRedactions).compactMap { index, page in
+            document.page(at: index).map { PageSwap(old: $0, new: page) }
+        }
+        pendingRedactions = [:]
+        replacePages(swaps)
+    }
+
+    /// Where each pending box shows in the page view.
+    var pendingRedactionFrames: [(page: Int, position: Int, frame: CGRect)] {
+        _ = viewportTick
+        guard let pdfView, let document else { return [] }
+        return pendingRedactions.sorted { $0.key < $1.key }.flatMap { index, boxes in
+            boxes.enumerated().compactMap { position, box in
+                document.page(at: index).map { (index, position, pdfView.convert(box, from: $0)) }
+            }
+        }
+    }
+
+    // MARK: Comments
+
+    /// The next tap on the page places a comment.
+    func beginComment() {
+        selectedAnnotation = nil
+        mode = .commenting
+    }
+
+    /// Adds a comment (a sticky note) at `point` in the page view. An empty comment is not created.
+    @discardableResult
+    func addComment(at point: CGPoint, text: String) -> PDFAnnotation? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let pdfView, let page = pdfView.page(for: point, nearest: true) else { return nil }
+        let spot = pdfView.convert(point, to: page)
+        let side: CGFloat = 24
+        let annotation = PDFAnnotation(bounds: CGRect(x: spot.x - side / 2, y: spot.y - side / 2, width: side, height: side),
+                                       forType: .text, withProperties: nil)
+        annotation.contents = trimmed
+        annotation.iconType = .comment
+        annotation.color = Self.commentColor
+        page.addAnnotation(annotation)
+        commit([(page, annotation)])
+        return annotation
+    }
+
+    static let commentColor = UIColor(red: 1, green: 0.8, blue: 0.2, alpha: 1)
+
+    /// A comment being written (a new one at `point`) or opened (`comment`), shown in the comment sheet.
+    struct CommentDraft: Identifiable {
+        let id = UUID()
+        var point: CGPoint?
+        var comment: PDFAnnotation?
+    }
+
+    var commentDraft: CommentDraft?
+
+    /// Changes a comment's text as one Undo step. Emptying it deletes the comment.
+    func updateComment(_ comment: PDFAnnotation, text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let page = comment.page else { return }
+        if trimmed.isEmpty {
+            selectedAnnotation = AnnotationSelection(annotation: comment, page: page)
+            deleteSelectedAnnotation()
+            return
+        }
+        let old = comment.contents ?? ""
+        guard trimmed != old else { return }
+        comment.contents = trimmed
+        record(.edited(comment, old))
     }
 
     // MARK: Annotations
@@ -355,37 +607,122 @@ final class ReaderModel {
     func handleTap(at point: CGPoint) {
         // PDFView edits a form field on its own (ticks a box, picks a radio button); look for the change once it has.
         scheduleFieldSync()
-        guard mode == .reading, canEdit, let pdfView,
-              let page = pdfView.page(for: point, nearest: false),
-              let annotation = page.annotation(at: pdfView.convert(point, to: page)) else { return }
-        if FormFields.isSignatureField(annotation), !annotation.isReadOnly {
+        if mode == .commenting, canEdit {
+            mode = .reading
+            commentDraft = CommentDraft(point: point)
+            return
+        }
+        guard mode == .reading, canEdit, let pdfView else { return }
+        if let page = pdfView.page(for: point, nearest: false),
+           let annotation = page.annotation(at: pdfView.convert(point, to: page)),
+           FormFields.isSignatureField(annotation), !annotation.isReadOnly {
             signingField = annotation
             return
         }
-        let type = annotation.type ?? ""
-        guard type != "Link", type != "Widget", type != "Popup" else { return }
+        select(at: point)
+    }
+
+    /// Selects the mark under `point` (in the page view), or clears the selection when there is none.
+    func select(at point: CGPoint) {
+        guard canEdit, let pdfView, let page = pdfView.page(for: point, nearest: false),
+              let annotation = Annotations.mark(at: pdfView.convert(point, to: page), on: page) else {
+            selectedAnnotation = nil
+            return
+        }
         selectedAnnotation = AnnotationSelection(annotation: annotation, page: page)
+    }
+
+    var selectionIsMovable: Bool { selectedAnnotation?.isMovable ?? false }
+
+    /// Where the selected mark is in the page view, or nil.
+    var selectionFrame: CGRect? {
+        _ = viewportTick
+        guard let selected = selectedAnnotation, let pdfView else { return nil }
+        return pdfView.convert(selected.annotation.bounds, from: selected.page)
+    }
+
+    /// Moves or resizes the selected mark while a finger drags it (`viewRect` in the page view). Nothing is saved
+    /// until `finishDrag`.
+    func dragSelected(toViewRect viewRect: CGRect) {
+        guard let selected = selectedAnnotation, selected.isMovable, let pdfView else { return }
+        // A start kept for another mark (its drag never ended) is finished first, as its own step.
+        if let drag = dragStart, drag.annotation !== selected.annotation { finishDrag() }
+        let start = dragStart?.geometry ?? AnnotationGeometry(selected.annotation)
+        dragStart = (selected.annotation, start)
+        start.moved(to: Self.kept(pdfView.convert(viewRect, to: selected.page).standardized, inside: selected.page.bounds(for: .cropBox)))
+            .apply(to: selected.annotation)
+        viewportTick &+= 1
+    }
+
+    /// `rect` moved (and if need be shrunk) so it stays on the page.
+    static func kept(_ rect: CGRect, inside page: CGRect) -> CGRect {
+        var result = rect
+        result.size.width = min(result.width, page.width)
+        result.size.height = min(result.height, page.height)
+        result.origin.x = min(max(result.minX, page.minX), page.maxX - result.width)
+        result.origin.y = min(max(result.minY, page.minY), page.maxY - result.height)
+        return result
+    }
+
+    /// The finger is lifted: the drag becomes one Undo step and the file is saved. The start is always cleared,
+    /// even when nothing is selected any more.
+    func finishDrag() {
+        guard let drag = dragStart else { return }
+        dragStart = nil
+        guard AnnotationGeometry(drag.annotation) != drag.geometry else { return }
+        record(.changed([(drag.annotation, drag.geometry)]))
+    }
+
+    /// Moves or resizes the selected mark to `viewRect` in the page view, as one finished change.
+    func moveSelected(toViewRect viewRect: CGRect) {
+        dragSelected(toViewRect: viewRect)
+        finishDrag()
+    }
+
+    /// Moves or resizes the selected mark to `bounds` (page space), as one finished change. Text markup and marks
+    /// made by other apps stay where they are.
+    func moveSelected(to bounds: CGRect) {
+        guard let selected = selectedAnnotation, selected.isMovable else { return }
+        let before = AnnotationGeometry(selected.annotation)
+        let after = before.moved(to: bounds.standardized)
+        guard after != before else { return }
+        after.apply(to: selected.annotation)
+        viewportTick &+= 1
+        record(.changed([(selected.annotation, before)]))
     }
 
     func deleteSelectedAnnotation() {
         guard let selected = selectedAnnotation else { return }
         selected.page.removeAnnotation(selected.annotation)
-        undoStack = undoStack.compactMap { step in
-            guard case .added(let added) = step else { return step }
-            let left = added.filter { $0.1 !== selected.annotation }
-            return left.isEmpty ? nil : .added(left)
-        }
-        canUndo = !undoStack.isEmpty
         selectedAnnotation = nil
+        record(.removed([(selected.page, selected.annotation)]))
+    }
+
+    /// Adds one Undo step and saves.
+    private func record(_ step: UndoStep) {
+        syncFields()
+        undoStack.append(step)
+        canUndo = true
         save()
     }
 
     func undo() {
+        guard !askAboutRedactions(before: .undo) else { return }
+        // Cleared first: a drag left unfinished becomes its own step, which this Undo then takes back.
+        selectedAnnotation = nil
         syncFields()
         guard let last = undoStack.popLast() else { return }
         switch last {
         case .added(let added):
             for (page, annotation) in added { page.removeAnnotation(annotation) }
+        case .changed(let changed):
+            for (annotation, geometry) in changed { geometry.apply(to: annotation) }
+        case .removed(let removed):
+            for (page, annotation) in removed { page.addAnnotation(annotation) }
+        case .edited(let annotation, let text):
+            annotation.contents = text
+        case .replaced(let swaps):
+            restore(swaps)
         case .fields(let changed):
             // Back to front, so a radio group ends as it was.
             for (widget, old) in changed.reversed() {
@@ -484,12 +821,112 @@ final class ReaderModel {
         syncPage()
     }
 
+    /// Adds marks made here as one Undo step, tagged as PDFoundry's own, and saves.
     private func commit(_ added: [(PDFPage, PDFAnnotation)]) {
         guard !added.isEmpty else { return }
+        for (_, annotation) in added { Annotations.tag(annotation) }
+        record(.added(added))
+    }
+
+    // MARK: Page numbers and watermark
+
+    /// Numbers the pages, as one Undo step.
+    func addPageNumbers(_ style: PageNumberStyle) {
+        guard canEdit, let document else { return }
+        commit(PageStamps.addNumbers(document, style: style))
+    }
+
+    /// Stamps the watermark on every page, as one Undo step.
+    func addWatermark(_ style: WatermarkStyle) {
+        guard canEdit, let document else { return }
+        commit(PageStamps.addWatermark(document, style: style))
+    }
+
+    // MARK: Make Searchable
+
+    /// The pages Make Searchable would read: those with no text yet.
+    var pagesNeedingText: [Int] { document.map(OCR.pagesNeedingText) ?? [] }
+
+    /// Reads the pages without text and adds invisible text over the words, as one Undo step. Returns how many
+    /// pages got text (0: nothing was found, nothing changed). Cancelling the task changes nothing.
+    func makeSearchable(progress: @escaping (Int, Int) -> Void) async throws -> Int {
+        guard canEdit, let document else { return 0 }
         syncFields()
-        undoStack.append(.added(added))
-        canUndo = true
-        save()
+        let pages = OCR.pagesNeedingText(document)
+        guard !pages.isEmpty else { return 0 }
+        let rebuilt = try await OCR.rebuild(document, pages: pages, progress: progress)
+        try Task.checkCancellation()
+        // The document may have been reverted meanwhile.
+        guard self.document === document else { throw CancellationError() }
+        let swaps = rebuilt.compactMap { index, page in
+            document.page(at: index).map { PageSwap(old: $0, new: page, moved: $0.annotations) }
+        }
+        replacePages(swaps)
+        return swaps.count
+    }
+
+    // MARK: Replacing pages
+
+    /// Puts each swap's new page in place of its old one, carrying the listed annotations over, as one Undo step.
+    func replacePages(_ swaps: [PageSwap]) {
+        guard let document, !swaps.isEmpty else { return }
+        syncFields()
+        selectedAnnotation = nil
+        let shown = detachFromView()
+        defer { reattach(shown) }
+        for swap in swaps {
+            let index = document.index(for: swap.old)
+            guard index != NSNotFound, index < document.pageCount else { continue }
+            for annotation in swap.moved {
+                swap.old.removeAnnotation(annotation)
+                swap.new.addAnnotation(annotation)
+            }
+            Self.swap(in: document, at: index, with: swap.new)
+        }
+        pagesReplaced()
+        record(.replaced(swaps))
+    }
+
+    private static func swap(in document: PDFDocument, at index: Int, with page: PDFPage) {
+        document.insert(page, at: index)
+        document.removePage(at: index + 1)
+    }
+
+    /// Takes the document out of the page view while pages are swapped, and returns the page index shown. PDFView
+    /// crashes in its layout when pages are swapped under it after a search has run on the document.
+    private func detachFromView() -> Int {
+        let index = pageIndex
+        pdfView?.document = nil
+        return index
+    }
+
+    private func reattach(_ index: Int) {
+        guard let pdfView, let document else { return }
+        pdfView.document = document
+        if let page = document.page(at: min(index, max(0, document.pageCount - 1))) { pdfView.go(to: page) }
+    }
+
+    private func restore(_ swaps: [PageSwap]) {
+        guard let document else { return }
+        let shown = detachFromView()
+        defer { reattach(shown) }
+        for swap in swaps.reversed() {
+            let index = document.index(for: swap.new)
+            guard index != NSNotFound, index < document.pageCount else { continue }
+            Self.swap(in: document, at: index, with: swap.old)
+            for annotation in swap.moved {
+                swap.new.removeAnnotation(annotation)
+                swap.old.addAnnotation(annotation)
+            }
+        }
+        pagesReplaced()
+    }
+
+    /// The fields and the view after pages were swapped.
+    private func pagesReplaced() {
+        prepareFields()
+        pdfView?.layoutDocumentView()
+        syncPage()
     }
 
     /// Writes the document to the file it was opened from. Called after every change.
@@ -516,7 +953,10 @@ final class ReaderModel {
     /// original contents are written with it (as on Android), so Revert never quietly unprotects a file.
     @discardableResult
     func revertToOriginal() -> Bool {
-        guard let original, canRevert, let restored = PDFDocument(data: original) else { return false }
+        guard let original, canRevert, !askAboutRedactions(before: .revert),
+              let restored = PDFDocument(data: original) else { return false }
+        // Cleared before writing: an unfinished drag must not be saved over the original afterwards.
+        selectedAnnotation = nil
         let keep = restored.isEncrypted ? nil : password
         var written = false
         var error: NSError?

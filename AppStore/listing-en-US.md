@@ -33,6 +33,7 @@ READ
 • Search the text of a document
 • Scroll pages vertically or sideways
 • Scan paper with the camera, or build a PDF from your photos
+• Make scanned pages searchable: text recognition reads English and Arabic, fully offline
 
 MERGE
 • Select two or more documents and join them into one
@@ -44,7 +45,18 @@ EDIT
 • Draw with your finger or Apple Pencil
 • Reorder, rotate, duplicate, extract and delete pages
 • Add blank pages
-• Tap any mark you added to remove it, or undo your last change
+• Add rectangles, ellipses, lines and arrows, and leave comments as sticky notes
+• Every mark is a real PDF annotation that other PDF apps show. Tap it later, even after reopening the file, to move, resize or delete it
+• Undo your last change
+• Add page numbers or a watermark
+
+REDACT
+• Draw boxes over anything, or select text, then Apply
+• Each redacted page becomes an image, so the hidden text is really gone from the file
+
+EXPORT AND COMPRESS
+• Save pages as PNG or JPEG images, at screen or print quality
+• Make a smaller copy of a PDF; the text stays selectable
 
 SIGN
 • Draw your signature once and reuse it
@@ -60,7 +72,7 @@ PRIVATE BY DESIGN
 • No account and no sign-in
 • No ads and no analytics
 • Nothing is uploaded: your documents and signatures never leave your device
-• The only permission PDFoundry can ask for is the camera, and only when you tap Scan
+• PDFoundry asks for the camera only when you tap Scan, and to add images to your photo library only when you tap Save Image after exporting pages
 
 PDFoundry is open source under the MIT License.
 
@@ -93,19 +105,40 @@ How to test:
 8. Merge: go back to the library, open the sample's context menu (press and hold) and choose Duplicate. Tap Select, choose both documents, tap the merge button, then Merge.
 9. Delete: press and hold a document and choose Delete.
 
-Permissions: the camera is the only permission. The system asks for it only when the user taps "+" then "Scan Document". There is no onboarding or pre-permission screen. Photos are chosen with the system photo picker, which needs no permission.
+Permissions: the camera and adding to the photo library. The system asks for the camera only when the user taps "+" then "Scan Document", and for adding to the photo library only when the user taps Save Image in the share sheet after Tools > Export as Images. There is no onboarding or pre-permission screen. Photos are chosen with the system photo picker, which needs no permission.
 
 **Contact:** fill in your name, phone and email in App Store Connect.
 
 ## Screenshots (iPhone 6.9", 1320 x 2868)
 
-Upload from `screenshots/ios/iphone-6.9/` in this order:
+App Store Connect takes up to 10 per size. Upload from `screenshots/ios/iphone-6.9/` in this order:
 
 1. `01-library.png` — Your documents in one place
-2. `08-signed.png` — Sign and highlight
-3. `04-place-signature.png` — Place your signature exactly
-4. `05-pages.png` — Reorder, rotate and delete pages
-5. `02-merge.png` — Merge documents
-6. `03-signature-pad.png` — Draw your signature once
+2. `08-fill-sign.png` — Fill in and sign forms
+3. `13-shapes-comment.png` — Mark up with shapes and comments
+4. `09-tools.png` — Every tool in one place
+5. `15-redact.png` — Black out text for good
+6. `17-watermark.png` — Add a watermark
+7. `04-place-signature.png` — Place your signature exactly
+8. `05-pages.png` — Reorder, rotate and delete pages
+9. `02-merge.png` — Merge documents
+10. `12-protect.png` — Protect with a password
 
-iPad screenshots (13") are required because the app also runs on iPad; they have not been captured yet.
+Also in the folder (not uploaded): `10-markup.png` (highlight), `14-selected-mark.png` (move or resize a placed signature), `16-tools-enhance.png` (Protect & optimize and Enhance tools), `11-split.png`, `03-signature-pad.png`, `06-settings.png`, `07-about.png`.
+
+## Screenshots (iPad 13")
+
+App Store Connect takes up to 10 per size. Upload from `screenshots/ios/ipad-13/` in this order:
+
+1. `01-library.png` — Your documents in one place
+2. `02-fill-sign.png` — Fill in and sign forms
+3. `13-shapes-comment.png` — Mark up with shapes and comments
+4. `07-tools.png` — Every tool in one place
+5. `15-redact.png` — Black out text for good
+6. `17-watermark.png` — Add a watermark
+7. `04-place-signature.png` — Place your signature exactly
+8. `05-pages.png` — Reorder, rotate and delete pages
+9. `06-merge.png` — Merge documents
+10. `09-protect.png` — Protect with a password
+
+Also in the folder (not uploaded): `14-selected-mark.png` (move or resize a placed signature), `08-split.png`, `03-signature-pad.png`. On iPad the whole Tools grid, including Enhance, fits in `07-tools.png`, so there is no separate `16-tools-enhance.png`.

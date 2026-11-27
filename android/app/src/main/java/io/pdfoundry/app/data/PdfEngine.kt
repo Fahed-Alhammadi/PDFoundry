@@ -8,6 +8,10 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
+import com.tom_roush.pdfbox.cos.COSArray
+import com.tom_roush.pdfbox.cos.COSDictionary
+import com.tom_roush.pdfbox.cos.COSFloat
+import com.tom_roush.pdfbox.cos.COSName
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import com.tom_roush.pdfbox.io.MemoryUsageSetting
 import com.tom_roush.pdfbox.multipdf.PDFMergerUtility
@@ -60,12 +64,15 @@ enum class UnlockResult { Full, Limited, Wrong }
  * All functions block and belong on a background dispatcher.
  */
 object PdfEngine {
-    fun init(context: Context) = PDFBoxResourceLoader.init(context.applicationContext)
+    fun init(context: Context) {
+        PDFBoxResourceLoader.init(context.applicationContext)
+        Ocr.init(context)
+    }
 
     private fun memory() = MemoryUsageSetting.setupTempFileOnly()
 
     /** Loads `file`, applies `block`, and replaces the file only after the new copy is written in full. */
-    private fun edit(file: File, block: (PDDocument) -> Unit) {
+    internal fun edit(file: File, block: (PDDocument) -> Unit) {
         val temp = File(file.parentFile, "${file.name}.tmp")
         try {
             PDDocument.load(file, memory()).use { document ->
@@ -214,6 +221,13 @@ object PdfEngine {
         true
     }
 
+    /** True when the file opens without a password but is encrypted: restrictions set by its author. */
+    fun isRestrictedOnly(file: File): Boolean = try {
+        PDDocument.load(file, memory()).use { it.isEncrypted }
+    } catch (e: InvalidPasswordException) {
+        false
+    }
+
     fun pageCount(file: File, password: String? = null): Int = load(file, password).use { it.numberOfPages }
 
     /**
@@ -310,59 +324,75 @@ object PdfEngine {
     // endregion
     // region Drawing onto a page
 
+    /** Adds page numbers to every page's content (one change). */
+    fun addPageNumbers(file: File, style: PageNumberStyle) = PageStamps.addPageNumbers(file, style)
+
+    /** Adds a watermark on top of every page's content (one change). */
+    fun addWatermark(file: File, style: WatermarkStyle) = PageStamps.addWatermark(file, style)
+
     /**
-     * Opens a content stream whose coordinates match what the user sees: origin at the bottom-left
-     * of the displayed page, in points, whatever the page's rotation or crop box.
+     * Places an image (a signature, initials, a mark, or typed text rendered to a bitmap) as a `Stamp`
+     * annotation whose appearance is the image. `rect` is in page fractions.
      */
-    private fun PDDocument.overlay(pageIndex: Int, draw: (PDPageContentStream, width: Float, height: Float) -> Unit) {
-        val page = getPage(pageIndex)
-        val box = page.cropBox
-        val rotation = ((page.rotation % 360) + 360) % 360
-        val sideways = rotation == 90 || rotation == 270
-        val width = if (sideways) box.height else box.width
-        val height = if (sideways) box.width else box.height
-        val toPage = when (rotation) {
-            90 -> Matrix(0f, 1f, -1f, 0f, box.lowerLeftX + box.width, box.lowerLeftY)
-            180 -> Matrix(-1f, 0f, 0f, -1f, box.lowerLeftX + box.width, box.lowerLeftY + box.height)
-            270 -> Matrix(0f, -1f, 1f, 0f, box.lowerLeftX, box.lowerLeftY + box.height)
-            else -> Matrix(1f, 0f, 0f, 1f, box.lowerLeftX, box.lowerLeftY)
-        }
-        PDPageContentStream(this, page, PDPageContentStream.AppendMode.APPEND, true, true).use { stream ->
-            stream.transform(toPage)
-            draw(stream, width, height)
-        }
-    }
-
-    /** Draws an image (a signature, or typed text rendered to a bitmap). `rect` is in page fractions. */
     fun stamp(file: File, pageIndex: Int, image: Bitmap, rect: RectF) = edit(file) { document ->
-        document.overlay(pageIndex) { stream, width, height ->
-            val picture = LosslessFactory.createFromImage(document, image)
-            stream.drawImage(picture, rect.left * width, height - rect.bottom * height, rect.width() * width, rect.height() * height)
+        val frame = PageFrame(document.getPage(pageIndex))
+        val w = rect.width() * frame.width
+        val h = rect.height() * frame.height
+        val picture = LosslessFactory.createFromImage(document, image)
+        AnnotationWriter.add(document, pageIndex, "Stamp", rect.left * frame.width, frame.height - rect.bottom * frame.height, w, h, configure = { dict, _ ->
+            dict.setName(COSName.NAME, "PDFoundry")
+        }) { stream ->
+            stream.drawImage(picture, 0f, 0f, w, h)
         }
     }
 
+    /**
+     * One drawing becomes `Ink` annotations: strokes drawn one after another with the same pen share one
+     * annotation, so a drawing is selected, moved and deleted as a whole.
+     */
     fun ink(file: File, pageIndex: Int, strokes: List<InkStroke>) = edit(file) { document ->
-        document.overlay(pageIndex) { stream, width, height ->
-            for (stroke in strokes) {
-                if (stroke.points.isEmpty()) continue
-                stream.saveGraphicsState()
-                if (stroke.highlighter) {
+        val frame = PageFrame(document.getPage(pageIndex))
+        val runs = mutableListOf<MutableList<InkStroke>>()
+        for (stroke in strokes.filter { it.points.isNotEmpty() }) {
+            val last = runs.lastOrNull()?.last()
+            if (last != null && last.argb == stroke.argb && last.width == stroke.width && last.highlighter == stroke.highlighter) runs.last() += stroke else runs += mutableListOf(stroke)
+        }
+        for (run in runs) {
+            val pen = run.first()
+            // A tap leaves a single point; draw a dot-sized segment so it still shows.
+            val paths = run.map { stroke ->
+                val points = if (stroke.points.size == 1) stroke.points + PagePoint(stroke.points[0].x + 0.0005f, stroke.points[0].y) else stroke.points
+                points.map { frame.point(it) }
+            }
+            val lineWidth = pen.width * frame.width
+            val pad = lineWidth / 2 + 1f
+            val all = paths.flatten()
+            val left = all.minOf { it[0] } - pad
+            val bottom = all.minOf { it[1] } - pad
+            val right = all.maxOf { it[0] } + pad
+            val top = all.maxOf { it[1] } + pad
+            AnnotationWriter.add(document, pageIndex, "Ink", left, bottom, right - left, top - bottom, configure = { dict, f ->
+                val list = COSArray()
+                paths.forEach { path -> list.add(COSArray().apply { path.forEach { p -> f.user(p[0], p[1]).let { u -> add(COSFloat(u[0])); add(COSFloat(u[1])) } } }) }
+                dict.setItem(COSName.getPDFName("InkList"), list)
+                dict.setItem(COSName.C, rgb(pen.argb).toCOSArray())
+                dict.setItem(COSName.BS, COSDictionary().apply { setFloat(COSName.W, lineWidth); setName(COSName.S, "S") })
+            }) { stream ->
+                if (pen.highlighter) {
                     stream.setGraphicsStateParameters(PDExtendedGraphicsState().apply {
                         strokingAlphaConstant = 0.45f
                         blendMode = BlendMode.MULTIPLY
                     })
                 }
-                stream.setStrokingColor(Color.red(stroke.argb) / 255f, Color.green(stroke.argb) / 255f, Color.blue(stroke.argb) / 255f)
-                stream.setLineWidth(stroke.width * width)
-                stream.setLineCapStyle(if (stroke.highlighter) 0 else 1)
+                stream.setStrokingColor(Color.red(pen.argb) / 255f, Color.green(pen.argb) / 255f, Color.blue(pen.argb) / 255f)
+                stream.setLineWidth(lineWidth)
+                stream.setLineCapStyle(if (pen.highlighter) 0 else 1)
                 stream.setLineJoinStyle(1)
-                val first = stroke.points.first()
-                stream.moveTo(first.x * width, height - first.y * height)
-                // A tap leaves a single point; draw a dot-sized segment so it still shows.
-                val rest = if (stroke.points.size == 1) listOf(PagePoint(first.x + 0.0005f, first.y)) else stroke.points.drop(1)
-                rest.forEach { stream.lineTo(it.x * width, height - it.y * height) }
-                stream.stroke()
-                stream.restoreGraphicsState()
+                for (path in paths) {
+                    stream.moveTo(path[0][0] - left, path[0][1] - bottom)
+                    path.drop(1).forEach { stream.lineTo(it[0] - left, it[1] - bottom) }
+                    stream.stroke()
+                }
             }
         }
     }
@@ -522,9 +552,38 @@ object PdfEngine {
      */
     fun markText(file: File, pageIndex: Int, rects: List<RectF>, mark: TextMark, argb: Int, lower: List<Edge>? = null) = edit(file) { document ->
         if (rects.isEmpty()) return@edit
-        val fallback = defaultLower(((document.getPage(pageIndex).rotation % 360) + 360) % 360)
-        document.overlay(pageIndex) { stream, width, height ->
-            stream.saveGraphicsState()
+        val frame = PageFrame(document.getPage(pageIndex))
+        val fallback = defaultLower(frame.rotation)
+        val width = frame.width
+        val height = frame.height
+        // Display points, origin at the bottom-left: left, bottom, right, top.
+        val boxes = rects.map { floatArrayOf(it.left * width, height - it.bottom * height, it.right * width, height - it.top * height) }
+        val left = boxes.minOf { it[0] }
+        val bottom = boxes.minOf { it[1] }
+        val right = boxes.maxOf { it[2] }
+        val top = boxes.maxOf { it[3] }
+        val subtype = when (mark) {
+            TextMark.Highlight -> "Highlight"
+            TextMark.Underline -> "Underline"
+            TextMark.Strikethrough -> "StrikeOut"
+        }
+        AnnotationWriter.add(document, pageIndex, subtype, left, bottom, right - left, top - bottom, configure = { dict, f ->
+            // QuadPoints in user space: upper-left, upper-right, lower-left, lower-right of each run of text,
+            // "upper" meaning the side away from the text's lower side.
+            val quads = COSArray()
+            boxes.forEachIndexed { index, box ->
+                val l = box[0]; val b = box[1]; val r = box[2]; val t = box[3]
+                val corners = when (lower?.getOrNull(index) ?: fallback) {
+                    Edge.Bottom -> listOf(l to t, r to t, l to b, r to b)
+                    Edge.Top -> listOf(r to b, l to b, r to t, l to t)
+                    Edge.Left -> listOf(r to t, r to b, l to t, l to b)
+                    Edge.Right -> listOf(l to b, l to t, r to b, r to t)
+                }
+                corners.forEach { (x, y) -> f.user(x, y).let { u -> quads.add(COSFloat(u[0])); quads.add(COSFloat(u[1])) } }
+            }
+            dict.setItem(COSName.getPDFName("QuadPoints"), quads)
+            dict.setItem(COSName.C, rgb(argb).toCOSArray())
+        }) { stream ->
             val alpha = Color.alpha(argb) / 255f
             stream.setGraphicsStateParameters(PDExtendedGraphicsState().apply {
                 if (mark == TextMark.Highlight) {
@@ -537,18 +596,17 @@ object PdfEngine {
             val red = Color.red(argb) / 255f
             val green = Color.green(argb) / 255f
             val blue = Color.blue(argb) / 255f
-            rects.forEachIndexed { index, rect ->
-                // Display points, origin at the bottom-left.
-                val left = rect.left * width
-                val right = rect.right * width
-                val top = height - rect.top * height
-                val bottom = height - rect.bottom * height
-                val rectWidth = right - left
-                val rectHeight = top - bottom
+            boxes.forEachIndexed { index, box ->
+                val l = box[0] - left
+                val b = box[1] - bottom
+                val r = box[2] - left
+                val t = box[3] - bottom
+                val rectWidth = r - l
+                val rectHeight = t - b
                 when (mark) {
                     TextMark.Highlight -> {
                         stream.setNonStrokingColor(red, green, blue)
-                        stream.addRect(left, bottom, rectWidth, rectHeight)
+                        stream.addRect(l, b, rectWidth, rectHeight)
                         stream.fill()
                     }
                     TextMark.Underline, TextMark.Strikethrough -> {
@@ -557,15 +615,14 @@ object PdfEngine {
                         stream.setStrokingColor(red, green, blue)
                         stream.setLineCapStyle(0)
                         when (lower?.getOrNull(index) ?: fallback) {
-                            Edge.Bottom -> line(stream, left, top - rectHeight * along, right, top - rectHeight * along, rectHeight)
-                            Edge.Top -> line(stream, left, bottom + rectHeight * along, right, bottom + rectHeight * along, rectHeight)
-                            Edge.Left -> line(stream, right - rectWidth * along, bottom, right - rectWidth * along, top, rectWidth)
-                            Edge.Right -> line(stream, left + rectWidth * along, bottom, left + rectWidth * along, top, rectWidth)
+                            Edge.Bottom -> line(stream, l, t - rectHeight * along, r, t - rectHeight * along, rectHeight)
+                            Edge.Top -> line(stream, l, b + rectHeight * along, r, b + rectHeight * along, rectHeight)
+                            Edge.Left -> line(stream, r - rectWidth * along, b, r - rectWidth * along, t, rectWidth)
+                            Edge.Right -> line(stream, l + rectWidth * along, b, l + rectWidth * along, t, rectWidth)
                         }
                     }
                 }
             }
-            stream.restoreGraphicsState()
         }
     }
 
@@ -575,6 +632,229 @@ object PdfEngine {
         stream.moveTo(x1, y1)
         stream.lineTo(x2, y2)
         stream.stroke()
+    }
+
+    // endregion
+    // region Marks (annotations)
+
+    /** The stroke of shapes, in points. */
+    const val SHAPE_WIDTH = 2f
+    private const val ARROW_HEAD = 10f
+
+    /**
+     * Draws a shape from [from] to [to] (page fractions) in [argb] (its alpha is ignored), 2 pt wide, no
+     * fill: a `Square` or `Circle` filling the rect between the points, or a `Line` between them (an
+     * arrow has an open arrowhead at [to]). Nothing is added when the points are (almost) the same.
+     */
+    fun shape(file: File, pageIndex: Int, kind: ShapeKind, from: PagePoint, to: PagePoint, argb: Int) = edit(file) { document ->
+        val frame = PageFrame(document.getPage(pageIndex))
+        val a = frame.point(from)
+        val b = frame.point(to)
+        if (kotlin.math.hypot(b[0] - a[0], b[1] - a[1]) < 3f) return@edit
+        val red = Color.red(argb) / 255f
+        val green = Color.green(argb) / 255f
+        val blue = Color.blue(argb) / 255f
+        val border = COSDictionary().apply { setFloat(COSName.W, SHAPE_WIDTH); setName(COSName.S, "S") }
+        when (kind) {
+            ShapeKind.Rectangle, ShapeKind.Ellipse -> {
+                val left = minOf(a[0], b[0]); val right = maxOf(a[0], b[0])
+                val bottom = minOf(a[1], b[1]); val top = maxOf(a[1], b[1])
+                val w = maxOf(right - left, SHAPE_WIDTH * 2)
+                val h = maxOf(top - bottom, SHAPE_WIDTH * 2)
+                AnnotationWriter.add(document, pageIndex, if (kind == ShapeKind.Rectangle) "Square" else "Circle", left, bottom, w, h, configure = { dict, _ ->
+                    dict.setItem(COSName.C, rgb(argb).toCOSArray())
+                    dict.setItem(COSName.BS, border)
+                }) { stream ->
+                    stream.setStrokingColor(red, green, blue)
+                    stream.setLineWidth(SHAPE_WIDTH)
+                    val inset = SHAPE_WIDTH / 2
+                    if (kind == ShapeKind.Rectangle) {
+                        stream.addRect(inset, inset, w - SHAPE_WIDTH, h - SHAPE_WIDTH)
+                    } else {
+                        ellipse(stream, w / 2, h / 2, w / 2 - inset, h / 2 - inset)
+                    }
+                    stream.stroke()
+                }
+            }
+            ShapeKind.Line, ShapeKind.Arrow -> {
+                val pad = SHAPE_WIDTH + if (kind == ShapeKind.Arrow) ARROW_HEAD else 0f
+                val left = minOf(a[0], b[0]) - pad
+                val bottom = minOf(a[1], b[1]) - pad
+                val right = maxOf(a[0], b[0]) + pad
+                val top = maxOf(a[1], b[1]) + pad
+                AnnotationWriter.add(document, pageIndex, "Line", left, bottom, right - left, top - bottom, configure = { dict, f ->
+                    val start = f.user(a[0], a[1])
+                    val end = f.user(b[0], b[1])
+                    dict.setItem(COSName.L, floats(start[0], start[1], end[0], end[1]))
+                    dict.setItem(COSName.LE, COSArray().apply { add(COSName.getPDFName("None")); add(COSName.getPDFName(if (kind == ShapeKind.Arrow) "OpenArrow" else "None")) })
+                    dict.setItem(COSName.C, rgb(argb).toCOSArray())
+                    dict.setItem(COSName.BS, border)
+                }) { stream ->
+                    stream.setStrokingColor(red, green, blue)
+                    stream.setLineWidth(SHAPE_WIDTH)
+                    stream.setLineCapStyle(1)
+                    stream.setLineJoinStyle(1)
+                    val x1 = a[0] - left; val y1 = a[1] - bottom
+                    val x2 = b[0] - left; val y2 = b[1] - bottom
+                    stream.moveTo(x1, y1)
+                    stream.lineTo(x2, y2)
+                    stream.stroke()
+                    if (kind == ShapeKind.Arrow) {
+                        val angle = kotlin.math.atan2(y2 - y1, x2 - x1)
+                        val spread = Math.toRadians(30.0).toFloat()
+                        stream.moveTo(x2 - ARROW_HEAD * kotlin.math.cos(angle - spread), y2 - ARROW_HEAD * kotlin.math.sin(angle - spread))
+                        stream.lineTo(x2, y2)
+                        stream.lineTo(x2 - ARROW_HEAD * kotlin.math.cos(angle + spread), y2 - ARROW_HEAD * kotlin.math.sin(angle + spread))
+                        stream.stroke()
+                    }
+                }
+            }
+        }
+    }
+
+    /** An ellipse centred at ([cx], [cy]) from four Bézier curves. */
+    private fun ellipse(stream: PDPageContentStream, cx: Float, cy: Float, rx: Float, ry: Float) {
+        val k = 0.5523f
+        stream.moveTo(cx + rx, cy)
+        stream.curveTo(cx + rx, cy + ry * k, cx + rx * k, cy + ry, cx, cy + ry)
+        stream.curveTo(cx - rx * k, cy + ry, cx - rx, cy + ry * k, cx - rx, cy)
+        stream.curveTo(cx - rx, cy - ry * k, cx - rx * k, cy - ry, cx, cy - ry)
+        stream.curveTo(cx + rx * k, cy - ry, cx + rx, cy - ry * k, cx + rx, cy)
+        stream.closePath()
+    }
+
+    /** The side of a comment's note icon, in points. */
+    private const val NOTE = 22f
+
+    /**
+     * Places a comment (a `Text` annotation, the sticky note other apps show with its text in a popup)
+     * centred at [at] (page fractions). Returns its id; an empty [text] creates nothing and returns null.
+     */
+    fun comment(file: File, pageIndex: Int, at: PagePoint, text: String): String? {
+        val words = text.trim()
+        if (words.isEmpty()) return null
+        var id: String? = null
+        edit(file) { document ->
+            val frame = PageFrame(document.getPage(pageIndex))
+            val p = frame.point(at)
+            val left = (p[0] - NOTE / 2).coerceIn(0f, frame.width - NOTE)
+            val bottom = (p[1] - NOTE / 2).coerceIn(0f, frame.height - NOTE)
+            id = AnnotationWriter.add(document, pageIndex, "Text", left, bottom, NOTE, NOTE, configure = { dict, _ ->
+                dict.setString(COSName.CONTENTS, words)
+                dict.setName(COSName.NAME, "Comment")
+                dict.setItem(COSName.C, floats(1f, 0.8f, 0.2f))
+                dict.setBoolean(COSName.getPDFName("Open"), false)
+            }) { stream -> noteIcon(stream) }.annotationName
+        }
+        return id
+    }
+
+    /** A yellow speech bubble with three lines of "text", 22 pt square. */
+    private fun noteIcon(stream: PDPageContentStream) {
+        stream.setNonStrokingColor(1f, 0.8f, 0.2f)
+        stream.setStrokingColor(0.42f, 0.32f, 0.05f)
+        stream.setLineWidth(1f)
+        stream.setLineJoinStyle(1)
+        stream.moveTo(2.5f, 19.5f)
+        stream.lineTo(19.5f, 19.5f)
+        stream.lineTo(19.5f, 6.5f)
+        stream.lineTo(10f, 6.5f)
+        stream.lineTo(5f, 2f)
+        stream.lineTo(6f, 6.5f)
+        stream.lineTo(2.5f, 6.5f)
+        stream.closePath()
+        stream.fillAndStroke()
+        stream.setLineWidth(1.2f)
+        for (y in listOf(15.5f, 12.5f, 9.5f)) {
+            stream.moveTo(5.5f, y)
+            stream.lineTo(16.5f, y)
+        }
+        stream.stroke()
+    }
+
+    /** Changes a comment's text; empty text deletes the comment. */
+    fun updateComment(file: File, pageIndex: Int, id: String, text: String) {
+        val words = text.trim()
+        if (words.isEmpty()) return deleteMark(file, pageIndex, id)
+        edit(file) { document ->
+            val annotation = document.getPage(pageIndex).annotation(id) ?: throw PdfException("This comment is no longer in the document.")
+            if (Annotations.kind(annotation) != MarkKind.Comment) throw PdfException("This is not a comment.")
+            annotation.contents = words
+            annotation.setModifiedDate(java.util.Calendar.getInstance())
+        }
+    }
+
+    fun commentText(file: File, pageIndex: Int, id: String): String = PDDocument.load(file, memory()).use { document ->
+        document.getPage(pageIndex).annotation(id)?.contents.orEmpty()
+    }
+
+    /** The marks on a page that PDFoundry can select: every annotation of a kind it makes, its own or not. */
+    fun marks(file: File, pageIndex: Int): List<MarkInfo> = PDDocument.load(file, memory()).use { document ->
+        if (pageIndex !in 0 until document.numberOfPages) return@use emptyList()
+        marksOf(document.getPage(pageIndex))
+    }
+
+    private fun marksOf(page: PDPage): List<MarkInfo> {
+        val frame = PageFrame(page)
+        return runCatching { page.annotations }.getOrDefault(emptyList()).mapIndexedNotNull { index, annotation ->
+            val kind = Annotations.kind(annotation)
+            val rect = annotation.rectangle
+            if (kind == MarkKind.Other || rect == null || annotation.isHidden || annotation.isNoView) null
+            else MarkInfo(idOf(annotation, index), kind, frame.fractions(rect), Annotations.isMovable(annotation))
+        }
+    }
+
+    /** Every page's marks, by page index (pages without marks are left out). */
+    fun allMarks(file: File): Map<Int, List<MarkInfo>> = PDDocument.load(file, memory()).use { document ->
+        (0 until document.numberOfPages).mapNotNull { index -> marksOf(document.getPage(index)).takeIf { it.isNotEmpty() }?.let { index to it } }.toMap()
+    }
+
+    /** The topmost mark at [x], [y] (page fractions), if any. */
+    fun markAt(file: File, pageIndex: Int, x: Float, y: Float): MarkInfo? = hit(marks(file, pageIndex), x, y)
+
+    /** The topmost of [marks] under the point, with a little slack for thin marks. */
+    fun hit(marks: List<MarkInfo>, x: Float, y: Float, slack: Float = 0.01f): MarkInfo? =
+        marks.lastOrNull { x in it.rect.left - slack..it.rect.right + slack && y in it.rect.top - slack..it.rect.bottom + slack }
+
+    /**
+     * Moves or resizes one of PDFoundry's marks to [rect] (page fractions). Only `/Rect` and the mark's
+     * geometry (ink paths, line ends) change: the appearance is kept as it is and fitted to the new rect
+     * by every viewer, so an image is never redrawn.
+     */
+    fun moveMark(file: File, pageIndex: Int, id: String, rect: RectF) = edit(file) { document ->
+        val page = document.getPage(pageIndex)
+        val annotation = page.annotation(id) ?: throw PdfException("This mark is no longer in the document.")
+        if (!Annotations.isMovable(annotation)) throw PdfException("This mark can't be moved.")
+        val frame = PageFrame(page)
+        val old = annotation.rectangle ?: throw PdfException("This mark can't be moved.")
+        val new = frame.userRect(rect)
+        if (new.width < 1f || new.height < 1f) throw PdfException("That is too small.")
+        val sx = if (old.width > 0f) new.width / old.width else 1f
+        val sy = if (old.height > 0f) new.height / old.height else 1f
+        fun mapped(values: FloatArray) = COSArray().apply {
+            values.forEachIndexed { i, v -> add(COSFloat(if (i % 2 == 0) new.lowerLeftX + (v - old.lowerLeftX) * sx else new.lowerLeftY + (v - old.lowerLeftY) * sy)) }
+        }
+        val dict = annotation.cosObject
+        val inkList = COSName.getPDFName("InkList")
+        (dict.getDictionaryObject(inkList) as? COSArray)?.let { list ->
+            val moved = COSArray()
+            for (i in 0 until list.size()) (list.getObject(i) as? COSArray)?.let { moved.add(mapped(it.toFloatArray())) }
+            dict.setItem(inkList, moved)
+        }
+        (dict.getDictionaryObject(COSName.L) as? COSArray)?.let { dict.setItem(COSName.L, mapped(it.toFloatArray())) }
+        annotation.rectangle = new
+        annotation.setModifiedDate(java.util.Calendar.getInstance())
+    }
+
+    /** Deletes a mark (any kind PDFoundry knows, made here or not), and its popup. */
+    fun deleteMark(file: File, pageIndex: Int, id: String) = edit(file) { document ->
+        val page = document.getPage(pageIndex)
+        val annotation = page.annotation(id) ?: throw PdfException("This mark is no longer in the document.")
+        if (!Annotations.isDeletable(annotation)) throw PdfException("This mark can't be deleted here.")
+        val popup = annotation.cosObject.getDictionaryObject(COSName.getPDFName("Popup"))
+        // A new array: PdfBox's list view of /Annots does not always remove from the array behind it.
+        val kept = page.annotations.filterNot { it.cosObject == annotation.cosObject || (popup != null && it.cosObject == popup) }
+        page.cosObject.setItem(COSName.ANNOTS, COSArray().apply { kept.forEach { add(it.cosObject) } })
     }
 
     // endregion
@@ -621,7 +901,8 @@ object PdfEngine {
                     readOnly = field.isReadOnly,
                     widget = index,
                     labels = labels,
-                    checked = (kind == FieldKind.Checkbox || kind == FieldKind.Radio) && checkedOf(widget)
+                    checked = (kind == FieldKind.Checkbox || kind == FieldKind.Radio) && checkedOf(widget),
+                    tooltip = runCatching { field.alternateFieldName }.getOrNull()
                 )
             }
         }

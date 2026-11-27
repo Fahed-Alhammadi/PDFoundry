@@ -4,7 +4,7 @@ import VisionKit
 
 /// A tool on the Tools tab: something done to whole files.
 enum PDFTool: CaseIterable, Identifiable {
-    case scan, photos, merge, extract, split, protect
+    case scan, photos, exportImages, merge, extract, split, protect, compress, redact, makeSearchable, pageNumbers, watermark
 
     var id: Self { self }
 
@@ -12,10 +12,16 @@ enum PDFTool: CaseIterable, Identifiable {
         switch self {
         case .scan: "Scan Document"
         case .photos: "Create from Photos"
+        case .exportImages: "Export as Images"
         case .merge: "Merge PDFs"
         case .extract: "Extract Pages"
         case .split: "Split PDF"
         case .protect: "Password-protect"
+        case .compress: "Compress"
+        case .redact: "Redact"
+        case .makeSearchable: "Make Searchable"
+        case .pageNumbers: "Page Numbers"
+        case .watermark: "Watermark"
         }
     }
 
@@ -23,10 +29,16 @@ enum PDFTool: CaseIterable, Identifiable {
         switch self {
         case .scan: "Turn paper into a PDF"
         case .photos: "Make a PDF from pictures"
+        case .exportImages: "Save pages as pictures"
         case .merge: "Join documents into one"
         case .extract: "Save pages as a new PDF"
         case .split: "Make several PDFs from one"
         case .protect: "Lock a PDF with a password"
+        case .compress: "Make a PDF smaller"
+        case .redact: "Black out text for good"
+        case .makeSearchable: "Find text in scanned pages"
+        case .pageNumbers: "Number every page"
+        case .watermark: "Stamp text across pages"
         }
     }
 
@@ -34,20 +46,46 @@ enum PDFTool: CaseIterable, Identifiable {
         switch self {
         case .scan: "document.viewfinder"
         case .photos: "photo.on.rectangle"
+        case .exportImages: "photo.stack"
         case .merge: "arrow.triangle.merge"
         case .extract: "arrow.up.doc"
         case .split: "scissors"
         case .protect: "lock.doc"
+        case .compress: "arrow.down.right.and.arrow.up.left"
+        case .redact: "rectangle.dashed.badge.record"
+        case .makeSearchable: "text.viewfinder"
+        case .pageNumbers: "number"
+        case .watermark: "seal"
         }
     }
 
     var section: ToolSection {
         switch self {
-        case .scan, .photos: .create
+        case .scan, .photos, .exportImages: .create
         case .merge, .extract, .split: .combine
-        case .protect: .protect
+        case .protect, .compress, .redact: .protect
+        case .makeSearchable, .pageNumbers, .watermark: .enhance
         }
     }
+
+    /// Tools that change a document open it in the reader, with the tool on top, so the change is an ordinary
+    /// edit (Undo, Revert, saved straight away, the password kept).
+    var readerTool: ReaderTool? {
+        switch self {
+        case .redact: .redact
+        case .makeSearchable: .makeSearchable
+        case .pageNumbers: .pageNumbers
+        case .watermark: .watermark
+        default: nil
+        }
+    }
+}
+
+/// A tool the reader opens on top of a document: from the Tools tab or the reader's More menu.
+enum ReaderTool: Identifiable, Hashable {
+    case redact, makeSearchable, pageNumbers, watermark
+
+    var id: Self { self }
 }
 
 /// The groups on the Tools tab. A group without tools yet is not shown.
@@ -70,7 +108,8 @@ enum ToolSection: CaseIterable, Identifiable {
         switch self {
         case .create: Brand.ember
         case .combine: Brand.steel
-        case .protect, .enhance: Brand.graphite
+        case .protect: Brand.graphite
+        case .enhance: Brand.emberDeep
         }
     }
 
@@ -99,6 +138,8 @@ struct ToolsView: View {
     @State private var extractSource: PDFItem?
     @State private var splitSource: PDFItem?
     @State private var protectSource: PDFItem?
+    @State private var compressSource: PDFItem?
+    @State private var exportSource: PDFItem?
     @State private var confirmation: String?
     @State private var errorMessage: String?
     @State private var confirmationTask: Task<Void, Never>?
@@ -161,7 +202,9 @@ struct ToolsView: View {
                 // Merge can't use protected files. Protect works on the real file, so one from Files is opened
                 // in place (and listed), never a copy that would leave the real file unprotected.
                 allowsLocked: request.tool != .merge,
-                opensInPlace: request.tool == .protect
+                // Tools that change the real file open one from Files in place, never a copy.
+                opensInPlace: request.tool == .protect || request.tool.readerTool != nil,
+                changeVerb: request.tool == .protect ? "protected" : "changed"
             ) { items in
                 chosen = (request.tool, items)
             }
@@ -198,6 +241,14 @@ struct ToolsView: View {
                 }
             }
         }
+        .sheet(item: $compressSource) { source in
+            CompressView(item: source) { created in
+                show(confirmation: "Saved “\(created.name)” in Documents.")
+            }
+        }
+        .sheet(item: $exportSource) { source in
+            ExportImagesView(item: source)
+        }
         .alert("Something Went Wrong", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
             Button("OK", role: .cancel) {}
         } message: {
@@ -226,7 +277,7 @@ struct ToolsView: View {
         switch tool {
         case .scan: showScanner = true
         case .photos: showPhotoPicker = true
-        case .merge, .extract, .split, .protect: picker = PickerRequest(tool: tool)
+        default: picker = PickerRequest(tool: tool)
         }
     }
 
@@ -239,6 +290,10 @@ struct ToolsView: View {
         case .extract: extractSource = items.first
         case .split: splitSource = items.first
         case .protect: protectSource = items.first
+        case .compress: compressSource = items.first
+        case .exportImages: exportSource = items.first
+        case let tool where tool.readerTool != nil:
+            if let item = items.first, let readerTool = tool.readerTool { store.open(item.url, with: readerTool) }
         default: break
         }
     }

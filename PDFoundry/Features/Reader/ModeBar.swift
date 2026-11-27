@@ -14,23 +14,34 @@ struct ModeBar: View {
     let onSignature: () -> Void
     let onInitials: () -> Void
     let onDate: () -> Void
+    var onApplyRedactions: () -> Void = {}
 
     @Environment(\.dynamicTypeSize) private var typeSize
     @Namespace private var glass
 
     /// Highlight colours, the same on every platform.
+    /// Solid colours, already mixed with white: PDFKit drops a colour's transparency when it writes a highlight, so a
+    /// see-through colour looked paler when made than after the file was opened again.
     static let highlights: [(name: String, color: UIColor)] = [
-        ("Yellow", .systemYellow.withAlphaComponent(0.5)),
-        ("Green", .systemGreen.withAlphaComponent(0.4)),
-        ("Pink", .systemPink.withAlphaComponent(0.4)),
-        ("Blue", .systemBlue.withAlphaComponent(0.35)),
+        ("Yellow", onWhite(.systemYellow, 0.5)),
+        ("Green", onWhite(.systemGreen, 0.4)),
+        ("Pink", onWhite(.systemPink, 0.4)),
+        ("Blue", onWhite(.systemBlue, 0.35)),
     ]
+
+    /// `color` at `alpha` over white, as one solid colour (Light Mode values, so it doesn't change with appearance).
+    static func onWhite(_ color: UIColor, _ alpha: CGFloat) -> UIColor {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        color.resolvedColor(with: UITraitCollection(userInterfaceStyle: .light)).getRed(&r, green: &g, blue: &b, alpha: &a)
+        func mix(_ c: CGFloat) -> CGFloat { c * alpha + (1 - alpha) }
+        return UIColor(red: mix(r), green: mix(g), blue: mix(b), alpha: 1)
+    }
 
     var body: some View {
         GlassEffectContainer(spacing: 8) {
             HStack(spacing: 8) {
                 if model.toolMode != .none {
-                    RoundBarButton(title: closeTitle, symbol: "xmark") { model.toolMode = .none }
+                    RoundBarButton(title: closeTitle, symbol: "xmark") { model.closeToolMode() }
                         .glassEffectID("close", in: glass)
                 }
 
@@ -51,7 +62,11 @@ struct ModeBar: View {
     }
 
     private var closeTitle: String {
-        model.toolMode == .markup ? "Close Markup" : "Close Fill & Sign"
+        switch model.toolMode {
+        case .markup: "Close Markup"
+        case .redact: "Close Redact"
+        default: "Close Fill & Sign"
+        }
     }
 
     /// The first layout that fits: titles at their size, smaller titles, Check and Cross folded into one Mark
@@ -96,15 +111,7 @@ struct ModeBar: View {
                 BarItem("Pages", symbol: "square.grid.2x2", action: onPages),
             ]
         case .markup:
-            [
-                BarItem("Highlight", symbol: "highlighter", hint: "Shows the colours", menu: Self.highlights.map { highlight in
-                    BarChoice(title: highlight.name) { model.markup(.highlight, color: highlight.color) }
-                }),
-                BarItem("Underline", symbol: "underline") { model.markup(.underline, color: .systemRed) },
-                BarItem("Strikethrough", symbol: "strikethrough") { model.markup(.strikeOut, color: .systemRed) },
-                BarItem("Text", symbol: "textformat", action: onText),
-                BarItem("Draw", symbol: "scribble.variable") { model.beginDrawing() },
-            ]
+            markupItems(folded: foldMarks)
         case .fillSign:
             [
                 BarItem("Signature", symbol: "signature", action: onSignature),
@@ -112,7 +119,48 @@ struct ModeBar: View {
                 BarItem("Text", symbol: "textformat", action: onText),
                 BarItem("Date", symbol: "calendar", action: onDate),
             ] + markItems(folded: foldMarks)
+        case .redact:
+            [
+                BarItem("Selected Text", symbol: "text.viewfinder") { model.addRedactionsForSelection() },
+                BarItem(model.pendingRedactionCount == 0 ? "Apply" : "Apply (\(model.pendingRedactionCount))",
+                        symbol: "checkmark.rectangle.fill", action: onApplyRedactions)
+                    .disabled(model.pendingRedactionCount == 0),
+            ]
         }
+    }
+
+    /// Markup's tools. When the bar is short of room, Underline, Strikethrough, Comment and Redact fold into More.
+    private func markupItems(folded: Bool) -> [BarItem] {
+        let underline = BarItem("Underline", symbol: "underline") { model.markup(.underline, color: .systemRed) }
+        let strike = BarItem("Strikethrough", symbol: "strikethrough") { model.markup(.strikeOut, color: .systemRed) }
+        let comment = BarItem("Comment", symbol: "text.bubble") { model.beginComment() }
+        let redact = BarItem("Redact", symbol: "rectangle.dashed.badge.record") { model.beginRedaction() }
+        let leading = [
+            BarItem("Highlight", symbol: "highlighter", hint: "Shows the colours", menu: Self.highlights.map { highlight in
+                BarChoice(title: highlight.name) { model.markup(.highlight, color: highlight.color) }
+            }),
+        ]
+        let middle = [
+            BarItem("Text", symbol: "textformat", action: onText),
+            BarItem("Draw", symbol: "scribble.variable") { model.beginDrawing() },
+            shapesItem,
+        ]
+        guard folded else { return leading + [underline, strike] + middle + [comment, redact] }
+        let more = [underline, strike, comment, redact].map { item in
+            BarChoice(title: item.title, symbol: item.symbol, action: item.action)
+        }
+        return leading + middle + [BarItem("More", symbol: "ellipsis.circle", hint: "Shows more tools", menu: more)]
+    }
+
+    /// Shapes: the four shapes, then the stroke colour (graphite to start with).
+    private var shapesItem: BarItem {
+        let kinds = ShapeKind.allCases.map { kind in
+            BarChoice(title: kind.title, symbol: kind.symbol) { model.beginShape(kind, color: model.shapeColor) }
+        }
+        let colors = ShapeKind.colors.map { entry in
+            BarChoice(title: entry.name, section: 1, checked: entry.color == model.shapeColor) { model.shapeColor = entry.color }
+        }
+        return BarItem("Shapes", symbol: "square.on.circle", hint: "Shows the shapes and colours", menu: kinds + colors)
     }
 
     /// Check and Cross: two buttons, or one Mark menu when the bar is short of room.
@@ -131,6 +179,9 @@ struct ModeBar: View {
 private struct BarChoice {
     let title: String
     var symbol: String?
+    /// Choices are grouped by section, with a divider between groups.
+    var section = 0
+    var checked = false
     let action: () -> Void
 }
 
@@ -141,6 +192,13 @@ private struct BarItem {
     var action: () -> Void = {}
     var menu: [BarChoice]?
     var hint = ""
+    var isDisabled = false
+
+    func disabled(_ value: Bool) -> BarItem {
+        var copy = self
+        copy.isDisabled = value
+        return copy
+    }
 
     init(_ title: String, symbol: String, action: @escaping () -> Void) {
         self.title = title
@@ -161,8 +219,11 @@ private struct BarItem {
         Group {
             if let menu {
                 Menu {
-                    ForEach(menu, id: \.title) { choice in
-                        if let symbol = choice.symbol {
+                    ForEach(Array(menu.enumerated()), id: \.element.title) { index, choice in
+                        if index > 0, menu[index - 1].section != choice.section { Divider() }
+                        if choice.checked {
+                            Button(choice.title, systemImage: "checkmark", action: choice.action)
+                        } else if let symbol = choice.symbol {
                             Button(choice.title, systemImage: symbol, action: choice.action)
                         } else {
                             Button(choice.title, action: choice.action)
@@ -177,6 +238,8 @@ private struct BarItem {
                     .buttonStyle(.plain)
             }
         }
+        .disabled(isDisabled)
+        .opacity(isDisabled ? 0.4 : 1)
         .tint(.primary)
         .accessibilityLabel(title)
         .accessibilityShowsLargeContentViewer {

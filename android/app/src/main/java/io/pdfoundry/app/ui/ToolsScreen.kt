@@ -21,6 +21,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.CallSplit
 import androidx.compose.material.icons.automirrored.filled.MergeType
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.BrandingWatermark
+import androidx.compose.material.icons.filled.Compress
+import androidx.compose.material.icons.filled.FormatColorFill
+import androidx.compose.material.icons.filled.FormatListNumbered
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.automirrored.filled.ManageSearch
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
 import androidx.compose.material.icons.filled.DocumentScanner
@@ -72,15 +78,34 @@ enum class ToolSection(val title: String) {
     Enhance("Enhance")
 }
 
-/** The whole-file tools. Later features (compress, OCR…) join a section here. */
+/**
+ * The whole-file tools. Redact, Make Searchable, Page Numbers and Watermark open the picked document in
+ * the reader with the tool on top ([readerStart]); the others make new files.
+ */
 enum class PdfTool(val title: String, val detail: String, val icon: ImageVector, val tint: Color, val section: ToolSection) {
     Scan("Scan Document", "Turn paper into a PDF with the camera.", Icons.Filled.DocumentScanner, Brand.Ember, ToolSection.Create),
     Photos("Create from Photos", "Make a PDF from pictures in your gallery.", Icons.Filled.PhotoLibrary, Color(0xFFD9822B), ToolSection.Create),
+    ExportImages("Export as Images", "Save pages as pictures.", Icons.Filled.Image, Color(0xFF2E7D6B), ToolSection.Create),
     Merge("Merge PDFs", "Combine documents into one, in your order.", Icons.AutoMirrored.Filled.MergeType, Brand.Steel, ToolSection.Combine),
     Extract("Extract Pages", "Save chosen pages as a new document.", Icons.Filled.FileUpload, Color(0xFF5B6478), ToolSection.Combine),
     Split("Split PDF", "Make several PDFs from one.", Icons.AutoMirrored.Filled.CallSplit, Color(0xFFB8441A), ToolSection.Combine),
-    Protect("Password-protect", "Lock a PDF with a password.", Icons.Filled.Lock, Brand.Graphite, ToolSection.Protect)
+    Protect("Password-protect", "Lock a PDF with a password.", Icons.Filled.Lock, Brand.Graphite, ToolSection.Protect),
+    Compress("Compress", "Make a PDF smaller.", Icons.Filled.Compress, Color(0xFF4A6FA5), ToolSection.Protect),
+    Redact("Redact", "Black out text for good.", Icons.Filled.FormatColorFill, Color(0xFF1F2330), ToolSection.Protect),
+    MakeSearchable("Make Searchable", "Find text in scanned pages.", Icons.AutoMirrored.Filled.ManageSearch, Color(0xFF7A4FB5), ToolSection.Enhance),
+    PageNumbers("Page Numbers", "Number every page.", Icons.Filled.FormatListNumbered, Color(0xFFC0602A), ToolSection.Enhance),
+    Watermark("Watermark", "Stamp text across pages.", Icons.Filled.BrandingWatermark, Color(0xFF8C5A3C), ToolSection.Enhance)
 }
+
+/** The reader tool a tile opens the document with, or null for a tool that makes new files. */
+val PdfTool.readerStart: ReaderStart?
+    get() = when (this) {
+        PdfTool.Redact -> ReaderStart.Redact
+        PdfTool.MakeSearchable -> ReaderStart.MakeSearchable
+        PdfTool.PageNumbers -> ReaderStart.PageNumbers
+        PdfTool.Watermark -> ReaderStart.Watermark
+        else -> null
+    }
 
 /** The Tools tab's sections in order, each with its tools; a section with no tool yet is left out. */
 fun toolCatalog(scanner: Boolean): List<Pair<ToolSection, List<PdfTool>>> {
@@ -94,7 +119,7 @@ private fun scannerAvailable(context: android.content.Context): Boolean =
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ToolsScreen(onOpen: (PdfItem) -> Unit) {
+fun ToolsScreen(onOpen: (PdfItem) -> Unit, onOpenWith: (PdfItem, ReaderStart) -> Unit = { item, _ -> onOpen(item) }) {
     val context = LocalContext.current
     val store = context.app.store
     val scope = rememberCoroutineScope()
@@ -108,7 +133,7 @@ fun ToolsScreen(onOpen: (PdfItem) -> Unit) {
         }
     }
 
-    val actions = rememberDocumentActions(snackbar) { file -> announce(file, "“${file.nameWithoutExtension}” is now in Documents.") }
+    val actions = rememberDocumentActions(snackbar, onCreated = { file -> announce(file, "“${file.nameWithoutExtension}” is now in Documents.") })
     val catalog = remember { toolCatalog(scannerAvailable(context)) }
 
     var picking by remember { mutableStateOf<PdfTool?>(null) }
@@ -123,6 +148,9 @@ fun ToolsScreen(onOpen: (PdfItem) -> Unit) {
     /** The document Password-protect is asking a password for (never a temporary copy). */
     var protecting by remember { mutableStateOf<PickedDocument?>(null) }
     var alreadyProtected by remember { mutableStateOf<PickedDocument?>(null) }
+    /** The document being compressed or exported, with its password if it has one. The sheet owns a temporary copy. */
+    var compressing by remember { mutableStateOf<Pair<PickedDocument, String?>?>(null) }
+    var exporting by remember { mutableStateOf<Pair<PickedDocument, String?>?>(null) }
 
     // Leaving the tab (or a document arriving from another app) with the merge sheet open.
     val waitingMerge by rememberUpdatedState(mergeTargets)
@@ -163,7 +191,7 @@ fun ToolsScreen(onOpen: (PdfItem) -> Unit) {
                         when (tool) {
                             PdfTool.Scan -> actions.scan()
                             PdfTool.Photos -> actions.createFromPhotos()
-                            PdfTool.Merge, PdfTool.Extract, PdfTool.Split, PdfTool.Protect -> picking = tool
+                            else -> picking = tool
                         }
                     }
                 }
@@ -177,6 +205,12 @@ fun ToolsScreen(onOpen: (PdfItem) -> Unit) {
                 PdfTool.Merge -> "Choose documents to merge"
                 PdfTool.Protect -> "Choose a document to protect"
                 PdfTool.Split -> "Choose a document to split"
+                PdfTool.Compress -> "Choose a document to compress"
+                PdfTool.ExportImages -> "Choose a document to export"
+                PdfTool.Redact -> "Choose a document to redact"
+                PdfTool.MakeSearchable -> "Choose a document to make searchable"
+                PdfTool.PageNumbers -> "Choose a document to number"
+                PdfTool.Watermark -> "Choose a document to watermark"
                 else -> "Choose a document"
             },
             multiple = tool == PdfTool.Merge,
@@ -188,22 +222,32 @@ fun ToolsScreen(onOpen: (PdfItem) -> Unit) {
                     tool == PdfTool.Merge -> mergeTargets = picked
                     first == null -> Unit
                     tool == PdfTool.Protect -> if (first.item.locked) alreadyProtected = first else protecting = first
+                    // Opened in the reader, which asks for a password itself.
+                    tool.readerStart != null -> onOpenWith(first.item, tool.readerStart!!)
                     first.item.locked -> unlocking = tool to first
                     tool == PdfTool.Split -> splitting = first to null
+                    tool == PdfTool.Compress -> compressing = first to null
+                    tool == PdfTool.ExportImages -> exporting = first to null
                     else -> extracting = first to null
                 }
             },
             onError = { message -> scope.launch { snackbar.showSnackbar(message) } },
             allowLocked = tool != PdfTool.Merge,
-            // Protecting a copy would leave the real file unprotected: the file is opened where it lives.
-            openInPlace = tool == PdfTool.Protect
+            // Protecting (or numbering, redacting…) a copy would leave the real file as it was: the file is
+            // opened where it lives.
+            openInPlace = tool == PdfTool.Protect || tool.readerStart != null
         )
     }
 
     unlocking?.let { (tool, document) ->
         UnlockDialog(document.item.name, document.file, onDismiss = { store.release(listOf(document)); unlocking = null }) { password ->
             unlocking = null
-            if (tool == PdfTool.Split) splitting = document to password else extracting = document to password
+            when (tool) {
+                PdfTool.Split -> splitting = document to password
+                PdfTool.Compress -> compressing = document to password
+                PdfTool.ExportImages -> exporting = document to password
+                else -> extracting = document to password
+            }
         }
     }
 
@@ -215,6 +259,17 @@ fun ToolsScreen(onOpen: (PdfItem) -> Unit) {
                 announce(first, if (parts.size == 1) "Saved “${first.nameWithoutExtension}” in Documents." else "Saved ${parts.size} files, “${first.nameWithoutExtension}” to “${parts.last().nameWithoutExtension}”, in Documents.")
             }
         }
+    }
+
+    compressing?.let { (document, password) ->
+        CompressSheet(document, password, onDismiss = { compressing = null }) { made ->
+            compressing = null
+            scope.launch { announce(made, "Saved “${made.nameWithoutExtension}” in Documents.") }
+        }
+    }
+
+    exporting?.let { (document, password) ->
+        ExportImagesSheet(document, password, onDismiss = { exporting = null }, onMessage = { scope.launch { snackbar.showSnackbar(it) } })
     }
 
     protecting?.let { document ->

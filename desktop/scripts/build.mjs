@@ -2,6 +2,7 @@
 // time (its worker, character maps, standard fonts and image decoders), so the window never needs the network.
 import { cpSync, mkdirSync, rmSync } from 'node:fs';
 import { build } from 'esbuild';
+import { copyOcrData } from './ocrdata.mjs';
 
 const production = process.env.NODE_ENV !== 'development';
 rmSync('out', { recursive: true, force: true });
@@ -15,7 +16,8 @@ const node = {
   sourcemap: !production,
   minify: production,
   logLevel: 'warning',
-  external: ['electron', 'electron-updater'],
+  // tesseract.js runs its own worker thread from its files on disk, so it ships as a package, not bundled.
+  external: ['electron', 'electron-updater', 'tesseract.js'],
   // import('electron-updater') (loaded only when an update is found) becomes a plain require(): Node's ESM loader
   // would not see the CommonJS getter exports of electron-updater.
   supported: { 'dynamic-import': false },
@@ -39,4 +41,8 @@ cpSync('assets/logo.png', 'out/ui/logo.png');
 const pdfjs = 'node_modules/pdfjs-dist';
 cpSync(`${pdfjs}/build/pdf.worker.min.mjs`, 'out/ui/pdf.worker.min.mjs');
 for (const dir of ['cmaps', 'standard_fonts', 'wasm']) cpSync(`${pdfjs}/${dir}`, `out/ui/pdfjs/${dir}`, { recursive: true });
+// The note icons pdf.js's annotation layer asks for while it lays out comments (the reader shows their appearance).
+cpSync(`${pdfjs}/web/images`, 'out/ui/pdfjs/images', { recursive: true, filter: (f) => f.endsWith('images') || /annotation-[a-z]+\.svg$/.test(f) });
+// Make Searchable's English and Arabic data (resources/ocr in the packaged app).
+copyOcrData('out/ocr');
 console.log('Built to out/');

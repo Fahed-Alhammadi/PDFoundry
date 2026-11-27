@@ -27,15 +27,31 @@ struct PDFKitView: UIViewRepresentable {
         center.addObserver(context.coordinator, selector: #selector(Coordinator.fieldEditingEnded), name: UITextView.textDidEndEditingNotification, object: nil)
         center.addObserver(context.coordinator, selector: #selector(Coordinator.annotationHit), name: .PDFViewAnnotationHit, object: view)
 
+        center.addObserver(context.coordinator, selector: #selector(Coordinator.viewportChanged), name: .PDFViewScaleChanged, object: view)
+
         let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.tapped(_:)))
         tap.delegate = context.coordinator
         view.addGestureRecognizer(tap)
+
+        let pan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.dragged(_:)))
+        pan.maximumNumberOfTouches = 1
+        pan.delegate = context.coordinator
+        view.addGestureRecognizer(pan)
+        context.coordinator.boxPan = pan
+
+        context.coordinator.watchScrolling(of: view)
         return view
     }
 
     func updateUIView(_ view: PDFView, context: Context) {
         if view.document !== model.document {
             view.document = model.document
+        }
+        context.coordinator.setDragsBoxes(model.dragsBoxes, in: view)
+        let toolOn = model.mode != .reading || model.toolMode == .redact || model.pendingRedactionCount > 0
+        // After this update, when the view is in the navigation controller's hierarchy.
+        DispatchQueue.main.async { [coordinator = context.coordinator] in
+            coordinator.setSwipeBack(enabled: !toolOn, from: view)
         }
         let direction: PDFDisplayDirection = horizontal ? .horizontal : .vertical
         if view.displayDirection != direction {
@@ -46,11 +62,89 @@ struct PDFKitView: UIViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(model: model) }
 
+    static func dismantleUIView(_ view: PDFView, coordinator: Coordinator) {
+        coordinator.setSwipeBack(enabled: true, from: view)
+    }
+
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         private let model: ReaderModel
+        private var scrollObservation: NSKeyValueObservation?
 
         init(model: ReaderModel) {
             self.model = model
+        }
+
+        /// Overlays drawn over the page (a selected mark, redaction boxes) follow the page as it scrolls.
+        func watchScrolling(of view: PDFView) {
+            DispatchQueue.main.async { [weak self, weak view] in
+                guard let self, let view, let scroll = Self.scrollView(in: view) else { return }
+                scrollObservation = scroll.observe(\.contentOffset, options: [.new]) { [weak self] _, _ in
+                    MainActor.assumeIsolated { self?.viewportChanged() }
+                }
+            }
+        }
+
+        private static func scrollView(in view: UIView) -> UIScrollView? {
+            for subview in view.subviews {
+                if let scroll = subview as? UIScrollView { return scroll }
+                if let found = scrollView(in: subview) { return found }
+            }
+            return nil
+        }
+
+        @objc func viewportChanged() {
+            model.viewportTick &+= 1
+        }
+
+        weak var boxPan: UIPanGestureRecognizer?
+        private var dragStart: CGPoint?
+
+        /// While shapes or redaction boxes are drawn, one finger draws and the page scrolls with two.
+        func setDragsBoxes(_ on: Bool, in view: PDFView) {
+            boxPan?.isEnabled = on
+            Self.scrollView(in: view)?.panGestureRecognizer.minimumNumberOfTouches = on ? 2 : 1
+        }
+
+        @objc func dragged(_ recognizer: UIPanGestureRecognizer) {
+            guard let view = recognizer.view else { return }
+            let point = recognizer.location(in: view)
+            switch recognizer.state {
+            case .began:
+                // The pan is recognised only after the finger has moved: start where it went down.
+                let start = touchDown ?? point
+                dragStart = start
+                model.boxDraft = (start, point)
+            case .changed:
+                if let dragStart { model.boxDraft = (dragStart, point) }
+            case .ended:
+                if let dragStart { model.finishBox(from: dragStart, to: point) }
+                dragStart = nil
+            default:
+                dragStart = nil
+                model.boxDraft = nil
+            }
+        }
+
+        func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
+            recognizer === boxPan ? model.dragsBoxes : true
+        }
+
+        /// Where the finger went down, before the pan was recognised.
+        private var touchDown: CGPoint?
+
+        func gestureRecognizer(_ recognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            if recognizer === boxPan { touchDown = touch.location(in: recognizer.view) }
+            return true
+        }
+
+        /// The navigation controller's swipe-back gestures (edge and, since iOS 26, anywhere on the content) are off
+        /// while a tool draws or places on the page, so a sideways drag never leaves the reader.
+        func setSwipeBack(enabled: Bool, from view: UIView) {
+            var responder: UIResponder? = view
+            while let current = responder, !(current is UIViewController) { responder = current.next }
+            guard let navigation = (responder as? UIViewController)?.navigationController else { return }
+            navigation.interactivePopGestureRecognizer?.isEnabled = enabled
+            navigation.interactiveContentPopGestureRecognizer?.isEnabled = enabled
         }
 
         @objc func pageChanged() {

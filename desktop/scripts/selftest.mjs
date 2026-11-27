@@ -22,9 +22,9 @@ const args = ['.', ...(process.platform === 'linux' && process.env.CI ? ['--no-s
 
 const child = spawn(electron, args, { env, stdio: 'inherit' });
 const timer = setTimeout(() => {
-  console.error('The self-test did not finish within 3 minutes.');
+  console.error('The self-test did not finish within 5 minutes.');
   child.kill();
-}, 180_000);
+}, 300_000);
 child.on('exit', () => {
   clearTimeout(timer);
   let failed = true;
@@ -32,7 +32,7 @@ child.on('exit', () => {
     const { checks, error } = JSON.parse(readFileSync(result, 'utf8'));
     for (const c of checks) console.log(`${c.pass ? 'ok  ' : 'FAIL'} ${c.name}${c.pass || !c.detail ? '' : `\n     ${c.detail}`}`);
     if (error) console.error(error);
-    failed = !!error || checks.some((c) => !c.pass) || (!shots && !reopen && checks.length < 62);
+    failed = !!error || checks.some((c) => !c.pass) || (!shots && !reopen && checks.length < 95);
     console.log(failed ? 'Self-test failed.' : `${checks.length} checks passed.`);
   } else console.error('The app closed without a result.');
   rmSync(work, { recursive: true, force: true });

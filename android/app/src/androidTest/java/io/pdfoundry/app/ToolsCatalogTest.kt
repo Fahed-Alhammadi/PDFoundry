@@ -4,6 +4,8 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.pdfoundry.app.data.RangeResult
 import io.pdfoundry.app.ui.PasswordWarning
 import io.pdfoundry.app.ui.PdfTool
+import io.pdfoundry.app.ui.ReaderStart
+import io.pdfoundry.app.ui.readerStart
 import io.pdfoundry.app.ui.SplitMode
 import io.pdfoundry.app.ui.ToolSection
 import io.pdfoundry.app.ui.canProtect
@@ -20,18 +22,30 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class ToolsCatalogTest {
     @Test
-    fun catalogShowsSplitAndProtect() {
+    fun catalogShowsEverySection() {
         assertEquals(
             listOf(
-                ToolSection.Create to listOf(PdfTool.Scan, PdfTool.Photos),
+                ToolSection.Create to listOf(PdfTool.Scan, PdfTool.Photos, PdfTool.ExportImages),
                 ToolSection.Combine to listOf(PdfTool.Merge, PdfTool.Extract, PdfTool.Split),
-                ToolSection.Protect to listOf(PdfTool.Protect)
+                ToolSection.Protect to listOf(PdfTool.Protect, PdfTool.Compress, PdfTool.Redact),
+                ToolSection.Enhance to listOf(PdfTool.MakeSearchable, PdfTool.PageNumbers, PdfTool.Watermark)
             ),
             toolCatalog(scanner = true)
         )
-        // Without Google's scanner, Scan is left out; Enhance has no tool yet and stays hidden.
-        assertEquals(listOf(PdfTool.Photos), toolCatalog(scanner = false).first().second)
-        assertFalse(toolCatalog(scanner = true).any { it.first == ToolSection.Enhance })
+        // Without Google's scanner, Scan is left out.
+        assertEquals(listOf(PdfTool.Photos, PdfTool.ExportImages), toolCatalog(scanner = false).first().second)
+        assertFalse(toolCatalog(scanner = false).any { PdfTool.Scan in it.second })
+        assertEquals("Save pages as pictures.", PdfTool.ExportImages.detail)
+        assertEquals("Make a PDF smaller.", PdfTool.Compress.detail)
+        assertEquals("Black out text for good.", PdfTool.Redact.detail)
+        assertEquals("Find text in scanned pages.", PdfTool.MakeSearchable.detail)
+        assertEquals("Number every page.", PdfTool.PageNumbers.detail)
+        assertEquals("Stamp text across pages.", PdfTool.Watermark.detail)
+        // The tools that change a document open it in the reader with the tool on top.
+        assertEquals(ReaderStart.Redact, PdfTool.Redact.readerStart)
+        assertEquals(ReaderStart.PageNumbers, PdfTool.PageNumbers.readerStart)
+        assertEquals(null, PdfTool.Compress.readerStart)
+        assertEquals(null, PdfTool.ExportImages.readerStart)
         assertEquals("Make several PDFs from one.", PdfTool.Split.detail)
         assertEquals("Lock a PDF with a password.", PdfTool.Protect.detail)
     }

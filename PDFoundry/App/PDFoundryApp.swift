@@ -40,6 +40,10 @@ struct RootView: View {
             tab = .documents
             store.openExternal(url)
         }
+        // A tool on the Tools tab opened a document in the reader: the reader lives on the Documents tab.
+        .onChange(of: store.pendingOpen) { _, url in
+            if url != nil { tab = .documents }
+        }
         .task { await store.start() }
     }
 }

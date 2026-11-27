@@ -220,6 +220,47 @@ textarea { width: 100%; resize: vertical; }
 .match { position: absolute; background: rgba(255, 196, 0, 0.42); border-radius: 2px; mix-blend-mode: multiply; pointer-events: none; }
 .busy .pages { opacity: 0.7; }
 
+/* Markup tools that work on the page itself (Shapes, Comment, Redact): the text can't be selected meanwhile. */
+.picking .page { cursor: crosshair; touch-action: none; }
+.picking .textLayer { pointer-events: none; }
+/* Redact: text can still be selected (its lines are marked); anywhere else a drag marks an area. */
+.redacting .page { cursor: crosshair; touch-action: none; }
+.redacting .textLayer span { cursor: text; }
+.redact-box { position: absolute; z-index: 2; border: 2px solid #d70015; background: rgba(215, 0, 21, 0.08); pointer-events: none; }
+.redact-box.drawing { border-style: dashed; }
+.redact-remove {
+  position: absolute; right: -9px; top: -9px; width: 18px; height: 18px; padding: 0; display: grid; place-items: center; pointer-events: auto;
+  border: 0; border-radius: 50%; background: #d70015; color: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+.apply-redactions { white-space: nowrap; }
+/* Comments (and other marks pdf.js draws on their own canvas) are shown by the form layer, as pictures only: clicks
+   go through to the page, where the reader selects them; pdf.js's own popups are not used. */
+.annotationLayer .mark-picture, .annotationLayer .mark-picture * { pointer-events: none !important; }
+.annotationLayer .popupAnnotation, .annotationLayer .popup { display: none !important; }
+.shape-preview { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+
+/* A selected mark: its box, corner handles (marks that can be resized) and a small menu above it. */
+.mark-selection { position: absolute; z-index: 3; border: 1.5px solid var(--ember); border-radius: 2px; background: rgba(226, 81, 27, 0.05); outline: none; }
+.mark-selection.movable { cursor: move; touch-action: none; }
+.mark-selection:focus-visible { box-shadow: 0 0 0 3px rgba(226, 81, 27, 0.3); }
+.mark-selection .corner {
+  position: absolute; width: 12px; height: 12px; border-radius: 50%; background: #fff; border: 2px solid var(--ember); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+.mark-selection .corner.nw { left: -7px; top: -7px; cursor: nwse-resize; }
+.mark-selection .corner.se { right: -7px; bottom: -7px; cursor: nwse-resize; }
+.mark-selection .corner.ne { right: -7px; top: -7px; cursor: nesw-resize; }
+.mark-selection .corner.sw { left: -7px; bottom: -7px; cursor: nesw-resize; }
+.mark-menu {
+  position: absolute; left: 50%; bottom: calc(100% + 10px); transform: translateX(-50%); display: flex; gap: 2px; padding: 3px;
+  border-radius: 10px; background: var(--surface); box-shadow: 0 0 0 1px var(--line), var(--shadow); cursor: default; white-space: nowrap;
+}
+.mark-selection.menu-below .mark-menu { bottom: auto; top: calc(100% + 10px); }
+.mark-menu button { display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px; border: 0; border-radius: 8px; background: none; font-size: 13px; font-weight: 550; }
+.mark-menu button:hover { background: var(--hover); }
+.mark-menu button.danger { color: var(--danger); }
+.comment-text { width: 100%; min-height: 110px; resize: vertical; }
+.spacer-left { margin-right: auto; }
+
 .placement { position: absolute; border: 1.5px dashed var(--ember); background: rgba(226, 81, 27, 0.06); cursor: move; touch-action: none; }
 .placement img { width: 100%; height: 100%; display: block; pointer-events: none; }
 .placement .handle {
@@ -229,7 +270,7 @@ textarea { width: 100%; resize: vertical; }
 
 .dock {
   position: absolute; left: 50%; bottom: 22px; transform: translateX(-50%); z-index: 5;
-  display: flex; align-items: center; gap: 6px; padding: 6px 8px; max-width: calc(100% - 32px);
+  display: flex; align-items: center; gap: 6px; padding: 6px 8px; max-width: calc(100% - 32px); overflow-x: auto; scrollbar-width: thin;
   border-radius: 16px; background: var(--surface); box-shadow: 0 0 0 1px var(--line), var(--shadow);
 }
 .tool {
@@ -410,6 +451,36 @@ button.row:hover { background: var(--hover); }
 .password-fields input { width: 100%; }
 .field-error { min-height: 18px; margin: 0; color: var(--danger); font-size: 13px; }
 .hint.warning { color: var(--ember-strong); font-weight: 500; }
+.split-options.inline { display: flex; flex-wrap: wrap; gap: 4px 22px; margin: 8px 0; }
+.split-options.inline .split-option { grid-template-columns: 18px auto; }
+
+/* Page Numbers and Watermark: the choices beside a live preview of the first page. */
+.dialog.page-numbers, .dialog.watermark { width: min(640px, calc(100vw - 32px)); }
+.sheet-with-preview { display: grid; grid-template-columns: 1fr 200px; gap: 20px; align-items: start; }
+.sheet-fields { display: grid; gap: 10px; }
+.sheet-row { display: grid; grid-template-columns: 84px 1fr; align-items: center; gap: 10px; }
+.sheet-row > span:first-child { color: var(--muted); font-size: 13px; }
+.sheet-check { display: flex; align-items: center; gap: 8px; }
+.quick-choices { display: flex; gap: 6px; flex-wrap: wrap; margin-left: 94px; }
+.chip { padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px; background: none; font-size: 12px; }
+.chip:hover { background: var(--hover); }
+.range { display: flex; align-items: center; gap: 8px; }
+.range input { flex: 1; accent-color: var(--ember); }
+.range-value { min-width: 38px; text-align: right; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.preview-page { position: relative; width: 200px; background: #fff; box-shadow: var(--page-shadow); overflow: hidden; }
+.preview-sheet { position: absolute; inset: 0; width: 100%; height: 100%; }
+.preview-overlay { position: absolute; inset: 0; container-type: size; }
+.preview-number { position: absolute; font: 400 var(--size)/1 Helvetica, Arial, sans-serif; color: #12141c; white-space: nowrap; }
+.preview-number.bottom { bottom: var(--edge-y); }
+.preview-number.top { top: var(--edge-y); }
+.preview-number.left { left: var(--edge-x); }
+.preview-number.right { right: var(--edge-x); }
+.preview-number.center { left: 50%; transform: translateX(-50%); }
+.preview-watermark {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%) rotate(var(--angle)); font-weight: 700; line-height: 1;
+  white-space: nowrap; font-family: Helvetica, Arial, "Noto Sans Arabic", sans-serif;
+}
+@media (max-width: 560px) { .sheet-with-preview { grid-template-columns: 1fr; } }
 .split-options { display: grid; gap: 10px; margin: 14px 0 8px; }
 .split-option { display: grid; grid-template-columns: 18px auto 1fr; align-items: center; gap: 10px; min-height: 32px; }
 .split-option input[type="radio"] { width: 16px; height: 16px; margin: 0; accent-color: var(--ember); }

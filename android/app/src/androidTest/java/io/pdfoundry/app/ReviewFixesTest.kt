@@ -102,7 +102,7 @@ class ReviewFixesTest {
     }
 
     private fun md5(file: File) = MessageDigest.getInstance("MD5").digest(file.readBytes()).joinToString("") { "%02x".format(it) }
-    private fun stamps(file: File, password: String) = PDDocument.load(file, password).use { it.getPage(0).resources.xObjectNames.count() }
+    private fun stamps(file: File, password: String) = PDDocument.load(file, password).use { it.getPage(0).annotations.count { a -> a.subtype == "Stamp" } }
 
     private fun waitUntil(done: () -> Boolean) {
         val deadline = System.currentTimeMillis() + 15_000

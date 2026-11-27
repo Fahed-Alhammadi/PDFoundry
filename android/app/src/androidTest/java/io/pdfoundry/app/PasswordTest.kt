@@ -92,7 +92,7 @@ class PasswordTest {
     private fun md5(file: File) = MessageDigest.getInstance("MD5").digest(file.readBytes()).joinToString("") { "%02x".format(it) }
 
     /** How many images (stamps) the first page holds, read with [password]. */
-    private fun stamps(file: File, password: String) = PDDocument.load(file, password).use { document -> document.getPage(0).resources.xObjectNames.count() }
+    private fun stamps(file: File, password: String) = PDDocument.load(file, password).use { document -> document.getPage(0).annotations.count { it.subtype == "Stamp" } }
 
     private fun reader(file: File): ReaderState = ReaderState(context.applicationContext, file, scope, store).also {
         states += it
@@ -257,7 +257,7 @@ class PasswordTest {
         assertFalse(PdfEngine.isProtected(file))
         state.stamp()
         assertFalse(PdfEngine.isProtected(file))
-        assertEquals(1, PDDocument.load(file).use { it.getPage(0).resources.xObjectNames.count() })
+        assertEquals(1, PDDocument.load(file).use { it.getPage(0).annotations.count { a -> a.subtype == "Stamp" } })
     }
 
     @Test

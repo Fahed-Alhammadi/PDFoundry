@@ -16,8 +16,9 @@ import { pathToFileURL } from 'node:url';
 import { BrowserWindow, Menu, app, dialog, ipcMain, nativeTheme, net, protocol, session, shell } from 'electron';
 import type { MenuItemConstructorOptions } from 'electron';
 import { Store, cleanName } from './store.ts';
-import type { InkKind, Settings } from './store.ts';
+import type { InkKind, PartExtension, Settings } from './store.ts';
 import { REPO, Updater } from './updater.ts';
+import { OcrEngine, ocrPaths } from './ocr.ts';
 import { welcomeGuide } from '../core/pdf.ts';
 
 const OUT = __dirname;
@@ -45,6 +46,10 @@ let store: Store;
 const pending: string[] = [];
 /** Does the open document have changes that are not saved? Reported by the window. */
 let unsaved = false;
+/** How many areas the open document has marked for redaction and not applied. Closing the window asks about them first. */
+let redactions = 0;
+/** Make Searchable's engine, started the first time it is used. */
+let ocr: OcrEngine | null = null;
 /** Set once the user has answered the "save your changes?" question, so the window may really close. */
 let closing = false;
 /** Development only (the self-test): the answer to the next save or open dialog, so no system dialog is shown. */
@@ -201,14 +206,15 @@ const handlers: Record<string, Handler> = {
     return path.resolve(folder);
   },
   /** Which of Split's part names are taken in the picked folder. */
-  partsExisting: (folder: string, names: string[]) => store.existing(pickedFolder(folder), Array.isArray(names) ? names.filter((n) => typeof n === 'string') : []),
+  partsExisting: (folder: string, names: string[], extension?: unknown) =>
+    store.existing(pickedFolder(folder), Array.isArray(names) ? names.filter((n) => typeof n === 'string') : [], (extension ?? 'pdf') as PartExtension),
   /**
    * Writes Split's parts into the picked folder; `keepBoth` numbers names that are taken. The store itself refuses to
    * write over `keep` (the source), the open document and every recent file. The parts are not listed.
    */
-  saveParts: (folder: string, parts: { name: string; bytes: Uint8Array }[], keepBoth: boolean, keep?: string[]) => {
+  saveParts: (folder: string, parts: { name: string; bytes: Uint8Array }[], keepBoth: boolean, keep?: string[], extension?: unknown) => {
     if (!Array.isArray(parts) || !parts.every((p) => p && typeof p.name === 'string' && p.bytes instanceof Uint8Array)) throw new Error('There is nothing to save.');
-    return store.saveParts(pickedFolder(folder), parts, keepBoth === true, Array.isArray(keep) ? keep.filter((k) => typeof k === 'string') : []);
+    return store.saveParts(pickedFolder(folder), parts, keepBoth === true, Array.isArray(keep) ? keep.filter((k) => typeof k === 'string') : [], (extension ?? 'pdf') as PartExtension);
   },
   forget: (file: string) => store.forget(file),
   clearRecent: () => {
@@ -233,8 +239,9 @@ const handlers: Record<string, Handler> = {
   },
 
   // The open document, as the window reports it: shown in the title bar, and asked about before closing.
-  setDocument: (file: string | null, edited: boolean) => {
+  setDocument: (file: string | null, edited: boolean, marked?: unknown) => {
     unsaved = !!file && edited === true;
+    redactions = file && typeof marked === 'number' && Number.isInteger(marked) && marked > 0 ? marked : 0;
     store.setCurrent(file); // kept on the recent list, so it can always be saved
     if (!win) return;
     const name = typeof file === 'string' ? path.basename(file) : '';
@@ -248,6 +255,24 @@ const handlers: Record<string, Handler> = {
   closeNow: () => {
     closing = true;
     unsaved = false;
+    redactions = 0;
+    win?.close();
+  },
+  /** The window dealt with its redactions after the close question: closing goes on (and asks about unsaved changes). */
+  // Make Searchable: the words on one page (a PNG the window drew at 300 dpi), recognised here with the bundled
+  // English and Arabic data. Nothing goes online. ocrStop cancels a page being read (it then fails) and frees memory.
+  ocrPage: async (png: unknown) => {
+    if (!(png instanceof Uint8Array) || png.length < 24) throw new Error('There is no page to read.');
+    ocr ??= new OcrEngine(ocrPaths({ appPath: app.getAppPath(), packaged: app.isPackaged, resourcesPath: process.resourcesPath }));
+    const found = await ocr.recognize([{ index: 0, png }], () => {}, () => false);
+    return found?.[0].words ?? [];
+  },
+  ocrStop: async () => {
+    const engine = ocr;
+    ocr = null;
+    await engine?.terminate();
+  },
+  closeWindow: () => {
     win?.close();
   },
 
@@ -429,7 +454,22 @@ function createWindow(): void {
   win.once('ready-to-show', () => win?.show());
   // Closing the window (or quitting) with unsaved changes asks first, like any document app.
   win.on('close', (e) => {
-    if (closing || !unsaved || !win) return;
+    if (closing || !win) return;
+    if (redactions > 0) {
+      // Areas marked for redaction are only in the window: apply them (then the save question) or leave them.
+      e.preventDefault();
+      const choice = dialog.showMessageBoxSync(win, {
+        type: 'question',
+        message: 'Apply the redactions?',
+        buttons: ['Apply', 'Discard', 'Cancel'],
+        defaultId: 0,
+        cancelId: 2,
+        noLink: true,
+      });
+      if (choice < 2) send('redactionsOnClose', choice === 0 ? 'apply' : 'discard'); // the window calls closeWindow
+      return;
+    }
+    if (!unsaved) return;
     e.preventDefault();
     const answer = dialog.showMessageBoxSync(win, {
       type: 'question',
@@ -527,4 +567,6 @@ if (!app.requestSingleInstanceLock()) {
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin' && !(dev && process.env.PDFOUNDRY_REOPEN)) app.quit();
   });
+  // OCR's worker thread must not keep the app from quitting.
+  app.on('will-quit', () => void handlers.ocrStop());
 }

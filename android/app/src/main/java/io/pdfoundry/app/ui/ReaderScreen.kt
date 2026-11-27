@@ -35,6 +35,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Draw
+import androidx.compose.material.icons.filled.BrandingWatermark
+import androidx.compose.material.icons.filled.FormatListNumbered
+import androidx.compose.material.icons.automirrored.filled.ManageSearch
 import androidx.compose.material.icons.filled.FileCopy
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Lock
@@ -100,6 +103,13 @@ import io.pdfoundry.app.data.DocumentStore
 import io.pdfoundry.app.data.FieldKind
 import io.pdfoundry.app.data.FormField
 import io.pdfoundry.app.data.InkStroke
+import io.pdfoundry.app.data.MarkInfo
+import io.pdfoundry.app.data.MarkKind
+import io.pdfoundry.app.data.PagePoint
+import io.pdfoundry.app.data.Redaction
+import io.pdfoundry.app.data.PageNumberStyle
+import io.pdfoundry.app.data.WatermarkStyle
+import io.pdfoundry.app.data.ShapeKind
 import io.pdfoundry.app.data.bitmap
 import io.pdfoundry.app.data.todayText
 import io.pdfoundry.app.data.PdfEngine
@@ -128,7 +138,22 @@ sealed interface EditMode {
     data class Place(val image: Bitmap, val label: String, val width: Float = 0.45f) : EditMode
     /** Words are being selected for a highlight, underline or strikethrough. */
     data class TextMark(val mark: io.pdfoundry.app.data.TextMark, val argb: Int) : EditMode
+    /** Shapes are dragged out one after another until Done. */
+    data class Shape(val kind: ShapeKind, val argb: Int) : EditMode
+    /** A tap places a comment, then its text is typed. */
+    data object Comment : EditMode
+    /** Boxes are marked for redaction, on any page, until they are applied or discarded. */
+    data object Redact : EditMode
 }
+
+/** "No text was found on these pages." */
+const val OcrNothingFound = "No text was found on these pages."
+
+/** A tool a document is opened with from the Tools tab: its sheet (or Redact) comes up on top. */
+enum class ReaderStart { None, PageNumbers, Watermark, MakeSearchable, Redact }
+
+/** A selected mark and the page it is on. */
+data class Selection(val page: Int, val mark: MarkInfo)
 
 /** Which set of tools the reader's bottom bar shows. The reader always opens in [None], the reading bar. */
 enum class ToolMode { None, Markup, FillSign }
@@ -183,6 +208,13 @@ class ReaderState(
     var fields by mutableStateOf<List<FormField>>(emptyList())
         private set
 
+    /** The marks (annotations) on each page, by page index. Read again after every change. */
+    var marks by mutableStateOf<Map<Int, List<MarkInfo>>>(emptyMap())
+        private set
+    /** The mark the user tapped, shown with handles; null when none is. */
+    var selected by mutableStateOf<Selection?>(null)
+        private set
+
     /** The bar's mode. Using a tool and finishing or cancelling it returns to this mode, not to reading. */
     var toolMode by mutableStateOf(ToolMode.None)
     /** The tool in use on [editPage], if any. */
@@ -225,6 +257,12 @@ class ReaderState(
                 notice = "This file can't be reached right now. It may have been moved or deleted. It is shown as last seen."
             }
             withContext(Dispatchers.IO) { runCatching { file.copyTo(original, overwrite = true) } }
+            // Restrictions set by its author (it opens without a password): read-only before the pages show,
+            // so the editing bar never appears for it.
+            if (withContext(Dispatchers.IO) { runCatching { PdfEngine.isRestrictedOnly(file) }.getOrDefault(false) }) {
+                if (!readOnly) notice = "Password-protected documents are read-only."
+                readOnly = true
+            }
             reopen()
             // Opens without a password but carries restrictions set by its author: changes would remove them.
             if (!locked && source != null && withContext(Dispatchers.IO) { runCatching { PdfEngine.isProtected(file) }.getOrDefault(false) }) {
@@ -252,6 +290,9 @@ class ReaderState(
             }
         }
         fields = if (opened == null) emptyList() else withContext(Dispatchers.IO) { runCatching { PdfEngine.fields(viewFile) }.getOrDefault(emptyList()) }
+        marks = if (opened == null) emptyMap() else withContext(Dispatchers.IO) { runCatching { PdfEngine.allMarks(viewFile) }.getOrDefault(emptyMap()) }
+        // A selected mark follows its new place (after Undo, say); one that is gone is no longer selected.
+        selected = selected?.let { old -> marks[old.page]?.firstOrNull { it.id == old.mark.id }?.let { Selection(old.page, it) } }
         source = opened
         version++
         withContext(Dispatchers.IO) { old?.close() }
@@ -306,7 +347,7 @@ class ReaderState(
             PdfEngine.protect(unlockedCopy, password, file)
             store.push(file)
         } catch (e: Exception) {
-            before.copyTo(file, overwrite = true)
+            file.replaceWith(before)
             throw e
         } finally {
             before.delete()
@@ -317,8 +358,9 @@ class ReaderState(
      * Runs one change to the document and saves it at once; a file opened where it lives is written back
      * there. A copy is kept first so the change can be undone.
      */
-    fun edit(change: (File) -> Unit) {
+    fun edit(onFailure: () -> Unit = {}, change: (File) -> Unit) {
         if (readOnly) return
+        forgetRedactions()
         queue {
             try {
                 withContext(Dispatchers.IO) {
@@ -328,9 +370,9 @@ class ReaderState(
                     try {
                         change(target)
                         save()
-                    } catch (e: Exception) {
-                        // Nothing was saved: go back to the document as it was.
-                        snapshot.copyTo(target, overwrite = true)
+                    } catch (e: Throwable) {
+                        // Nothing was saved (including running out of memory): go back to the document as it was.
+                        target.replaceWith(snapshot)
                         snapshot.delete()
                         throw e
                     }
@@ -339,8 +381,11 @@ class ReaderState(
                 }
                 canUndo = true
                 settle()
-            } catch (e: Exception) {
-                message = e.message ?: "The change could not be saved."
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                message = if (e is OutOfMemoryError) "There isn't enough memory for this change. Nothing was changed." else e.message ?: "The change could not be saved."
+                onFailure()
                 reopen()
             }
         }
@@ -363,7 +408,12 @@ class ReaderState(
         }
     }
 
-    fun undo() = queue {
+    fun undo() {
+        forgetRedactions()
+        undoQueued()
+    }
+
+    private fun undoQueued() = queue {
         val snapshot = undoStack.removeLastOrNull() ?: return@queue
         try {
             withContext(Dispatchers.IO) {
@@ -371,11 +421,11 @@ class ReaderState(
                 val current = File(undoFolder, "current")
                 target.copyTo(current, overwrite = true)
                 try {
-                    snapshot.copyTo(target, overwrite = true)
+                    target.replaceWith(snapshot)
                     save()
                 } catch (e: Exception) {
                     // Nothing was saved: the document stays as it was, and the step can be undone later.
-                    current.copyTo(target, overwrite = true)
+                    target.replaceWith(current)
                     throw e
                 } finally {
                     current.delete()
@@ -402,14 +452,14 @@ class ReaderState(
             try {
                 withContext(Dispatchers.IO) {
                     unlockedCopy.parentFile?.mkdirs()
-                    file.copyTo(unlockedCopy, overwrite = true)
+                    unlockedCopy.replaceWith(file)
                     val before = File(undoFolder, "before-save")
                     file.copyTo(before, overwrite = true)
                     try {
                         PdfEngine.protect(unlockedCopy, newPassword, file)
                         store.push(file)
                     } catch (e: Exception) {
-                        before.copyTo(file, overwrite = true)
+                        file.replaceWith(before)
                         unlockedCopy.delete()
                         throw e
                     } finally {
@@ -435,10 +485,10 @@ class ReaderState(
                     val before = File(undoFolder, "before-save")
                     file.copyTo(before, overwrite = true)
                     try {
-                        unlockedCopy.copyTo(file, overwrite = true)
+                        file.replaceWith(unlockedCopy)
                         store.push(file)
                     } catch (e: Exception) {
-                        before.copyTo(file, overwrite = true)
+                        file.replaceWith(before)
                         throw e
                     } finally {
                         before.delete()
@@ -460,6 +510,8 @@ class ReaderState(
 
     fun begin(mode: EditMode, page: Int) {
         if (readOnly) return
+        if (mode != EditMode.Redact) forgetRedactions()
+        selected = null
         editPage = page.coerceIn(0, (pageCount - 1).coerceAtLeast(0))
         editMode = mode
     }
@@ -488,6 +540,181 @@ class ReaderState(
         if (rects.isNotEmpty()) edit { PdfEngine.markText(it, page, rects, mark, argb, lower) }
     }
 
+    // Selecting marks --------------------------------------------------------------------------
+
+    /** Selects the topmost mark at ([x], [y]) on [page] (page fractions). False when there is none. */
+    fun select(page: Int, x: Float, y: Float): Boolean {
+        val mark = PdfEngine.hit(marks[page].orEmpty(), x, y)
+        selected = if (mark == null || readOnly) null else Selection(page, mark)
+        return selected != null
+    }
+
+    fun select(page: Int, mark: MarkInfo) {
+        if (!readOnly) selected = Selection(page, mark)
+    }
+
+    fun deselect() {
+        selected = null
+    }
+
+    /** Moves or resizes the selected mark to [rect] (page fractions): one Undo step, saved at once. */
+    fun moveSelected(rect: RectF) {
+        val current = selected ?: return
+        if (!current.mark.movable || rect == current.mark.rect) return
+        selected = current.copy(mark = current.mark.copy(rect = RectF(rect)))
+        edit { PdfEngine.moveMark(it, current.page, current.mark.id, rect) }
+    }
+
+    fun deleteSelected() {
+        val current = selected ?: return
+        selected = null
+        edit { PdfEngine.deleteMark(it, current.page, current.mark.id) }
+    }
+
+    // Page tools ---------------------------------------------------------------------------------
+
+    /** Page numbers on every page: one change, one Undo step. */
+    fun addPageNumbers(style: PageNumberStyle) = edit { PdfEngine.addPageNumbers(it, style) }
+
+    /** A watermark on every page: one change, one Undo step. */
+    fun addWatermark(style: WatermarkStyle) = edit { PdfEngine.addWatermark(it, style) }
+
+    /** Make Searchable's progress: pages done and to do, while it runs. */
+    var ocrProgress by mutableStateOf<Pair<Int, Int>?>(null)
+        private set
+    @Volatile private var ocrCancelled = false
+
+    /** The pages without text, which Make Searchable would process. */
+    suspend fun pagesNeedingText(): List<Int> = withContext(Dispatchers.IO) {
+        runCatching { io.pdfoundry.app.data.Ocr.pagesNeedingText(viewFile) }.getOrDefault(emptyList())
+    }
+
+    /**
+     * Recognises the text of [pages] on a copy, then applies it as one change (one Undo step). Cancel
+     * ([cancelOcr]) or no text found changes nothing. [onDone] gets the number of pages that got text,
+     * or null when cancelled or failed.
+     */
+    fun makeSearchable(pages: List<Int>, onDone: (Int?) -> Unit = {}) {
+        if (readOnly || ocrProgress != null) return
+        ocrCancelled = false
+        ocrProgress = 0 to pages.size
+        work.launch {
+            val copy = File(undoFolder, "ocr-${System.nanoTime()}.pdf")
+            val found = try {
+                withContext(Dispatchers.IO) {
+                    // Waits for changes still saving, then works on a copy of the document as it is.
+                    saving.withLock { content.copyTo(copy, overwrite = true) }
+                    io.pdfoundry.app.data.Ocr.run(copy, pages, null, progress = { done, total -> ocrProgress = done to total }, isCancelled = { ocrCancelled || closed })
+                }
+            } catch (e: java.util.concurrent.CancellationException) {
+                null
+            } catch (e: Exception) {
+                message = e.message ?: "The text could not be recognised."
+                null
+            }
+            ocrProgress = null
+            when {
+                found == null -> copy.delete()
+                found == 0 -> {
+                    copy.delete()
+                    message = OcrNothingFound
+                }
+                else -> edit { target ->
+                    target.replaceWith(copy)
+                    copy.delete()
+                }
+            }
+            onDone(found)
+        }
+    }
+
+    fun cancelOcr() {
+        ocrCancelled = true
+    }
+
+    // Redaction --------------------------------------------------------------------------------
+
+    /**
+     * Areas marked for redaction and not applied yet, by page (fractions of the displayed page). Held in
+     * memory only: never written anywhere until applied.
+     */
+    var pending by mutableStateOf<Map<Int, List<RectF>>>(emptyMap())
+        private set
+    val pendingCount: Int get() = pending.values.sumOf { it.size }
+
+    fun addRedaction(page: Int, rect: RectF) {
+        val clipped = RectF(rect.left.coerceIn(0f, 1f), rect.top.coerceIn(0f, 1f), rect.right.coerceIn(0f, 1f), rect.bottom.coerceIn(0f, 1f))
+        if (clipped.width() <= 0.002f || clipped.height() <= 0.002f) return
+        pending = pending + (page to (pending[page].orEmpty() + clipped))
+    }
+
+    fun removeRedaction(page: Int, index: Int) {
+        val boxes = pending[page].orEmpty().toMutableList()
+        if (index !in boxes.indices) return
+        boxes.removeAt(index)
+        pending = if (boxes.isEmpty()) pending - page else pending + (page to boxes)
+    }
+
+    /** Redacts every pending box (one Undo step) and leaves Redact. */
+    fun applyRedactions() {
+        val boxes = pending
+        val page = editPage
+        pending = emptyMap()
+        editMode = null
+        if (boxes.isEmpty()) return
+        // If it fails, nothing changed: back in Redact with the same boxes.
+        edit(onFailure = {
+            pending = boxes
+            editPage = page.coerceIn(0, (pageCount - 1).coerceAtLeast(0))
+            editMode = EditMode.Redact
+        }) { Redaction.apply(it, boxes) }
+    }
+
+    /**
+     * Pending boxes are page numbers and places on the page as it is now. Anything that changes the pages
+     * (Undo, Revert, the page organizer, another tool) first drops them, so they can never land on other
+     * content. They exist only while Redact is open, so this is a safeguard.
+     */
+    private fun forgetRedactions() {
+        if (pending.isEmpty()) return
+        pending = emptyMap()
+        if (editMode == EditMode.Redact) editMode = null
+    }
+
+    /** Forgets the pending boxes and leaves Redact; nothing changes. */
+    fun discardRedactions() {
+        pending = emptyMap()
+        editMode = null
+    }
+
+    /** Shows another page in the page editor (Redact moves between pages). */
+    fun showPage(page: Int) {
+        if (page in 0 until pageCount) editPage = page
+    }
+
+    /** Adds a shape on the page being edited; the shape tool stays in use (one Undo step per shape). */
+    fun addShape(kind: ShapeKind, from: PagePoint, to: PagePoint, argb: Int) {
+        val page = editPage
+        edit { PdfEngine.shape(it, page, kind, from, to, argb) }
+    }
+
+    /** Places a comment with [text] at [at] on the page being edited; an empty comment is not created. */
+    fun addComment(at: PagePoint, text: String) {
+        val page = editPage
+        editMode = null
+        if (text.isNotBlank()) edit { PdfEngine.comment(it, page, at, text) }
+    }
+
+    /** Changes a comment's text; empty text deletes it. */
+    fun updateComment(page: Int, id: String, text: String) {
+        if (text.isBlank()) selected = null
+        edit { PdfEngine.updateComment(it, page, id, text) }
+    }
+
+    suspend fun commentText(page: Int, id: String): String = withContext(Dispatchers.IO) {
+        runCatching { PdfEngine.commentText(viewFile, page, id) }.getOrDefault("")
+    }
+
     /**
      * Fills in a form field (one Undo step), saved as the field's value. Nothing happens when the value
      * is unchanged or the field can't be changed.
@@ -514,6 +741,7 @@ class ReaderState(
      */
     fun revertToOriginal() {
         if (readOnly) return
+        forgetRedactions()
         queue {
             try {
                 val opened = originalPassword
@@ -530,14 +758,14 @@ class ReaderState(
                             if (opened != null) {
                                 if (PdfEngine.unlock(original, opened, unlockedCopy) != UnlockResult.Full) throw PdfException("The original could not be opened.")
                             } else {
-                                original.copyTo(unlockedCopy, overwrite = true)
+                                unlockedCopy.replaceWith(original)
                             }
                         }
-                        if (restored == opened) original.copyTo(file, overwrite = true) else PdfEngine.protect(unlockedCopy, restored!!, file)
+                        if (restored == opened) file.replaceWith(original) else PdfEngine.protect(unlockedCopy, restored!!, file)
                         store.push(file)
                     } catch (e: Exception) {
-                        before.copyTo(file, overwrite = true)
-                        snapshot.copyTo(target, overwrite = true)
+                        file.replaceWith(before)
+                        target.replaceWith(snapshot)
                         snapshot.delete()
                         throw e
                     } finally {
@@ -602,7 +830,7 @@ class ReaderState(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ReaderScreen(file: File, onBack: () -> Unit) {
+fun ReaderScreen(file: File, onBack: () -> Unit, start: ReaderStart = ReaderStart.None) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val state = remember(file) { ReaderState(context.applicationContext, file, scope) }
@@ -617,6 +845,24 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
     // The text dialog: null when closed, otherwise what it starts with ("" for Text, today's date for Date).
     var textDraft by remember { mutableStateOf<TextDraft?>(null) }
     var showSearch by remember { mutableStateOf(false) }
+    // The comment open for reading or editing: its page and mark.
+    var openComment by remember { mutableStateOf<Pair<Int, MarkInfo>?>(null) }
+    // The page tool sheet on top, if any.
+    var tool by remember { mutableStateOf(ReaderStart.None) }
+    // A tool asked for from the Tools tab comes up once the document is open (and unlocked).
+    var started by remember { mutableStateOf(false) }
+    LaunchedEffect(state.source, state.locked, state.readOnly) {
+        if (started || start == ReaderStart.None || state.source == null || state.locked) return@LaunchedEffect
+        started = true
+        when {
+            state.readOnly -> state.message = state.notice
+            start == ReaderStart.Redact -> {
+                state.toolMode = ToolMode.Markup
+                state.begin(EditMode.Redact, 0)
+            }
+            else -> tool = start
+        }
+    }
     var menu by remember { mutableStateOf(false) }
     var confirmRevert by remember { mutableStateOf(false) }
     var askPassword by remember { mutableStateOf(false) }
@@ -656,7 +902,9 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
             onCancel = { state.cancelEdit() },
             onInk = { strokes: List<InkStroke> -> state.finishInk(strokes) },
             onPlace = { image: Bitmap, rect: RectF -> state.place(image, rect) },
-            onMarkText = { areas -> if (editing is EditMode.TextMark) state.markText(areas.map { it.rect }, editing.mark, editing.argb, areas.map { it.lower }) }
+            onMarkText = { areas -> if (editing is EditMode.TextMark) state.markText(areas.map { it.rect }, editing.mark, editing.argb, areas.map { it.lower }) },
+            onShape = { kind, from, to, argb -> state.addShape(kind, from, to, argb) },
+            onComment = { at, text -> state.addComment(at, text) }
         )
         return
     }
@@ -667,6 +915,8 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
     }
     // Back closes a mode before it closes the document.
     BackHandler(enabled = state.toolMode != ToolMode.None) { state.toolMode = ToolMode.None }
+    // And a selection before that.
+    BackHandler(enabled = state.selected != null) { state.deselect() }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
@@ -703,6 +953,11 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
                                     DropdownMenuItem(text = { Text("Remove Password") }, leadingIcon = { Icon(Icons.Filled.LockOpen, null) }, enabled = !state.busy, onClick = { menu = false; confirmRemovePassword = true })
                                 }
                                 if (!state.readOnly) {
+                                    DropdownMenuItem(text = { Text("Make Searchable") }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.ManageSearch, null) }, enabled = !state.busy, onClick = { menu = false; tool = ReaderStart.MakeSearchable })
+                                    DropdownMenuItem(text = { Text("Page Numbers") }, leadingIcon = { Icon(Icons.Filled.FormatListNumbered, null) }, enabled = !state.busy, onClick = { menu = false; tool = ReaderStart.PageNumbers })
+                                    DropdownMenuItem(text = { Text("Watermark") }, leadingIcon = { Icon(Icons.Filled.BrandingWatermark, null) }, enabled = !state.busy, onClick = { menu = false; tool = ReaderStart.Watermark })
+                                }
+                                if (!state.readOnly) {
                                     DropdownMenuItem(text = { Text("Revert to original") }, leadingIcon = { Icon(Icons.Filled.Restore, null) }, enabled = state.canRevert && !state.busy, onClick = { menu = false; confirmRevert = true })
                                 }
                             }
@@ -731,6 +986,9 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
                         onTextMark = { mark, argb -> begin(EditMode.TextMark(mark, argb)) },
                         onText = { textDraft = TextDraft("Add text", "") },
                         onDraw = { begin(EditMode.Ink(highlighter = false)) },
+                        onShape = { kind, argb -> begin(EditMode.Shape(kind, argb)) },
+                        onComment = { begin(EditMode.Comment) },
+                        onRedact = { begin(EditMode.Redact) },
                         onSignature = { picking = SignatureKind.Signature },
                         onInitials = { picking = SignatureKind.Initials },
                         onDate = { textDraft = TextDraft("Add date", todayText()) },
@@ -752,7 +1010,7 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
                 }
                 source == null -> CircularProgressIndicator(Modifier.align(Alignment.Center))
                 else -> {
-                    PageList(state, source, listState, onFieldText = { typingField = it }, onFieldSign = { signingField = it })
+                    PageList(state, source, listState, onFieldText = { typingField = it }, onFieldSign = { signingField = it }, onOpenComment = { page, mark -> openComment = page to mark })
                     Surface(shape = RoundedCornerShape(50), tonalElevation = 6.dp, shadowElevation = 2.dp, modifier = Modifier.align(Alignment.BottomStart).padding(12.dp)) {
                         Text("${currentPage + 1} of ${state.pageCount}", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
                     }
@@ -846,6 +1104,33 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
         }
     }
 
+    if (state.readOnly && tool != ReaderStart.None) tool = ReaderStart.None
+    when (tool) {
+        ReaderStart.PageNumbers -> PageNumbersSheet(state, onDismiss = { tool = ReaderStart.None })
+        ReaderStart.Watermark -> WatermarkSheet(state, onDismiss = { tool = ReaderStart.None })
+        ReaderStart.MakeSearchable -> OcrSheet(state, onDismiss = { tool = ReaderStart.None })
+        else -> Unit
+    }
+
+    openComment?.let { (page, mark) ->
+        var text by remember(mark.id) { mutableStateOf("") }
+        LaunchedEffect(mark.id) { text = state.commentText(page, mark.id) }
+        CommentDialog(
+            title = "Comment",
+            text = text,
+            onText = { text = it },
+            onDismiss = { openComment = null },
+            onDone = {
+                openComment = null
+                state.updateComment(page, mark.id, text)
+            },
+            onDelete = {
+                openComment = null
+                state.updateComment(page, mark.id, "")
+            }
+        )
+    }
+
     if (showSearch) {
         SearchDialog(state, onDismiss = { showSearch = false }) { page ->
             showSearch = false
@@ -880,7 +1165,14 @@ private data class TextDraft(val title: String, val text: String)
 
 /** All pages in a column. Pinch to zoom; when zoomed, the page scrolls sideways too. */
 @Composable
-private fun PageList(state: ReaderState, source: PdfSource, listState: androidx.compose.foundation.lazy.LazyListState, onFieldText: (FormField) -> Unit, onFieldSign: (FormField) -> Unit) {
+private fun PageList(
+    state: ReaderState,
+    source: PdfSource,
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    onFieldText: (FormField) -> Unit,
+    onFieldSign: (FormField) -> Unit,
+    onOpenComment: (Int, MarkInfo) -> Unit = { _, _ -> }
+) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val baseWidthPx = constraints.maxWidth
         val baseWidth = maxWidth
@@ -927,6 +1219,16 @@ private fun PageList(state: ReaderState, source: PdfSource, listState: androidx.
                             onText = onFieldText,
                             onSet = { field, value -> state.setField(field, value) },
                             onSign = onFieldSign
+                        )
+                        MarkLayer(
+                            marks = state.marks[index].orEmpty(),
+                            selected = state.selected?.takeIf { it.page == index }?.mark,
+                            enabled = !state.readOnly,
+                            onSelect = { state.select(index, it) },
+                            onDeselect = { state.deselect() },
+                            onMove = { state.moveSelected(it) },
+                            onDelete = { state.deleteSelected() },
+                            onOpen = { onOpenComment(index, it) }
                         )
                     }
                 }
@@ -998,4 +1300,18 @@ private fun SearchDialog(state: ReaderState, onDismiss: () -> Unit, onOpenPage: 
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } }
     )
+}
+
+/**
+ * Replaces this file with a copy of [source] by renaming a full copy over it, so a reader that has the
+ * file open (PdfRenderer and the mark layer) keeps the one version it opened instead of seeing it change.
+ */
+internal fun File.replaceWith(source: File) {
+    val temp = File(parentFile, "$name.${System.nanoTime()}.swap")
+    try {
+        source.copyTo(temp, overwrite = true)
+        if (!temp.renameTo(this)) temp.copyTo(this, overwrite = true)
+    } finally {
+        temp.delete()
+    }
 }

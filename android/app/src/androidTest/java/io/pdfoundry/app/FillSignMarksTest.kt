@@ -129,7 +129,7 @@ class FillSignMarksTest {
             Thread.sleep(100)
             while (state.busy && System.currentTimeMillis() < deadline) Thread.sleep(20)
             assertTrue(state.canUndo)
-            assertEquals(4, com.tom_roush.pdfbox.pdmodel.PDDocument.load(state.file).use { it.getPage(0).resources.xObjectNames.count() })
+            assertEquals(4, com.tom_roush.pdfbox.pdmodel.PDDocument.load(state.file).use { it.getPage(0).annotations.count { a -> a.subtype == "Stamp" } })
         } finally {
             state.close()
             scope.cancel()

@@ -85,6 +85,18 @@ fun Context.sharePdfs(files: List<File>) {
     startActivity(Intent.createChooser(intent, null))
 }
 
+/** Shares pictures (Export as Images) through the system share sheet. */
+fun Context.shareImages(files: List<File>, mime: String) {
+    if (files.isEmpty()) return
+    val uris = ArrayList(files.map { shareUri(it) })
+    val intent = if (uris.size == 1) Intent(Intent.ACTION_SEND).putExtra(Intent.EXTRA_STREAM, uris[0])
+    else Intent(Intent.ACTION_SEND_MULTIPLE).putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+    intent.type = mime
+    intent.clipData = android.content.ClipData.newUri(contentResolver, files[0].name, uris[0]).apply { uris.drop(1).forEach { addItem(android.content.ClipData.Item(it)) } }
+    intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    startActivity(Intent.createChooser(intent, null))
+}
+
 fun Context.openUrl(url: String) {
     runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
 }

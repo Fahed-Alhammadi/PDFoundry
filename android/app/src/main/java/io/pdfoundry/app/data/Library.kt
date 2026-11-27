@@ -483,6 +483,20 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
     }
 
     /**
+     * Compress from the Tools tab: a smaller copy of [source], "<name> (compressed)", in the library.
+     * Null when it would not be at least 5% smaller (nothing is kept then). [source] is only read; a
+     * protected one is opened with [password] and the copy keeps it.
+     */
+    suspend fun compress(source: File, level: CompressLevel, password: String?, baseName: String = source.nameWithoutExtension): File? {
+        val made = withContext(Dispatchers.IO) {
+            val destination = uniqueFile("$baseName (compressed)")
+            if (Compress.run(source, level, password, destination)) destination else null
+        }
+        if (made != null) refresh()
+        return made
+    }
+
+    /**
      * Password-protect from the Tools tab: replaces [file] (a library document, or the working copy of a
      * file opened in place, whose real file is then written too) with its protected version. If saving
      * fails, the file keeps what it had. Refuses a file that is already protected.
@@ -550,6 +564,8 @@ class DocumentStore(private val context: Context, private val outside: OutsideFi
         listOf(unlockedDirectory(context), File(context.cacheDir, "undo")).forEach { folder ->
             folder.listFiles()?.filter { it.lastModified() < started }?.forEach { it.deleteRecursively() }
         }
+        // Pictures made by Export as Images for sharing, and sheet previews, from an earlier run.
+        listOf(File(context.cacheDir, "exports"), File(context.cacheDir, "preview")).forEach { it.deleteRecursively() }
         // Downloads made by an earlier version's Extract Pages.
         context.cacheDir.listFiles { file -> file.name.startsWith("extract-") && file.name.endsWith(".pdf") }?.forEach { it.delete() }
     }
@@ -620,6 +636,8 @@ class PdfSource(file: File) : Closeable {
     }
     private val mutex = Mutex()
     private var closed = false
+    /** PdfRenderer draws no annotations: marks are drawn on top from their appearance streams. */
+    private val marks = AnnotationLayer(file)
 
     val pageCount: Int = renderer.pageCount
 
@@ -627,6 +645,7 @@ class PdfSource(file: File) : Closeable {
     val sizes: List<Size> = try {
         (0 until pageCount).map { index -> renderer.openPage(index).use { Size(it.width, it.height) } }
     } catch (e: Throwable) {
+        marks.close()
         renderer.close()
         descriptor.close()
         throw e
@@ -640,6 +659,7 @@ class PdfSource(file: File) : Closeable {
                 Bitmap.createBitmap(widthPx, height, Bitmap.Config.ARGB_8888).also { bitmap ->
                     bitmap.eraseColor(Color.WHITE)
                     page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                    marks.draw(index, bitmap)
                 }
             }
         }
@@ -651,6 +671,7 @@ class PdfSource(file: File) : Closeable {
             mutex.withLock {
                 if (!closed) {
                     closed = true
+                    marks.close()
                     renderer.close()
                     descriptor.close()
                 }

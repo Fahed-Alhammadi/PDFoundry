@@ -1,11 +1,11 @@
 // The reader's floating bar. While reading it offers three modes and Undo:
 //   Markup  Fill & Sign  Pages   Undo
 // A mode swaps the bar for its own tools, with a close button on the left and Undo at the right end:
-//   Markup:      ×  Highlight▾  Underline  Strikethrough  Text  Draw   Undo
+//   Markup:      ×  Highlight▾  Underline  Strikethrough  Text  Draw  Shapes▾  Comment  Redact   Undo
 //   Fill & Sign: ×  Signature  Initials  Text  Date  ✓  ✗   Undo
 // Pages is not a mode: it opens the page organizer. The same names and grouping as the phone apps.
 import { h, icon } from './dom.ts';
-import type { Rgba, TextMark } from '../core/pdf.ts';
+import type { Rgba, ShapeKind, TextMark } from '../core/pdf.ts';
 
 export type ToolMode = 'none' | 'markup' | 'fillSign';
 
@@ -21,8 +21,19 @@ export const HIGHLIGHT_COLOURS: { name: string; rgba: Rgba; css: string }[] = [
 /** Underline and strikethrough: systemRed, as on the iPhone. */
 export const MARK_RED: Rgba = [1, 0.231, 0.188, 1];
 
+/** Shapes: the four highlight colours at full strength, and the brand graphite (the default). */
+export const SHAPE_COLOURS: { name: string; rgba: Rgba; css: string }[] = [
+  { name: 'Graphite', rgba: [0x12 / 255, 0x14 / 255, 0x1c / 255, 1], css: '#12141c' },
+  ...HIGHLIGHT_COLOURS.map((c) => ({ name: c.name, rgba: [c.rgba[0], c.rgba[1], c.rgba[2], 1] as Rgba, css: c.css })),
+];
+export const SHAPE_NAMES: Record<ShapeKind, string> = { rectangle: 'Rectangle', ellipse: 'Ellipse', line: 'Line', arrow: 'Arrow' };
+
 /** A text tool waiting for (or applied to) a selection. */
 export type TextTool = { mark: TextMark; rgba: Rgba };
+/** A shape tool: each drag on a page draws one. */
+export type ShapeTool = { kind: ShapeKind; rgba: Rgba };
+/** What a Markup tool is waiting for on the page, if anything. */
+export type Armed = { text: TextTool | null; shape: ShapeTool | null; comment: boolean; redact: boolean };
 
 export type ModeBarActions = {
   setMode: (mode: ToolMode) => void;
@@ -30,6 +41,10 @@ export type ModeBarActions = {
   textMark: (mark: Exclude<TextMark, 'highlight'>) => void;
   text: () => void;
   draw: () => void;
+  shapes: (anchor: HTMLElement) => void;
+  comment: () => void;
+  redact: () => void;
+  applyRedactions: () => void;
   signature: () => void;
   initials: () => void;
   date: () => void;
@@ -47,7 +62,7 @@ function tool(name: string, label: string, onclick: (e: MouseEvent) => void, opt
 }
 
 /** The buttons of the bar for `mode`. `armed` is the text tool waiting for a selection, if any. */
-export function modeBar(mode: ToolMode, state: { canUndo: boolean; armed: TextTool | null }, actions: ModeBarActions): HTMLElement[] {
+export function modeBar(mode: ToolMode, state: { canUndo: boolean; armed: Armed; pending: number }, actions: ModeBarActions): HTMLElement[] {
   const undo = [h('span.dock-divider'), tool('undo', 'Undo', () => actions.undo(), { disabled: !state.canUndo })];
   if (mode === 'none') {
     return [
@@ -61,8 +76,9 @@ export function modeBar(mode: ToolMode, state: { canUndo: boolean; armed: TextTo
     type: 'button', title: `Close ${MODE_NAMES[mode]}`, 'aria-label': `Close ${MODE_NAMES[mode]}`, onclick: () => actions.setMode('none'),
   }, icon('close', 20));
   if (mode === 'markup') {
-    const armed = state.armed?.mark;
+    const armed = state.armed.text?.mark;
     const highlight = tool('highlight', 'Highlight', () => actions.highlight(highlight), { pressed: armed === 'highlight', menu: true });
+    const shapes = tool('shapes', 'Shapes', () => actions.shapes(shapes), { pressed: !!state.armed.shape, menu: true });
     return [
       close,
       highlight,
@@ -70,6 +86,13 @@ export function modeBar(mode: ToolMode, state: { canUndo: boolean; armed: TextTo
       tool('strike', 'Strikethrough', () => actions.textMark('strikethrough'), { pressed: armed === 'strikethrough' }),
       tool('text', 'Text', () => actions.text()),
       tool('draw', 'Draw', () => actions.draw()),
+      shapes,
+      tool('comment', 'Comment', () => actions.comment(), { pressed: state.armed.comment }),
+      tool('redact', 'Redact', () => actions.redact(), { pressed: state.armed.redact }),
+      ...(state.pending ? [h('button.button.primary.apply-redactions', {
+        type: 'button', onclick: () => actions.applyRedactions(),
+        'aria-label': `Apply ${state.pending === 1 ? '1 redaction' : `${state.pending} redactions`}`,
+      }, `Apply (${state.pending})`)] : []),
       ...undo,
     ];
   }

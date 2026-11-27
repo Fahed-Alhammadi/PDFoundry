@@ -1,8 +1,10 @@
 // The window's typed view of the main process (handlers in src/main/main.ts).
-import type { InkKind, RecentFile, Settings } from '../main/store.ts';
+import type { InkKind, PartExtension, RecentFile, Settings } from '../main/store.ts';
 import type { UpdateState } from '../main/updater.ts';
+import type { OcrWord } from '../main/ocr.ts';
 
 export type { InkKind, RecentFile, Settings, UpdateState };
+export type { OcrWord };
 
 export type AppInfo = {
   version: string;
@@ -49,14 +51,20 @@ export const api = {
   },
   /** Split PDF: asks for a folder for the parts. Only a folder picked here can be written to. Null when cancelled. */
   pickFolder: (): Promise<string | null> => bridge.call('pickFolder'),
-  partsExisting: (folder: string, names: string[]): Promise<string[]> => bridge.call('partsExisting', folder, names),
-  saveParts: (folder: string, parts: { name: string; bytes: Uint8Array }[], keepBoth: boolean, keep: string[] = []): Promise<string[]> =>
-    bridge.call('saveParts', folder, parts, keepBoth, keep),
+  partsExisting: (folder: string, names: string[], extension: PartExtension = 'pdf'): Promise<string[]> => bridge.call('partsExisting', folder, names, extension),
+  saveParts: (folder: string, parts: { name: string; bytes: Uint8Array }[], keepBoth: boolean, keep: string[] = [], extension: PartExtension = 'pdf'): Promise<string[]> =>
+    bridge.call('saveParts', folder, parts, keepBoth, keep, extension),
   forget: (file: string): Promise<void> => bridge.call('forget', file),
   clearRecent: (): Promise<void> => bridge.call('clearRecent'),
   reveal: (file: string): Promise<void> => bridge.call('reveal', file),
   pickImages: (): Promise<PickedImage[]> => bridge.call('pickImages'),
-  setDocument: (file: string | null, edited: boolean): Promise<void> => bridge.call('setDocument', file, edited),
+  setDocument: (file: string | null, edited: boolean, redactions = 0): Promise<void> => bridge.call('setDocument', file, edited, redactions),
+  /** Closes the window (asking again about unsaved changes, as closing it does). */
+  closeWindow: (): Promise<void> => bridge.call('closeWindow'),
+  /** Make Searchable: the words on one page drawn as a PNG (recognised in the main process, offline). */
+  ocrPage: (png: Uint8Array): Promise<OcrWord[]> => bridge.call('ocrPage', png),
+  /** Stops a page being read (it then fails) and frees the recogniser's memory. */
+  ocrStop: (): Promise<void> => bridge.call('ocrStop'),
   closeNow: (): Promise<void> => bridge.call('closeNow'),
 
   /** Saved signatures, or saved initials (kept apart). */

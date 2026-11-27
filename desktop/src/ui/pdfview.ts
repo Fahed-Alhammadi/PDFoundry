@@ -105,7 +105,13 @@ const noLinks = {
  */
 export async function renderFormLayer(doc: PDFDocumentProxy, index: number, container: HTMLElement, forms: Map<string, HTMLCanvasElement>): Promise<Widget[]> {
   const page = await doc.getPage(index + 1);
-  const annotations = (await page.getAnnotations({ intent: 'display' })).filter((a) => a.annotationType === pdfjs.AnnotationType.WIDGET);
+  // Form widgets, and the marks pdf.js draws on canvases of their own instead of on the page's picture (comments, and
+  // anything marked "no rotate"): only this layer puts those canvases on the page, so without them they never show.
+  const all = await page.getAnnotations({ intent: 'display' });
+  const widgets = all.filter((a) => a.annotationType === pdfjs.AnnotationType.WIDGET);
+  const ownCanvas = all.filter((a) => a.annotationType !== pdfjs.AnnotationType.WIDGET && a.hasOwnCanvas && forms.has(a.id));
+  const annotations = [...widgets, ...ownCanvas];
+  const pictures = ownCanvas.map((a) => [a, forms.get(a.id)] as const);
   container.classList.add('annotationLayer');
   if (!annotations.length) return [];
   const viewport = page.getViewport({ scale: 1 }).clone({ dontFlip: true });
@@ -115,9 +121,17 @@ export async function renderFormLayer(doc: PDFDocumentProxy, index: number, cont
   } as unknown as ConstructorParameters<typeof pdfjs.AnnotationLayer>[0]);
   await layer.render({
     annotations, page, viewport, linkService: noLinks, renderForms: true, enableScripting: false, hasJSActions: false, fieldObjects: null,
-    imageResourcesPath: '', downloadManager: null,
+    imageResourcesPath: new URL('pdfjs/images/', location.href).toString(), downloadManager: null,
   } as unknown as Parameters<typeof layer.render>[0]);
-  return annotations as unknown as Widget[];
+  // Those marks are only pictures here: the reader selects and opens them itself (no pdf.js popups or clicks).
+  // (The layer takes the canvases it placed out of the map, so they were picked up before it ran.)
+  for (const [mark, canvas] of pictures) {
+    canvas?.classList.add('mark-canvas');
+    const section = container.querySelector(`[data-annotation-id="${CSS.escape(mark.id)}"]`);
+    section?.classList.add('mark-picture');
+    section?.querySelectorAll(':scope > img').forEach((img) => img.remove()); // pdf.js's stand-in icon: the appearance is drawn instead
+  }
+  return widgets as unknown as Widget[];
 }
 
 /**

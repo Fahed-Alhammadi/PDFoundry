@@ -100,6 +100,8 @@ private fun AppRoot(incoming: Uri?, onIncomingHandled: () -> Unit) {
     var tab by rememberSaveable { mutableIntStateOf(0) }
     /** The path of the document being read, if any. */
     var openDocument by rememberSaveable { mutableStateOf<String?>(null) }
+    /** A tool to bring up on top of it (a Tools tile that works in the reader). */
+    var openWith by rememberSaveable { mutableStateOf(io.pdfoundry.app.ui.ReaderStart.None) }
 
     LaunchedEffect(Unit) { store.start() }
     LaunchedEffect(incoming) {
@@ -116,11 +118,12 @@ private fun AppRoot(incoming: Uri?, onIncomingHandled: () -> Unit) {
     if (open != null) {
         val close = {
             openDocument = null
+            openWith = io.pdfoundry.app.ui.ReaderStart.None
             scope.launch { store.refresh() }
             Unit
         }
         BackHandler(onBack = close)
-        ReaderScreen(file = java.io.File(open), onBack = close)
+        ReaderScreen(file = java.io.File(open), onBack = close, start = openWith)
         return
     }
 
@@ -136,7 +139,10 @@ private fun AppRoot(incoming: Uri?, onIncomingHandled: () -> Unit) {
         Box(Modifier.padding(bottom = padding.calculateBottomPadding())) {
             when (tab) {
                 0 -> LibraryScreen(onOpen = { openDocument = it.file.path })
-                1 -> ToolsScreen(onOpen = { openDocument = it.file.path })
+                1 -> ToolsScreen(onOpen = { openDocument = it.file.path }, onOpenWith = { item, start ->
+                    openWith = start
+                    openDocument = item.file.path
+                })
                 else -> SettingsScreen()
             }
         }

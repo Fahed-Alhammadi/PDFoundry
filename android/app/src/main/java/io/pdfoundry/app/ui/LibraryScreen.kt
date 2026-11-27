@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -98,6 +99,9 @@ import io.pdfoundry.app.data.Skipped
 import io.pdfoundry.app.data.Thumbnails
 import kotlinx.coroutines.launch
 import java.io.File
+import androidx.compose.runtime.LaunchedEffect
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import java.text.DateFormat
 import java.util.Date
 
@@ -139,7 +143,17 @@ fun LibraryScreen(onOpen: (PdfItem) -> Unit) {
         }
     }
 
-    val actions = rememberDocumentActions(snackbar)
+    // After files are added, the list scrolls to the first of them, wherever the sort puts it.
+    val grid = rememberLazyGridState()
+    var added by remember { mutableStateOf<List<File>>(emptyList()) }
+    val actions = rememberDocumentActions(snackbar, onAdded = { added = it })
+    val currentVisible by androidx.compose.runtime.rememberUpdatedState(visible)
+    LaunchedEffect(added) {
+        if (added.isEmpty()) return@LaunchedEffect
+        // Waits for the new cards to be in the list (it refreshes on its own), then scrolls once.
+        val index = androidx.compose.runtime.snapshotFlow { scrollTarget(currentVisible, added) }.filterNotNull().first()
+        grid.animateScrollToItem(index)
+    }
 
     BackHandler(enabled = selecting) { endSelection() }
 
@@ -211,6 +225,7 @@ fun LibraryScreen(onOpen: (PdfItem) -> Unit) {
                 ) { actions.openPdf() }
                 visible.isEmpty() -> EmptyState("No results", "No document name contains “$query”.")
                 else -> LazyVerticalGrid(
+                    state = grid,
                     columns = GridCells.Adaptive(150.dp),
                     contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 96.dp),
                     horizontalArrangement = Arrangement.spacedBy(16.dp),
@@ -306,6 +321,12 @@ fun LibraryScreen(onOpen: (PdfItem) -> Unit) {
 }
 
 /** Open PDF, Scan document and Create from photos: used by the + menu and by the Tools tab. */
+/** Where the library scrolls after [added] files came in: the first of them in the list, or null. */
+fun scrollTarget(visible: List<PdfItem>, added: List<File>): Int? {
+    val paths = added.map { it.path }.toSet()
+    return visible.indexOfFirst { it.file.path in paths }.takeIf { it >= 0 }
+}
+
 class DocumentActions(val openPdf: () -> Unit, val scan: () -> Unit, val createFromPhotos: () -> Unit)
 
 /**
@@ -313,7 +334,7 @@ class DocumentActions(val openPdf: () -> Unit, val scan: () -> Unit, val createF
  * a document made by Scan or Create from photos (the Tools tab offers to open it).
  */
 @Composable
-fun rememberDocumentActions(snackbar: SnackbarHostState, onCreated: suspend (File) -> Unit = {}): DocumentActions {
+fun rememberDocumentActions(snackbar: SnackbarHostState, onCreated: suspend (File) -> Unit = {}, onAdded: (List<File>) -> Unit = {}): DocumentActions {
     val context = LocalContext.current
     val store = context.app.store
     val scope = rememberCoroutineScope()
@@ -335,7 +356,7 @@ fun rememberDocumentActions(snackbar: SnackbarHostState, onCreated: suspend (Fil
         if (uris.isNotEmpty()) perform {
             // A file already in the list, or picked twice, is not a skipped file: only real failures are reported.
             val skipped = mutableListOf<Skipped>()
-            store.open(uris, skipped)
+            onAdded(store.open(uris, skipped))
             val one = uris.size == 1
             when {
                 skipped.isEmpty() -> Unit
@@ -346,11 +367,11 @@ fun rememberDocumentActions(snackbar: SnackbarHostState, onCreated: suspend (Fil
         }
     }
     val photos = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(30)) { uris ->
-        if (uris.isNotEmpty()) perform { store.createFromImages(uris, "Photos ${stamp()}")?.let { onCreated(it) } }
+        if (uris.isNotEmpty()) perform { store.createFromImages(uris, "Photos ${stamp()}")?.let { onAdded(listOf(it)); onCreated(it) } }
     }
     val scanner = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
         val pdf: Uri? = GmsDocumentScanningResult.fromActivityResultIntent(result.data)?.pdf?.uri
-        if (result.resultCode == Activity.RESULT_OK && pdf != null) perform { store.import(listOf(pdf), "Scan ${stamp()}").firstOrNull()?.let { onCreated(it) } }
+        if (result.resultCode == Activity.RESULT_OK && pdf != null) perform { store.import(listOf(pdf), "Scan ${stamp()}").firstOrNull()?.let { onAdded(listOf(it)); onCreated(it) } }
     }
 
     fun scan() {

@@ -4,22 +4,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deflateSync } from 'node:zlib';
-import { PDFArray, PDFDocument, PDFName, decodePDFRawStream, degrees } from '@cantoo/pdf-lib';
-import type { PDFRawStream } from '@cantoo/pdf-lib';
+import { PDFDocument, PDFName, degrees } from '@cantoo/pdf-lib';
+import { annotations, appearance, numbers, pageContent, streamText } from './helpers.ts';
 import * as pdf from '../src/core/pdf.ts';
 import { joinBoxes } from '../src/core/rects.ts';
 
 type Box = { x: number; y: number; width: number; height: number };
 
-/** The page's drawing instructions as text. */
+/** The drawing instructions of the page's marks (their annotations' appearances) as text. */
 async function content(bytes: Uint8Array, index = 0): Promise<string> {
   const doc = await PDFDocument.load(bytes);
-  const contents = doc.getPage(index).node.Contents();
-  const streams = contents instanceof PDFArray ? contents.asArray().map((r) => doc.context.lookup(r)) : [contents];
-  return streams.map((s) => new TextDecoder().decode(decodePDFRawStream(s as PDFRawStream).decode())).join('\n');
+  return annotations(doc, index).map((a) => streamText(appearance(doc, a)!)).join('\n');
 }
 
-/** Every filled rectangle ("x y w h re") drawn on the page. */
+/** Every filled rectangle ("x y w h re") the page's marks draw. */
 async function rectangles(bytes: Uint8Array): Promise<Box[]> {
   const found = [...(await content(bytes)).matchAll(/(-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) re/g)];
   return found.map((m) => ({ x: Number(m[1]), y: Number(m[2]), width: Number(m[3]), height: Number(m[4]) }));
@@ -182,17 +180,6 @@ async function topLevelSaves(bytes: Uint8Array): Promise<number[][]> {
   return saves;
 }
 
-/** How deep "q" nests at most in the page's drawing instructions. */
-async function nesting(bytes: Uint8Array): Promise<number> {
-  let depth = 0;
-  let most = 0;
-  for (const t of (await content(bytes)).split(/\s+/)) {
-    depth += t === 'q' ? 1 : t === 'Q' ? -1 : 0;
-    most = Math.max(most, depth);
-  }
-  return most;
-}
-
 /** A page whose content scales everything by 2 and never restores it (some PDF writers leave that behind). */
 async function careless(): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
@@ -202,18 +189,18 @@ async function careless(): Promise<Uint8Array> {
 }
 
 test('marks and stamps are not moved by what a page leaves in its graphics state', async () => {
+  // Marks are annotations: viewers draw them after the page, in the page's own coordinates, so whatever the page's
+  // drawing leaves behind cannot move them. Their own drawing starts untransformed and the page's is left alone.
   const identity = [1, 0, 0, 1, 0, 0];
   const word = { x: 0.1, y: 0.1, width: 0.4, height: 0.04 };
+  const original = pageContent(await PDFDocument.load(await careless()));
   const marked = await pdf.markText(await careless(), 0, [word], 'highlight', YELLOW);
   assert.deepEqual((await topLevelSaves(marked)).pop(), identity, 'the highlight is drawn in the page’s own coordinates');
   const stamped = await pdf.stamp(await careless(), 0, PNG, { x: 0.1, y: 0.1, width: 0.2, height: 0.1 });
   assert.deepEqual((await topLevelSaves(stamped)).pop(), identity, 'the stamp is drawn in the page’s own coordinates');
-  // Further edits do not wrap the page's content again: it is isolated once.
-  let again = marked;
-  for (let i = 0; i < 5; i++) again = await pdf.markText(again, 0, [word], 'underline', RED);
-  assert.ok((await nesting(again)) <= 2, `graphics states nest ${await nesting(again)} deep`);
-  // A page that already keeps its state to itself is left as it was.
-  const tidy = await page(300, 500, (p) => p.drawRectangle({ x: 1, y: 1, width: 5, height: 5 }));
-  const before = (await content(tidy)).trim();
-  assert.ok((await content(await pdf.markText(tidy, 0, [word], 'highlight', YELLOW))).trim().startsWith(before));
+  for (const bytes of [marked, stamped]) {
+    const doc = await PDFDocument.load(bytes);
+    assert.equal(pageContent(doc), original, 'the page’s drawing is unchanged');
+    for (const a of annotations(doc)) assert.deepEqual(numbers(appearance(doc, a)!.dict, 'Matrix'), identity);
+  }
 });
