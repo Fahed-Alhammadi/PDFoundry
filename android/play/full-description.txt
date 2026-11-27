@@ -5,18 +5,30 @@ READ
 • Search the text of a document
 • Pinch to zoom
 • Scan paper with the camera, or build a PDF from your photos
+• Make scanned pages searchable: text recognition reads English and Arabic, fully offline
 
 MERGE
 • Select two or more documents and join them into one
 • Put the files in the order you want before merging
 
 EDIT
-• Highlight with a marker
+• Highlight in four colours, underline or strike through text
 • Type text anywhere on a page
 • Draw with your finger or a stylus
 • Reorder, rotate, duplicate, extract and delete pages
 • Add blank pages
+• Add rectangles, ellipses, lines and arrows, and leave comments as sticky notes
+• Every mark is a real PDF annotation that other PDF apps show. Tap it later, even after reopening the file, to move, resize or delete it
 • Undo your last changes
+• Add page numbers or a watermark
+
+REDACT
+• Draw boxes over anything, or select text, then Apply
+• Each redacted page becomes an image, so the hidden text is really gone from the file
+
+EXPORT AND COMPRESS
+• Save pages as PNG or JPEG images, at screen or print quality
+• Make a smaller copy of a PDF; the text stays selectable
 
 SIGN
 • Draw your signature once and reuse it

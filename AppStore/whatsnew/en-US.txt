@@ -1,9 +1,7 @@
-New in this build: fill in forms, split PDFs and password protection.
+New in this build: marks you can change later, new markup tools and new tools.
 
-• Fill & Sign now has Signature, Initials, Text, Date, Check and Cross.
-• Fill in a PDF's own form fields: type in text fields, tick boxes, pick options, and tap a signature field to sign it. The values stay real form fields that other apps can change.
-• Tools > Split PDF makes several PDFs from one: every page, every few pages, or ranges you type. The original is not changed.
-• Tools > Password-protect locks a PDF with a password. In the reader, More > Protect with Password or Remove Password.
-• A protected PDF can be edited after you enter its password, and keeps the password every time it is saved.
+• Every mark is now a real PDF annotation. Tap one later, even after reopening the file, to move, resize or delete it. Highlights, underlines and strikethroughs can be deleted but not moved. Other PDF apps show the marks.
+• Markup has Shapes (rectangle, ellipse, line, arrow), Comment (sticky notes) and Redact: draw boxes or select text, then Apply. Each redacted page becomes an image, so the hidden text is really gone.
+• New in Tools: Export as Images (PNG or JPEG), Compress, Redact, and a new Enhance section with Make Searchable (English and Arabic, offline), Page Numbers and Watermark. The last three are also in the reader's More menu.
 
-Please try: fill in and sign a PDF form, then open it in another app to check the fields. Split a document. Protect a file, close it, open it again with the password and edit it.
+Please try: move and delete a mark after reopening the file, redact a line and check it can't be found, make a scanned page searchable, and export pages, then Save Image from the share sheet.
