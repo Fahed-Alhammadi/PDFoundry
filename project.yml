@@ -29,6 +29,7 @@ targets:
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         NSCameraUsageDescription: PDFoundry uses the camera to scan paper documents into PDF files.
+        NSPhotoLibraryAddUsageDescription: PDFoundry saves the pages you export to your photo library.
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft

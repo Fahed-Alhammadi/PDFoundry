@@ -53,6 +53,8 @@ struct DocumentPicker: View {
     /// Password-protected files can be picked (the tool asks for the password). Merge can't use them.
     var allowsLocked = false
     var opensInPlace = false
+    /// How the notice says what the tool would have done to a file that couldn't be opened in place.
+    var changeVerb = "protected"
     let onPick: ([PDFItem]) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -66,13 +68,14 @@ struct DocumentPicker: View {
     @State private var notice: String?
 
     init(title: String, multiple: Bool, minimum: Int = 1, confirmTitle: String = "Next", allowsLocked: Bool = false,
-         opensInPlace: Bool = false, onPick: @escaping ([PDFItem]) -> Void) {
+         opensInPlace: Bool = false, changeVerb: String = "protected", onPick: @escaping ([PDFItem]) -> Void) {
         self.title = title
         self.multiple = multiple
         self.minimum = minimum
         self.confirmTitle = confirmTitle
         self.allowsLocked = allowsLocked
         self.opensInPlace = opensInPlace
+        self.changeVerb = changeVerb
         self.onPick = onPick
     }
 
@@ -150,8 +153,8 @@ struct DocumentPicker: View {
             if items.count < urls.count {
                 isReading = false
                 notice = urls.count == 1
-                    ? "“\(urls[0].deletingPathExtension().lastPathComponent)” couldn't be opened where it is, so it can't be protected."
-                    : "Some files couldn't be opened where they are, so they can't be protected."
+                    ? "“\(urls[0].deletingPathExtension().lastPathComponent)” couldn't be opened where it is, so it can't be \(changeVerb)."
+                    : "Some files couldn't be opened where they are, so they can't be \(changeVerb)."
                 if items.isEmpty { return }
             }
         } else {

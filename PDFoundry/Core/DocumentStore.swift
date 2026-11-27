@@ -75,6 +75,21 @@ final class DocumentStore {
     private(set) var isLoaded = false
     /// A document opened from outside the app, waiting to be shown by the library.
     var pendingOpen: URL?
+    /// The tool to open on top of `pendingOpen` (Page Numbers, Watermark, Make Searchable, Redact from Tools).
+    @ObservationIgnored private var pendingTool: (url: URL, tool: ReaderTool)?
+
+    /// Shows the document in the reader with `tool` on top.
+    func open(_ url: URL, with tool: ReaderTool) {
+        pendingTool = (url.standardizedFileURL, tool)
+        pendingOpen = url
+    }
+
+    /// The tool waiting for the reader of `url`, handed over once.
+    func takeReaderTool(for url: URL) -> ReaderTool? {
+        guard let pending = pendingTool, pending.url == url.standardizedFileURL else { return nil }
+        pendingTool = nil
+        return pending.tool
+    }
 
     let directory: URL
     /// Remembers the files opened in place, as bookmarks that keep working after a restart.

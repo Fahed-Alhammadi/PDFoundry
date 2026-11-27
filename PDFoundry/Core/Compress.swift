@@ -45,6 +45,12 @@ nonisolated enum Compress {
         return try compress(data, password: password, level: level, name: name)
     }
 
+    /// The same, for a file already read into memory.
+    @concurrent
+    static func run(data: Data, password: String?, level: Level, name: String) async throws -> Data? {
+        try compress(data, password: password, level: level, name: name)
+    }
+
     static func compress(_ data: Data, password: String?, level: Level, name: String) throws -> Data? {
         let source = try PDFOperations.fullAccess(data, password: password, name: name)
         let keep = source.isEncrypted ? password : nil

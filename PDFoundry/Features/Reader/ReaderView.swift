@@ -21,6 +21,9 @@ struct ReaderView: View {
     @State private var askToRemovePassword = false
     @State private var shared: SharedFile?
     @State private var askToApplyRedactions = false
+    @State private var toolSheet: ReaderTool?
+    /// A tool asked for by the Tools tab, waiting for a locked document to be unlocked.
+    @State private var waitingTool: ReaderTool?
 
     init(url: URL) {
         _model = State(initialValue: ReaderModel(url: url))
@@ -125,12 +128,42 @@ struct ReaderView: View {
             .sheet(item: $shared) { file in
                 ActivityView(url: file.url)
             }
+            .sheet(item: $toolSheet) { tool in
+                switch tool {
+                case .pageNumbers: PageNumbersSheet(model: model)
+                case .watermark: WatermarkSheet(model: model)
+                case .makeSearchable: OCRSheet(model: model).presentationDetents([.medium])
+                case .redact: EmptyView()
+                }
+            }
             .task {
                 // So Protect on the Tools tab can hand this reader the password (it may still be alive in its tab).
                 store.attach(model)
                 await model.load()
+                if let tool = store.takeReaderTool(for: model.url) {
+                    if model.isLocked { waitingTool = tool } else { open(tool) }
+                }
+            }
+            .onChange(of: model.isLocked) { _, locked in
+                if !locked, let tool = waitingTool {
+                    waitingTool = nil
+                    open(tool)
+                }
             }
             .onDisappear { model.syncFields() }
+    }
+
+    /// Opens a tool on the document. A document that can't be changed shows the read-only notice instead.
+    private func open(_ tool: ReaderTool) {
+        guard model.canEdit else {
+            model.show(hint: "This document's owner doesn't allow changes, so it's read-only.", for: .seconds(4))
+            return
+        }
+        if tool == .redact {
+            model.beginRedaction()
+        } else {
+            toolSheet = tool
+        }
     }
 
     static let redactionWarning = "Redacting removes everything under the boxes for good. Each redacted page becomes an image, so its text can no longer be selected or searched, and its form fields and marks are pressed into it."
@@ -352,6 +385,10 @@ struct ReaderView: View {
                 }
                 Button("Print", systemImage: "printer") { model.printDocument() }
                 if model.canEdit {
+                    Divider()
+                    Button("Make Searchable", systemImage: "text.viewfinder") { open(.makeSearchable) }
+                    Button("Page Numbers", systemImage: "number") { open(.pageNumbers) }
+                    Button("Watermark", systemImage: "seal") { open(.watermark) }
                     Divider()
                     if model.isProtected {
                         Button("Remove Password", systemImage: "lock.open") { askToRemovePassword = true }
