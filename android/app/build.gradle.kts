@@ -62,6 +62,8 @@ android {
     }
     androidResources {
         localeFilters += listOf("en")
+        // OCR language data is copied out of the APK as is (stored, not compressed).
+        noCompress += listOf("traineddata")
     }
 }
 
@@ -83,6 +85,8 @@ dependencies {
     implementation("com.tom-roush:pdfbox-android:2.0.27.0")
     // Document scanner (Google Play services). It shows its own camera UI and needs no camera permission.
     implementation("com.google.android.gms:play-services-mlkit-document-scanner:16.0.0")
+    // Make Searchable: Tesseract OCR (Apache 2.0), on the device, with bundled English and Arabic data.
+    implementation("cz.adaptech.tesseract4android:tesseract4android:4.9.0")
 
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test:runner:1.6.2")

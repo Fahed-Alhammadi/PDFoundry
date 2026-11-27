@@ -29,6 +29,17 @@ keyPassword=YOUR_KEY_PASSWORD
 - `data/OutsideFiles.kt`: reading and writing files that are opened where they live, through the system file picker's links.
 - `ui/`: Compose screens for the library, reader, page editor, page organizer, Settings and About.
 
+## Third-party code and data
+
+| What | Where | Licence | Source |
+| --- | --- | --- | --- |
+| PdfBox-Android 2.0.27.0 | Gradle dependency | Apache 2.0 | `com.tom-roush:pdfbox-android` (Maven Central) |
+| Tesseract4Android 4.9.0 (Tesseract OCR and Leptonica) | Gradle dependency | Apache 2.0 (Leptonica: BSD 2-clause) | `cz.adaptech.tesseract4android:tesseract4android` (JitPack, the project's own channel; only this group is fetched from JitPack) |
+| English and Arabic OCR models (`eng.traineddata`, `ara.traineddata`, "fast" LSTM) | `app/src/main/assets/tessdata/` | Apache 2.0 | github.com/tesseract-ocr/tessdata_fast (main branch, November 2026) |
+| Noto Naskh Arabic Regular (unhinted TTF), for the invisible Arabic text Make Searchable adds | `app/src/main/assets/fonts/` (licence text next to it) | SIL Open Font License 1.1 | github.com/notofonts/arabic, release NotoNaskhArabic-v2.021 |
+
+Everything is bundled: the app downloads nothing at run time.
+
 ## Differences from the iOS app
 
 - Highlighting uses a marker you drag across the page, not text selection.

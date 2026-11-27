@@ -64,7 +64,10 @@ enum class UnlockResult { Full, Limited, Wrong }
  * All functions block and belong on a background dispatcher.
  */
 object PdfEngine {
-    fun init(context: Context) = PDFBoxResourceLoader.init(context.applicationContext)
+    fun init(context: Context) {
+        PDFBoxResourceLoader.init(context.applicationContext)
+        Ocr.init(context)
+    }
 
     private fun memory() = MemoryUsageSetting.setupTempFileOnly()
 
