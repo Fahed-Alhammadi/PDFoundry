@@ -26,7 +26,7 @@ import java.io.File
  * The document is loaded once, read-only; its pages' content is emptied in memory so only the marks are
  * drawn. Nothing is ever written back.
  */
-class AnnotationLayer(private val file: File) : Closeable {
+class AnnotationLayer(private val file: File, private val widgets: Boolean = false) : Closeable {
     private var document: PDDocument? = null
     private var failed = false
     private val emptied = HashSet<Int>()
@@ -44,7 +44,7 @@ class AnnotationLayer(private val file: File) : Closeable {
 
     /** True when the page has marks to draw. */
     private fun marksOn(document: PDDocument, pageIndex: Int): List<PDAnnotation> =
-        runCatching { document.getPage(pageIndex).annotations }.getOrDefault(emptyList()).filter { drawn(it) }
+        runCatching { document.getPage(pageIndex).annotations }.getOrDefault(emptyList()).filter { drawn(it) || (widgets && it.subtype == "Widget" && !it.isHidden && !it.isNoView && it.normalAppearanceStream != null) }
 
     /** Paints the marks of [pageIndex] onto [page], a rendering of the displayed page at any size. */
     fun draw(pageIndex: Int, page: Bitmap) {

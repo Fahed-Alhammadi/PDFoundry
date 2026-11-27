@@ -103,6 +103,7 @@ import io.pdfoundry.app.data.InkStroke
 import io.pdfoundry.app.data.MarkInfo
 import io.pdfoundry.app.data.MarkKind
 import io.pdfoundry.app.data.PagePoint
+import io.pdfoundry.app.data.Redaction
 import io.pdfoundry.app.data.ShapeKind
 import io.pdfoundry.app.data.bitmap
 import io.pdfoundry.app.data.todayText
@@ -136,6 +137,8 @@ sealed interface EditMode {
     data class Shape(val kind: ShapeKind, val argb: Int) : EditMode
     /** A tap places a comment, then its text is typed. */
     data object Comment : EditMode
+    /** Boxes are marked for redaction, on any page, until they are applied or discarded. */
+    data object Redact : EditMode
 }
 
 /** A selected mark and the page it is on. */
@@ -541,6 +544,48 @@ class ReaderState(
         edit { PdfEngine.deleteMark(it, current.page, current.mark.id) }
     }
 
+    // Redaction --------------------------------------------------------------------------------
+
+    /**
+     * Areas marked for redaction and not applied yet, by page (fractions of the displayed page). Held in
+     * memory only: never written anywhere until applied.
+     */
+    var pending by mutableStateOf<Map<Int, List<RectF>>>(emptyMap())
+        private set
+    val pendingCount: Int get() = pending.values.sumOf { it.size }
+
+    fun addRedaction(page: Int, rect: RectF) {
+        val clipped = RectF(rect.left.coerceIn(0f, 1f), rect.top.coerceIn(0f, 1f), rect.right.coerceIn(0f, 1f), rect.bottom.coerceIn(0f, 1f))
+        if (clipped.width() <= 0.002f || clipped.height() <= 0.002f) return
+        pending = pending + (page to (pending[page].orEmpty() + clipped))
+    }
+
+    fun removeRedaction(page: Int, index: Int) {
+        val boxes = pending[page].orEmpty().toMutableList()
+        if (index !in boxes.indices) return
+        boxes.removeAt(index)
+        pending = if (boxes.isEmpty()) pending - page else pending + (page to boxes)
+    }
+
+    /** Redacts every pending box (one Undo step) and leaves Redact. */
+    fun applyRedactions() {
+        val boxes = pending
+        pending = emptyMap()
+        editMode = null
+        if (boxes.isNotEmpty()) edit { Redaction.apply(it, boxes) }
+    }
+
+    /** Forgets the pending boxes and leaves Redact; nothing changes. */
+    fun discardRedactions() {
+        pending = emptyMap()
+        editMode = null
+    }
+
+    /** Shows another page in the page editor (Redact moves between pages). */
+    fun showPage(page: Int) {
+        if (page in 0 until pageCount) editPage = page
+    }
+
     /** Adds a shape on the page being edited; the shape tool stays in use (one Undo step per shape). */
     fun addShape(kind: ShapeKind, from: PagePoint, to: PagePoint, argb: Int) {
         val page = editPage
@@ -815,6 +860,7 @@ fun ReaderScreen(file: File, onBack: () -> Unit) {
                         onDraw = { begin(EditMode.Ink(highlighter = false)) },
                         onShape = { kind, argb -> begin(EditMode.Shape(kind, argb)) },
                         onComment = { begin(EditMode.Comment) },
+                        onRedact = { begin(EditMode.Redact) },
                         onSignature = { picking = SignatureKind.Signature },
                         onInitials = { picking = SignatureKind.Initials },
                         onDate = { textDraft = TextDraft("Add date", todayText()) },

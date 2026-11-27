@@ -69,7 +69,7 @@ object PdfEngine {
     private fun memory() = MemoryUsageSetting.setupTempFileOnly()
 
     /** Loads `file`, applies `block`, and replaces the file only after the new copy is written in full. */
-    private fun edit(file: File, block: (PDDocument) -> Unit) {
+    internal fun edit(file: File, block: (PDDocument) -> Unit) {
         val temp = File(file.parentFile, "${file.name}.tmp")
         try {
             PDDocument.load(file, memory()).use { document ->

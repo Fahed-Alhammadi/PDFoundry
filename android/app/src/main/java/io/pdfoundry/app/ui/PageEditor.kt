@@ -81,6 +81,8 @@ import androidx.compose.ui.unit.dp
 import io.pdfoundry.app.app
 import io.pdfoundry.app.data.InkStroke
 import io.pdfoundry.app.data.PdfEngine
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import io.pdfoundry.app.data.ShapeKind
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
@@ -149,7 +151,19 @@ fun PageEditor(
         }
         is EditMode.Shape -> mode.kind.label
         EditMode.Comment -> "Comment"
+        EditMode.Redact -> "Redact"
     }
+    // Redact: boxes or text, and the two questions.
+    var redactText by remember { mutableStateOf(false) }
+    var redactStart by remember { mutableStateOf<Offset?>(null) }
+    var redactEnd by remember { mutableStateOf<Offset?>(null) }
+    var confirmApply by remember { mutableStateOf(false) }
+    var askLeave by remember { mutableStateOf(false) }
+    val redactWords by produceState<List<TextWord>?>(null, pageIndex, state.version, mode is EditMode.Redact && redactText) {
+        value = if (mode is EditMode.Redact && redactText) state.words(pageIndex) else emptyList()
+    }
+    val leave: () -> Unit = if (mode is EditMode.Redact) ({ if (state.pendingCount > 0) askLeave = true else state.discardRedactions() }) else onCancel
+    if (mode is EditMode.Redact) androidx.activity.compose.BackHandler { leave() }
 
     Scaffold(
         topBar = {
@@ -160,7 +174,7 @@ fun PageEditor(
                         Text("Page ${pageIndex + 1}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 },
-                navigationIcon = { IconButton(onClick = onCancel) { Icon(Icons.Filled.Close, "Cancel") } },
+                navigationIcon = { IconButton(onClick = leave) { Icon(Icons.Filled.Close, if (mode is EditMode.Redact) "Close Redact" else "Cancel") } },
                 actions = {
                     when (mode) {
                         is EditMode.Ink -> {
@@ -186,6 +200,9 @@ fun PageEditor(
                         // Each shape is added when the finger lifts; Done leaves.
                         is EditMode.Shape -> TextButton(onClick = onCancel) { Text("Done") }
                         EditMode.Comment -> Unit
+                        EditMode.Redact -> TextButton(enabled = state.pendingCount > 0, onClick = { confirmApply = true }) {
+                            Text(if (state.pendingCount > 0) "Apply (${state.pendingCount})" else "Apply")
+                        }
                     }
                 }
             )
@@ -212,6 +229,15 @@ fun PageEditor(
                         )
                         is EditMode.Shape -> Text("Drag on the page to draw. Draw as many as you like, then tap Done.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
                         EditMode.Comment -> Text("Tap where the comment goes.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        EditMode.Redact -> Row(verticalAlignment = Alignment.CenterVertically) {
+                            FilterChip(selected = !redactText, onClick = { redactText = false }, label = { Text("Boxes") })
+                            Spacer(Modifier.width(6.dp))
+                            FilterChip(selected = redactText, onClick = { redactText = true }, label = { Text("Text") })
+                            Spacer(Modifier.weight(1f))
+                            IconButton(enabled = pageIndex > 0, onClick = { state.showPage(pageIndex - 1) }) { Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, "Previous page") }
+                            Text("${pageIndex + 1} of ${state.pageCount}", style = MaterialTheme.typography.labelLarge)
+                            IconButton(enabled = pageIndex < state.pageCount - 1, onClick = { state.showPage(pageIndex + 1) }) { Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "Next page") }
+                        }
                     }
                 }
             }
@@ -305,12 +331,91 @@ fun PageEditor(
                             }
                         }
                     }
+                    EditMode.Redact -> {
+                        val boxes = state.pending[pageIndex].orEmpty()
+                        val red = Color(0xFFD32F2F)
+                        if (redactText) {
+                            redactWords?.takeIf { it.isNotEmpty() }?.let { found ->
+                                TextSelectionLayer(found, aspect, TextMark.Highlight, android.graphics.Color.argb(90, 211, 47, 47)) { areas ->
+                                    // A little larger than the words, so nothing of a glyph is left at the edges.
+                                    areas.forEach { area ->
+                                        val r = area.rect
+                                        val padX = 0.15f * r.height() * pageSize.height / pageSize.width
+                                        state.addRedaction(pageIndex, RectF(r.left - padX * 0.3f, r.top - r.height() * 0.08f, r.right + padX * 0.3f, r.bottom + r.height() * 0.08f))
+                                    }
+                                }
+                            }
+                        }
+                        Canvas(
+                            Modifier.fillMaxSize().then(
+                                if (redactText) Modifier else Modifier
+                                    .pointerInput(pageIndex) {
+                                        detectTapGestures { tap ->
+                                            // Tapping a pending box removes it.
+                                            val x = tap.x / size.width
+                                            val y = tap.y / size.height
+                                            val hit = state.pending[pageIndex].orEmpty().indexOfLast { x in it.left..it.right && y in it.top..it.bottom }
+                                            if (hit >= 0) state.removeRedaction(pageIndex, hit)
+                                        }
+                                    }
+                                    .pointerInput(pageIndex) {
+                                        detectDragGestures(
+                                            onDragStart = { redactStart = it; redactEnd = it },
+                                            onDragEnd = {
+                                                val a = redactStart
+                                                val b = redactEnd
+                                                redactStart = null
+                                                redactEnd = null
+                                                if (a != null && b != null) state.addRedaction(pageIndex, RectF(minOf(a.x, b.x) / size.width, minOf(a.y, b.y) / size.height, maxOf(a.x, b.x) / size.width, maxOf(a.y, b.y) / size.height))
+                                            },
+                                            onDragCancel = { redactStart = null; redactEnd = null },
+                                            onDrag = { change, _ -> redactEnd = Offset(change.position.x.coerceIn(0f, widthPx), change.position.y.coerceIn(0f, heightPx)) }
+                                        )
+                                    }
+                            ).semantics { contentDescription = if (redactText) "Page. Drag across words to mark them." else "Page. Drag to mark an area; tap a marked area to remove it." }
+                        ) {
+                            for (box in boxes) {
+                                val topLeft = Offset(box.left * size.width, box.top * size.height)
+                                val boxSize = androidx.compose.ui.geometry.Size(box.width() * size.width, box.height() * size.height)
+                                drawRect(red.copy(alpha = 0.12f), topLeft, boxSize)
+                                drawRect(red, topLeft, boxSize, style = Stroke(2.dp.toPx()))
+                            }
+                            val a = redactStart
+                            val b = redactEnd
+                            if (a != null && b != null) {
+                                drawRect(red, Offset(minOf(a.x, b.x), minOf(a.y, b.y)), androidx.compose.ui.geometry.Size(kotlin.math.abs(b.x - a.x), kotlin.math.abs(b.y - a.y)), style = Stroke(2.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 8f))))
+                            }
+                        }
+                    }
                     EditMode.Comment -> Box(
                         Modifier.fillMaxSize()
                             .pointerInput(Unit) { detectTapGestures { commentAt = it } }
                             .semantics { contentDescription = "Page. Tap where the comment goes." }
                     ) {
-                        commentAt?.let { at ->
+                        if (confirmApply) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { confirmApply = false },
+            title = { Text(RedactApplyTitle) },
+            text = { Text(RedactApplyMessage) },
+            confirmButton = { TextButton(onClick = { confirmApply = false; state.applyRedactions() }) { Text("Apply", color = MaterialTheme.colorScheme.error) } },
+            dismissButton = { TextButton(onClick = { confirmApply = false }) { Text("Cancel") } }
+        )
+    }
+    if (askLeave) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { askLeave = false },
+            title = { Text(RedactLeaveTitle) },
+            confirmButton = { TextButton(onClick = { askLeave = false; state.applyRedactions() }) { Text("Apply", color = MaterialTheme.colorScheme.error) } },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = { askLeave = false; state.discardRedactions() }) { Text("Discard") }
+                    TextButton(onClick = { askLeave = false }) { Text("Cancel") }
+                }
+            }
+        )
+    }
+
+    commentAt?.let { at ->
                             val density = LocalDensity.current
                             Icon(Icons.Outlined.ChatBubbleOutline, null, tint = Color(0xFF8A6A00), modifier = Modifier.offset { IntOffset((at.x - 12 * density.density).roundToInt(), (at.y - 12 * density.density).roundToInt()) }.size(24.dp))
                         }
@@ -365,6 +470,10 @@ fun PageEditor(
         })
     }
 }
+
+const val RedactApplyTitle = "Apply Redactions?"
+const val RedactApplyMessage = "Redacting removes everything under the boxes for good. Each redacted page becomes an image, so its text can no longer be selected or searched, and its form fields and marks are pressed into it."
+const val RedactLeaveTitle = "Apply the redactions?"
 
 /** Typing a comment: Done saves it (disabled while empty), Cancel leaves it. [onDelete] adds a Delete button. */
 @Composable
