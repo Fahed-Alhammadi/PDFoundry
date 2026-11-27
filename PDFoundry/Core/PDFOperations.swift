@@ -9,6 +9,7 @@ enum PDFoundryError: LocalizedError {
     case alreadyProtected(String)
     case wrongPassword
     case limitedAccess(String)
+    case protectedSource(String)
 
     var errorDescription: String? {
         switch self {
@@ -18,6 +19,7 @@ enum PDFoundryError: LocalizedError {
         case .nothingToSave: "There are no pages to save."
         case .alreadyProtected(let name): "“\(name)” is already protected with a password. To change it, open it, choose More › Remove Password, then protect it again."
         case .wrongPassword: "That password didn't work. Try again."
+        case .protectedSource(let name): "“\(name)” is password protected, so it can't be merged. Use More › Remove Password first."
         case .limitedAccess(let name): "“\(name)” has restrictions set by its owner, so PDFoundry can't change it or copy its pages."
         }
     }
@@ -61,6 +63,16 @@ enum PDFOperations {
             .ownerPasswordOption: password,
             .accessPermissionsOption: NSNumber(value: 0xFF),
         ]
+    }
+
+    /// Writes `document` into the existing file at `url`, keeping that file (it is overwritten, not replaced).
+    /// `PDFDocument.write(to:)` puts a new file in its place, and a file in "On My iPhone" then gets a new identity
+    /// in the Files app: the bookmark PDFoundry keeps for a file opened in place stops resolving ("The file doesn't
+    /// exist") and the file drops off the list. Overwriting also works when only the file, not its folder, may be
+    /// written (a file picked in Files). Callers wrap it in a file coordinator, so other apps see one change.
+    nonisolated static func writeInPlace(_ document: PDFDocument, to url: URL, password: String?) -> Bool {
+        guard let data = document.dataRepresentation(options: writeOptions(password: password)) else { return false }
+        return (try? data.write(to: url)) != nil
     }
 
     /// Reads a document with full access: unprotected, or unlocked with a password that is its owner password.
@@ -121,7 +133,7 @@ enum PDFOperations {
         let merged = PDFDocument()
         for (name, data) in sources {
             guard let source = data.flatMap(PDFDocument.init(data:)) else { throw PDFoundryError.unreadable(name) }
-            guard !source.isLocked else { throw PDFoundryError.locked(name) }
+            guard !source.isLocked else { throw PDFoundryError.protectedSource(name) }
             for index in 0..<source.pageCount {
                 guard let page = source.page(at: index)?.copy() as? PDFPage else { continue }
                 merged.insert(page, at: merged.pageCount)

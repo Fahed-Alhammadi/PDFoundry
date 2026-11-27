@@ -89,6 +89,22 @@ struct FormFieldTests {
         }
     }
 
+    @Test func aRadioButtonTickedInTheReaderSurvivesSaving() throws {
+        // PDFView changes only the button that is tapped, not the rest of its group.
+        let url = try formURL()
+        let document = try #require(PDFDocument(url: url))
+        let drinks = try #require(widgets(document)["drink"])
+        drinks[1].buttonWidgetState = .onState
+        #expect(document.write(to: url))
+
+        let reloaded = try #require(PDFDocument(url: url))
+        FormFields.repair(reloaded)
+        let saved = try #require(widgets(reloaded)["drink"])
+        #expect(saved.map { FormFields.value(of: $0) } == [.on(false), .on(true)])
+        #expect(FormFields.set(saved[0], value: .on(true)))
+        #expect(saved.map { FormFields.value(of: $0) } == [.on(true), .on(false)], "still one group")
+    }
+
     @Test func arabicFieldValueRoundTrips() throws {
         let url = try formURL()
         let document = try #require(PDFDocument(url: url))

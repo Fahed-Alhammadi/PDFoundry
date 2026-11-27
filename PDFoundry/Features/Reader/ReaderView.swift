@@ -17,6 +17,8 @@ struct ReaderView: View {
     @State private var password = ""
     @State private var wrongPassword = false
     @State private var askToRevert = false
+    @State private var showProtect = false
+    @State private var askToRemovePassword = false
     @State private var shared: SharedFile?
 
     init(url: URL) {
@@ -41,8 +43,9 @@ struct ReaderView: View {
                 }
             }
             .sheet(isPresented: Binding(get: { model.signingField != nil }, set: { if !$0 { model.signingField = nil } })) {
-                SignatureSheet { image in
-                    if let field = model.signingField { model.sign(field, with: image) }
+                // The field is taken now: the sheet clears `signingField` as it closes, before the pick arrives.
+                if let field = model.signingField {
+                    SignatureSheet { image in model.sign(field, with: image) }
                 }
             }
             .sheet(isPresented: $showInitials) {
@@ -75,6 +78,21 @@ struct ReaderView: View {
                 Button("Cancel", role: .cancel) {}
             } message: {
                 Text("Everything you changed since opening this document will be removed.")
+            }
+            .sheet(isPresented: $showProtect) {
+                ProtectSheet(name: model.title) { password in
+                    guard !model.protect(with: password) else { return nil }
+                    // Shown in this sheet, not again in the reader's own alert.
+                    let message = model.errorMessage
+                    model.errorMessage = nil
+                    return message ?? "The file couldn't be protected."
+                }
+            }
+            .confirmationDialog("Remove the password from “\(model.title)”?", isPresented: $askToRemovePassword, titleVisibility: .visible) {
+                Button("Remove Password", role: .destructive) { model.removePassword() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Anyone who has the file will be able to open it.")
             }
             .sheet(item: $shared) { file in
                 ActivityView(url: file.url)
@@ -260,6 +278,12 @@ struct ReaderView: View {
                 }
                 Button("Print", systemImage: "printer") { model.printDocument() }
                 if model.canEdit {
+                    Divider()
+                    if model.isProtected {
+                        Button("Remove Password", systemImage: "lock.open") { askToRemovePassword = true }
+                    } else {
+                        Button("Protect with Password", systemImage: "lock") { showProtect = true }
+                    }
                     Divider()
                     Button("Revert to Original", systemImage: "arrow.uturn.backward.circle", role: .destructive) { askToRevert = true }
                         .disabled(!model.canRevert)

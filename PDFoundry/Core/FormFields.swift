@@ -76,22 +76,29 @@ enum FormFields {
         let buttons = widgets(in: document).filter {
             $0.widgetFieldType == .button && [.checkBoxControl, .radioButtonControl].contains($0.widgetControlType)
         }
+        func saved(_ widget: PDFAnnotation) -> String? {
+            let value = (widget.value(forAnnotationKey: .widgetValue) as? String) ?? ""
+            return value.isEmpty || value == "Off" ? nil : value
+        }
         for (_, group) in Dictionary(grouping: buttons, by: { $0.fieldName ?? "" }) {
-            let names = group.map { $0.buttonWidgetStateString }
-            let shared = Set(names).count < names.count
-            guard group.count == 1 || shared else { continue }
-            for (index, widget) in group.enumerated() {
-                let saved = (widget.value(forAnnotationKey: .widgetValue) as? String) ?? ""
-                let isOn = !saved.isEmpty && saved != "Off" && widget.buttonWidgetState == .offState
-                if group.count == 1 {
-                    // A checkbox ticked under another name than the one PDFKit assumes.
-                    if isOn, saved != widget.buttonWidgetStateString { widget.buttonWidgetStateString = saved }
-                } else if isOn && !names.contains(saved) {
-                    widget.buttonWidgetStateString = saved
-                    widget.buttonWidgetState = .onState
-                } else {
-                    widget.buttonWidgetStateString = "Choice \(index + 1)"
-                }
+            if group.count == 1 {
+                // A checkbox ticked under another name than the one PDFKit assumes.
+                let box = group[0]
+                if let value = saved(box), box.buttonWidgetState == .offState { box.buttonWidgetStateString = value }
+                continue
+            }
+            // Radio buttons whose own name PDFKit lost read as the default "Yes".
+            let lost = group.filter { $0.buttonWidgetStateString == "Yes" }
+            guard !lost.isEmpty else { continue }
+            var named: PDFAnnotation?
+            if let value = group.lazy.compactMap(saved).first, !group.contains(where: { $0.buttonWidgetStateString == value }) {
+                // The saved value names the button that is on: the lost one that carries it, or the only lost one.
+                named = lost.first { saved($0) == value } ?? (lost.count == 1 ? lost[0] : nil)
+                named?.buttonWidgetStateString = value
+                named?.buttonWidgetState = .onState
+            }
+            for (index, widget) in group.enumerated() where widget !== named && widget.buttonWidgetStateString == "Yes" {
+                widget.buttonWidgetStateString = "Choice \(index + 1)"
             }
         }
     }

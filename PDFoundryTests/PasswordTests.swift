@@ -177,4 +177,30 @@ struct PasswordTests {
         #expect(reopened.pageCount == 2)
         #expect(Set(try FileManager.default.contentsOfDirectory(atPath: folder.path)) == ["Protected.pdf", "Plain.pdf"])
     }
+
+    @Test func aFileOpenedInPlaceStaysListedAfterItIsProtected() async throws {
+        let elsewhere = folder.appending(path: "Elsewhere")
+        try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        let store = DocumentStore(directory: folder.appending(path: "Library"), linksFile: folder.appending(path: "opened.json"), copyRoots: [])
+        let lease = elsewhere.appending(path: "Lease.pdf")
+        try plainData().write(to: lease)
+        try await store.open([lease])
+        #expect(store.items.count == 1)
+        func identity() throws -> Int? { try FileManager.default.attributesOfItem(atPath: lease.path)[.systemFileNumber] as? Int }
+        let before = try identity()
+
+        try await store.protect(lease, password: "pw")
+        #expect(try identity() == before, "the file is overwritten, not replaced, so its bookmark keeps working")
+        let model = ReaderModel(url: lease)
+        await model.load()
+        #expect(model.unlock(with: "pw"))
+        model.pagesDidChange() // a save from the reader
+        #expect(try identity() == before)
+
+        #expect(store.items.map(\.name) == ["Lease"])
+        #expect(store.items.first?.isLocked == true && store.items.first?.isExternal == true)
+        await store.refresh()
+        #expect(store.items.map(\.name) == ["Lease"], "still listed after a later refresh")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: elsewhere.path) == ["Lease.pdf"])
+    }
 }

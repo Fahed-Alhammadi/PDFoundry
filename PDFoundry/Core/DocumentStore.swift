@@ -408,7 +408,7 @@ final class DocumentStore {
             var error: NSError?
             // Coordinated, as the reader's saves are, so iCloud Drive and other apps see one complete change.
             NSFileCoordinator().coordinate(writingItemAt: url, options: .forReplacing, error: &error) { target in
-                written = document.write(to: target, withOptions: PDFOperations.writeOptions(password: password))
+                written = PDFOperations.writeInPlace(document, to: target, password: password)
             }
             return written
         }
