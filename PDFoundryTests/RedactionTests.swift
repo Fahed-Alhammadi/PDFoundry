@@ -69,7 +69,14 @@ struct RedactionTests {
         let needle = Data(word.utf8)
         // Text written as UTF-16 (annotation contents, field values) is looked for too.
         let wide = word.data(using: .utf16BigEndian)!
-        return everything(in: data).contains { $0.range(of: needle) != nil || $0.range(of: wide) != nil }
+        // And written as hex strings (<5345…>), as some writers do.
+        let hex = [needle, wide].flatMap { bytes -> [Data] in
+            let upper = bytes.map { String(format: "%02X", $0) }.joined()
+            return [Data(upper.utf8), Data(upper.lowercased().utf8)]
+        }
+        return everything(in: data).contains { part in
+            ([needle, wide] + hex).contains { part.range(of: $0) != nil }
+        }
     }
 
     @Test func theScannerFindsTheWordBeforeRedaction() throws {
@@ -197,6 +204,70 @@ struct RedactionTests {
     static func mentions(_ text: String?) -> Bool {
         guard let text else { return false }
         return text.range(of: secret) != nil
+    }
+
+    /// A tagged form with the secret in every place a page's words can hide: the page text, a marked-content
+    /// /ActualText, a structure element's /Alt and /ActualText, a field value whose widget is on the page, /CO, XFA,
+    /// a comment, plus an outline entry and a named destination that point at the page.
+    static func hidingPlaces() -> Data {
+        let o = RawPDF.object
+        let page = "BT /F1 24 Tf 90 700 Td (Cover) Tj ET"
+        let secretPage = "/Span << /MCID 0 /ActualText (SECRET-MC) >> BDC BT /F1 24 Tf 90 700 Td (SECRET-PAGE) Tj ET EMC"
+        return RawPDF.build([
+            1: o("<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [20 0 R] /CO [20 0 R] /XFA 30 0 R /DA (/Helv 12 Tf 0 g) /DR << /Font << /Helv 9 0 R >> >> >> /StructTreeRoot 40 0 R /MarkInfo << /Marked true >> /Outlines 50 0 R /Names << /Dests << /Names [(chap2) [4 0 R /Fit]] >> >> >>"),
+            2: o("<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>"),
+            3: o("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 6 0 R /Resources << /Font << /F1 9 0 R >> >> >>"),
+            4: o("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 7 0 R /Resources << /Font << /F1 9 0 R >> >> /Annots [21 0 R 22 0 R] /StructParents 0 >>"),
+            5: o("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 8 0 R /Resources << /Font << /F1 9 0 R >> >> >>"),
+            6: RawPDF.stream("", Data(page.utf8)),
+            7: RawPDF.stream("", Data(secretPage.utf8)),
+            8: RawPDF.stream("", Data("BT /F1 24 Tf 90 700 Td (Last) Tj ET".utf8)),
+            9: o("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"),
+            20: o("<< /FT /Tx /T (acct) /V (SECRET-FIELD) /DA (/Helv 12 Tf 0 g) /Kids [21 0 R] >>"),
+            21: o("<< /Type /Annot /Subtype /Widget /Parent 20 0 R /Rect [90 600 300 620] /P 4 0 R /F 4 >>"),
+            22: o("<< /Type /Annot /Subtype /Text /Rect [400 600 424 624] /Contents (SECRET-NOTE) /P 4 0 R >>"),
+            30: RawPDF.stream("", Data("<xdp:xdp><field>SECRET-XFA</field></xdp:xdp>".utf8)),
+            40: o("<< /Type /StructTreeRoot /K 41 0 R /ParentTree 43 0 R >>"),
+            41: o("<< /Type /StructElem /S /Document /P 40 0 R /K [42 0 R] >>"),
+            42: o("<< /Type /StructElem /S /P /P 41 0 R /Pg 4 0 R /K 0 /Alt (SECRET-ALT) /ActualText (SECRET-ACTUAL) >>"),
+            43: o("<< /Nums [0 [42 0 R]] >>"),
+            50: o("<< /Type /Outlines /First 51 0 R /Last 51 0 R /Count 1 >>"),
+            51: o("<< /Title (Chapter two) /Parent 50 0 R /Dest [4 0 R /Fit] >>"),
+        ])
+    }
+
+    @Test func nothingOfARedactedPageIsLeftAnywhereInTheFile() async throws {
+        let url = try MarkupFixture.write(Self.hidingPlaces(), named: "Tagged.pdf", in: folder)
+        let places = ["SECRET-PAGE", "SECRET-MC", "SECRET-ALT", "SECRET-ACTUAL", "SECRET-FIELD", "SECRET-XFA", "SECRET-NOTE"]
+        let before = try Data(contentsOf: url)
+        for place in places { #expect(Self.contains(place, inFile: before), "the fixture has \(place)") }
+
+        let (model, _) = await MarkupFixture.open(url)
+        model.addRedaction(CGRect(x: 0, y: 0, width: 612, height: 792), page: 1)
+        model.applyRedactions()
+
+        let data = try Data(contentsOf: url)
+        for place in places { #expect(!Self.contains(place, inFile: data), "\(place) is gone") }
+        #expect(!Self.contains("SECRET", inFile: data))
+        let saved = try #require(PDFDocument(data: data))
+        #expect(saved.pageCount == 3)
+        #expect(saved.page(at: 0)?.string?.contains("Cover") == true)
+        #expect(saved.page(at: 2)?.string?.contains("Last") == true)
+    }
+
+    @Test func largePagesAreRenderedAtALowerResolution() throws {
+        #expect(Redaction.dpi(for: CGSize(width: 612, height: 792)) == 300)
+        let a0 = CGSize(width: 2384, height: 3370)
+        let dpi = Redaction.dpi(for: a0)
+        #expect(dpi < 300)
+        let pixels = (a0.width * dpi / 72) * (a0.height * dpi / 72)
+        #expect(pixels <= Redaction.maximumPixels)
+
+        let data = MarkupFixture.textPDF(["Huge \(Self.secret) poster"], size: a0)
+        let document = try #require(PDFDocument(data: data))
+        let page = try #require(document.page(at: 0))
+        let redacted = try #require(Redaction.redactedPage(page, boxes: [CGRect(x: 80, y: 3200, width: 800, height: 60)]))
+        #expect(redacted.bounds(for: .mediaBox).size == a0)
     }
 
     @Test func discardingLeavesTheFileAlone() async throws {

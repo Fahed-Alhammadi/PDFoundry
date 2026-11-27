@@ -7,6 +7,15 @@ import UIKit
 /// the whole file from the document as it now is, so the old page's content, fonts and marks are gone from it.
 enum Redaction {
     static let dpi: CGFloat = 300
+    /// About 17 million pixels (68 MB in memory): a Letter or A4 page fits at 300 dpi; larger pages get a lower one.
+    static let maximumPixels: CGFloat = 17_000_000
+
+    /// The resolution a page of `size` points is redacted at: 300 dpi, or less so the picture stays under the cap.
+    static func dpi(for size: CGSize) -> CGFloat {
+        let full = (size.width * dpi / 72) * (size.height * dpi / 72)
+        guard full > maximumPixels, full > 0 else { return dpi }
+        return (dpi * (maximumPixels / full).squareRoot()).rounded(.down)
+    }
 
     /// Replaces every page that has boxes in `boxes` (page index → boxes in page space). Returns `document`.
     @discardableResult
@@ -53,7 +62,7 @@ enum Redaction {
     /// The page's media box, unrotated, drawn with its marks and fields, with the boxes painted black.
     private static func picture(of page: PDFPage, boxes: [CGRect]) -> CGImage? {
         let media = page.bounds(for: .mediaBox)
-        let scale = dpi / 72
+        let scale = dpi(for: media.size) / 72
         let width = Int((media.width * scale).rounded()), height = Int((media.height * scale).rounded())
         // Opaque RGB: the picture has no transparency to keep.
         guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
