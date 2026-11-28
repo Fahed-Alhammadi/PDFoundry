@@ -1,6 +1,6 @@
 # PDFoundry: App Store listing (English, U.S.)
 
-Draft for version 1.0.0. Copy each field into App Store Connect.
+Version 1.1.0 (the first release; 1.0.0 was withdrawn from review before Apple looked at it). Copy each field into App Store Connect.
 
 ## App information
 
@@ -78,7 +78,7 @@ PDFoundry is open source under the MIT License.
 
 ## What's New in This Version
 
-The first release of PDFoundry. Read, merge, edit and sign PDF documents on your iPhone and iPad.
+(Not shown for a first release.)
 
 ## App Privacy (privacy "nutrition" labels)
 
@@ -95,15 +95,14 @@ The first release of PDFoundry. Read, merge, edit and sign PDF documents on your
 PDFoundry works fully on the device. It has no account, no server and makes no network requests.
 
 How to test:
-1. Launch the app. The library already holds a sample document, "Welcome to PDFoundry". No setup is needed.
+1. Launch the app. The Documents tab already holds a sample document, "Welcome to PDFoundry". No setup is needed.
 2. Read: tap the document to open it. Tap the magnifying glass to search.
-3. Mark up: press and hold any text to select it, then tap the highlighter in the bottom bar and pick a colour.
-4. Add text: tap "Aa", type a few words, tap Add, drag the box, then tap Place.
-5. Draw: tap the pencil, draw on the page, tap Done.
-6. Sign: tap the signature button, draw a signature, tap "Use Signature", drag it into place, tap Place.
-7. Edit pages: tap "…" then "Organize Pages". Select a page to rotate, duplicate, extract or delete it.
-8. Merge: go back to the library, open the sample's context menu (press and hold) and choose Duplicate. Tap Select, choose both documents, tap the merge button, then Merge.
-9. Delete: press and hold a document and choose Delete.
+3. Markup: tap Markup in the bottom bar. Press and hold text to select it, then pick Highlight. Try Shapes (draw a rectangle), Comment, or Draw. Tap a placed shape later to move, resize or delete it.
+4. Fill & Sign: tap Fill & Sign, then Signature. Draw a signature, use it, drag it into place and tap Place. Text, Date and the check mark work the same way.
+5. Redact: in Markup choose Redact, drag a box over a line of text, then tap Apply. Search for a word from that line: it is gone.
+6. Pages: tap Pages to reorder, rotate, duplicate, extract or delete pages.
+7. Tools tab: Merge PDFs (first press and hold the sample in Documents and choose Duplicate, then pick both and tap Merge), Split PDF, Extract Pages, Compress, Export as Images, Protect with Password, Make Searchable, Page Numbers and Watermark.
+8. Delete: in Documents, press and hold a document and choose Delete.
 
 Permissions: the camera and adding to the photo library. The system asks for the camera only when the user taps "+" then "Scan Document", and for adding to the photo library only when the user taps Save Image in the share sheet after Tools > Export as Images. There is no onboarding or pre-permission screen. Photos are chosen with the system photo picker, which needs no permission.
 
